@@ -8,6 +8,10 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [discoveryInterval, setDiscoveryInterval] = useState(settings.discovery_interval_seconds || 600);
   const [autoUpdateCli, setAutoUpdateCli] = useState(settings.auto_update_cli !== false);
   const [freeOnly, setFreeOnly] = useState(settings.free_only !== false);
+  const [smartFallback, setSmartFallback] = useState(settings.smart_fallback !== false);
+  const [maxRetries, setMaxRetries] = useState(settings.max_retries || 3);
+  const [upstreamZenKey, setUpstreamZenKey] = useState(settings.upstream_zen_key || '');
+  const [proxies, setProxies] = useState(Array.isArray(settings.proxies) ? settings.proxies.join('\n') : (settings.proxies || ''));
   const [globalRpm, setGlobalRpm] = useState(settings.global_rpm_limit || 0);
   const [globalTpm, setGlobalTpm] = useState(settings.global_tpm_limit || 0);
   const [isSaving, setIsSaving] = useState(false);
@@ -25,6 +29,10 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         discovery_interval_seconds: parseInt(discoveryInterval, 10),
         auto_update_cli: autoUpdateCli,
         free_only: freeOnly,
+        smart_fallback: smartFallback,
+        max_retries: parseInt(maxRetries, 10) || 3,
+        upstream_zen_key: upstreamZenKey.trim(),
+        proxies: proxies.split('\n').map(p => p.trim()).filter(Boolean),
         global_rpm_limit: parseInt(globalRpm, 10),
         global_tpm_limit: parseInt(globalTpm, 10)
       });
@@ -172,6 +180,75 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             checked={freeOnly}
             onChange={setFreeOnly}
           />
+        </div>
+
+        {/* Smart Failover Toggle */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.5rem', borderTop: '1px solid var(--border)' }}>
+          <div>
+            <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Zero-Drop Smart Failover</div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
+              Automatically fails over to active equivalent models on 403 / 429 / 5xx upstream hiccups
+            </div>
+          </div>
+          <CustomToggle
+            checked={smartFallback}
+            onChange={setSmartFallback}
+          />
+        </div>
+
+        {/* Max Retries */}
+        <div>
+          <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.35rem' }}>
+            Max Automatic Failover Attempts
+          </label>
+          <input
+            type="number"
+            className="input-field"
+            style={{ width: '100%' }}
+            value={maxRetries}
+            onChange={e => setMaxRetries(e.target.value)}
+            min="1"
+            max="6"
+            required
+          />
+          <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
+            Number of transparent upstream retry and fallback hops before returning an error.
+          </span>
+        </div>
+
+        {/* Upstream Zen Key (Optional) */}
+        <div style={{ paddingTop: '0.5rem', borderTop: '1px solid var(--border)' }}>
+          <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
+            Upstream Zen Key (Optional)
+          </label>
+          <input
+            type="text"
+            className="input-field"
+            style={{ width: '100%', fontFamily: 'monospace' }}
+            placeholder="Leave empty for 100% Free Anonymous Lane"
+            value={upstreamZenKey}
+            onChange={e => setUpstreamZenKey(e.target.value)}
+          />
+          <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
+            Bypasses anonymous IP quotas completely when provided. Leave blank to stay 100% anonymous & free.
+          </span>
+        </div>
+
+        {/* Upstream Proxies (Optional) */}
+        <div>
+          <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
+            Upstream Proxies / Rotating Pool (Optional)
+          </label>
+          <textarea
+            className="input-field"
+            style={{ width: '100%', height: '70px', fontFamily: 'monospace', resize: 'vertical' }}
+            placeholder="http://user:pass@host:port (one per line, supports rotating proxy pools)"
+            value={proxies}
+            onChange={e => setProxies(e.target.value)}
+          />
+          <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
+            Rotates exit IPs on rate limits or failures. Supports HTTP, HTTPS, and rotating pools.
+          </span>
         </div>
 
         {/* Global Rate Limits */}

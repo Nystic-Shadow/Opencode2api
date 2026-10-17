@@ -1,4 +1,6 @@
+const http = require('http');
 const https = require('https');
+const tls = require('tls');
 const crypto = require('crypto');
 const config = require('./config');
 const identity = require('./identity');
@@ -8,28 +10,101 @@ const keys = require('./keys');
 const metrics = require('./metrics');
 
 // High-performance keepAlive connection agent: keeps TLS sockets hot, eliminates handshake lag
+// Explicitly enforce IPv4 (family: 4) to avoid Cloudflare IPv6 /64 CIDR rate limits on opencode.ai
 const upstreamAgent = new https.Agent({
   keepAlive: true,
   maxSockets: 128,
   maxFreeSockets: 32,
   timeout: 60000,
-  keepAliveMsecs: 30000
+  keepAliveMsecs: 30000,
+  family: 4
 });
+
+let proxyIndex = 0;
+
+/**
+ * Returns either a direct keepAlive agent or a proxy tunnel agent based on config/environment.
+ * If retrying and configured proxies fail, falls back directly to direct IPv4 agent.
+ */
+function getUpstreamAgent(attempt = 1) {
+  const envProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  const configuredProxies = config.get('proxies') || [];
+  const proxyList = Array.isArray(configuredProxies) && configuredProxies.length > 0
+    ? configuredProxies
+    : (envProxy ? [envProxy] : []);
+
+  if (proxyList.length === 0) {
+    return upstreamAgent;
+  }
+
+  // If retrying past the number of proxies, fall back to direct IPv4
+  if (attempt > proxyList.length) {
+    return upstreamAgent;
+  }
+
+  // Rotate through configured proxies
+  const proxyUrlStr = proxyList[proxyIndex % proxyList.length];
+  proxyIndex++;
+
+  try {
+    const proxyUrl = new URL(proxyUrlStr);
+    return new https.Agent({
+      keepAlive: true,
+      family: 4,
+      createConnection(options, callback) {
+        const connectReq = http.request({
+          host: proxyUrl.hostname,
+          port: proxyUrl.port || 80,
+          method: 'CONNECT',
+          path: `${options.host}:${options.port || 443}`,
+          headers: {
+            Host: `${options.host}:${options.port || 443}`,
+            ...(proxyUrl.username ? {
+              'Proxy-Authorization': 'Basic ' + Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString('base64')
+            } : {})
+          },
+          timeout: 10000
+        });
+        connectReq.on('timeout', () => {
+          connectReq.destroy(new Error(`Proxy CONNECT to ${proxyUrl.host} timed out`));
+        });
+        connectReq.on('connect', (res, socket, head) => {
+          if (res.statusCode !== 200) {
+            callback(new Error(`Proxy CONNECT returned HTTP ${res.statusCode}`));
+            return;
+          }
+          const tlsSocket = tls.connect({
+            socket: socket,
+            servername: options.servername || options.host
+          }, () => {
+            callback(null, tlsSocket);
+          });
+          tlsSocket.on('error', err => callback(err));
+        });
+        connectReq.on('error', err => callback(err));
+        connectReq.end();
+      }
+    });
+  } catch (err) {
+    console.error('[ProxyAgent] Failed to create proxy agent, falling back to direct:', err.message);
+    return upstreamAgent;
+  }
+}
 
 // Resilient fallback cascades by model family & capability
 const FALLBACK_CASCADES = {
   // Multimodal Vision models
-  'mimo-v2.6-flash': ['nemotron-3.5-super-vl', 'longcat-2.5-preview'],
-  'nemotron-3.5-super-vl': ['mimo-v2.6-flash', 'longcat-2.5-preview'],
-  'longcat-2.5-preview': ['nemotron-3.5-super-vl', 'mimo-v2.6-flash'],
+  'mimo-v2.6-flash': ['nemotron-3.5-super-vl', 'longcat-2.5-preview', 'beam', 'deepseek-v4.1-flash'],
+  'nemotron-3.5-super-vl': ['mimo-v2.6-flash', 'longcat-2.5-preview', 'beam', 'deepseek-v4.1-flash'],
+  'longcat-2.5-preview': ['nemotron-3.5-super-vl', 'mimo-v2.6-flash', 'beam', 'deepseek-v4.1-flash'],
 
   // High performance text / reasoning models
-  'glm-5.3-flash': ['deepseek-v4.1-flash', 'beam', 'space-bunny', 'big-pickle'],
-  'deepseek-v4.1-flash': ['beam', 'space-bunny', 'big-pickle'],
-  'beam': ['deepseek-v4.1-flash', 'space-bunny', 'big-pickle'],
-  'nemotron-3.5-lightning': ['beam', 'deepseek-v4.1-flash', 'space-bunny'],
-  'big-pickle': ['deepseek-v4.1-flash', 'beam', 'space-bunny'],
-  'space-bunny': ['deepseek-v4.1-flash', 'beam']
+  'glm-5.3-flash': ['beam', 'deepseek-v4.1-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle'],
+  'deepseek-v4.1-flash': ['beam', 'glm-5.3-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle'],
+  'beam': ['deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle'],
+  'nemotron-3.5-lightning': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'space-bunny'],
+  'big-pickle': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'space-bunny'],
+  'space-bunny': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash']
 };
 
 /**
@@ -142,7 +217,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         path: '/inference/openai/v1/chat/completions',
         method: 'POST',
         headers: upstreamHeaders,
-        agent: upstreamAgent,
+        agent: getUpstreamAgent(attempt),
+        family: 4,
         timeout: requestTimeout
       }, (upstreamRes) => {
         // If upstream error (non-200), buffer body to inspect retryability
@@ -369,7 +445,13 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
     // Upstream failed this attempt — inspect if we can retry or failover
     const isUnavailable = attemptResult.statusCode === 429 ||
-                          (typeof attemptResult.body === 'string' && attemptResult.body.includes('unavailable')) ||
+                          attemptResult.statusCode === 403 ||
+                          (typeof attemptResult.body === 'string' && (
+                            attemptResult.body.includes('unavailable') ||
+                            attemptResult.body.includes('FreeTierError') ||
+                            attemptResult.body.includes('FreeUsageLimitError') ||
+                            attemptResult.body.includes('Rate limit exceeded')
+                          )) ||
                           attemptResult.statusCode >= 500;
 
     if (attempt <= maxRetries) {
@@ -398,7 +480,17 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         keyId: keyObj.id
       });
       res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
-      res.end(attemptResult.body || JSON.stringify({ error: { message: `Upstream gateway error (Status ${attemptResult.statusCode})` } }));
+      let errPayload = attemptResult.body;
+      if (attemptResult.statusCode === 403 && typeof attemptResult.body === 'string' && attemptResult.body.includes('FreeTierError')) {
+        errPayload = JSON.stringify({
+          error: {
+            message: "OpenCode Free Tier capacity limit reached for this IP window. Rate limits automatically reset shortly. You can also configure an upstream Zen key or proxy in Settings to continue without interruption.",
+            type: "free_tier_rate_limit",
+            code: 403
+          }
+        });
+      }
+      res.end(errPayload || JSON.stringify({ error: { message: `Upstream gateway error (Status ${attemptResult.statusCode})` } }));
       return;
     }
   }
@@ -509,7 +601,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         path: '/inference/openai/v1/chat/completions',
         method: 'POST',
         headers: upstreamHeaders,
-        agent: upstreamAgent,
+        agent: getUpstreamAgent(attempt),
+        family: 4,
         timeout: requestTimeout
       }, (upstreamRes) => {
         if (upstreamRes.statusCode !== 200) {
@@ -770,7 +863,13 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
     // Upstream error on Anthropic request
     const isUnavailable = attemptResult.statusCode === 429 ||
-                          (typeof attemptResult.body === 'string' && attemptResult.body.includes('unavailable')) ||
+                          attemptResult.statusCode === 403 ||
+                          (typeof attemptResult.body === 'string' && (
+                            attemptResult.body.includes('unavailable') ||
+                            attemptResult.body.includes('FreeTierError') ||
+                            attemptResult.body.includes('FreeUsageLimitError') ||
+                            attemptResult.body.includes('Rate limit exceeded')
+                          )) ||
                           attemptResult.statusCode >= 500;
 
     if (attempt <= maxRetries) {
@@ -794,7 +893,17 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         keyId: keyObj.id
       });
       res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
-      res.end(attemptResult.body || JSON.stringify({ error: { type: 'api_error', message: `Upstream gateway error (${attemptResult.statusCode})` } }));
+      let errPayload = attemptResult.body;
+      if (attemptResult.statusCode === 403 && typeof attemptResult.body === 'string' && attemptResult.body.includes('FreeTierError')) {
+        errPayload = JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'rate_limit_error',
+            message: "OpenCode Free Tier capacity limit reached for this IP window. Rate limits automatically reset shortly. You can also configure an upstream Zen key or proxy in Settings to continue without interruption."
+          }
+        });
+      }
+      res.end(errPayload || JSON.stringify({ error: { type: 'api_error', message: `Upstream gateway error (${attemptResult.statusCode})` } }));
       return;
     }
   }

@@ -34,15 +34,17 @@ const DEFAULT_CONFIG = {
   port: parseInt(process.env.PORT, 10) || 8080,
   admin_username: process.env.DASHBOARD_USER || 'admin',
   admin_password: process.env.DASHBOARD_PASS || 'admin123',
-  client_version: '2.0.29',
+  client_version: '2.0.32',
   discovery_interval_seconds: 600,
   auto_update_cli: true,
   free_only: true,
   global_rpm_limit: 0, // 0 = unlimited
   global_tpm_limit: 0, // 0 = unlimited
-  smart_fallback: true, // Auto-failover to healthy equivalent model on 429/503
-  max_retries: 2, // Auto-retry attempts on transient upstream drops
+  smart_fallback: true, // Auto-failover to healthy equivalent model on 403/429/503
+  max_retries: 3, // Auto-retry attempts on transient upstream drops
   request_timeout_ms: 60000,
+  upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
+  proxies: process.env.PROXIES ? process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean) : [],
   upstream_models_url: 'https://opencode.ai/zen/v1/models',
   upstream_metadata_url: 'https://models.opencode.ai/api.json',
   upstream_inference_url: 'https://opencode.ai/inference/openai/v1/chat/completions'

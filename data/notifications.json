@@ -1,1 +1,10 @@
-[]
+[
+  {
+    "id": "notif_bb1c05cf-1ea3-4dcf-aac6-25f3465a2375",
+    "title": "API Key Created",
+    "message": "Created key \"123\" (O2P-25c77f...)",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T16:32:24.134Z"
+  }
+]

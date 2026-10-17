@@ -86,6 +86,7 @@ class ModelDiscoveryService {
         port: u.port || 443,
         path: u.pathname + u.search,
         method: 'GET',
+        family: 4,
         headers: {
           'Accept': 'application/json',
           'User-Agent': `opencode/latest/${config.get('client_version')}/cli`,

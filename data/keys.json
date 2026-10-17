@@ -1,16 +1,18 @@
 [
   {
-    "id": "key_master",
-    "name": "Master Admin Key",
-    "key": "O2P-master-key",
+    "id": "key_52676b3e-41ef-4116-83b6-13bc85354866",
+    "name": "123",
+    "key": "O2P-25c77fbb0787ca9d5db053f0153bda9b",
     "rpm_limit": 0,
     "tpm_limit": 0,
     "total_tokens_budget": 0,
     "is_unlimited": true,
+    "expires_at": null,
+    "allowed_models": [],
     "enabled": true,
-    "created_at": "2026-10-17T15:41:29.426Z",
-    "last_used": "2026-10-17T15:42:07.145Z",
-    "requests_count": 7,
-    "tokens_count": 10524
+    "created_at": "2026-10-17T16:32:24.133Z",
+    "last_used": null,
+    "requests_count": 0,
+    "tokens_count": 0
   }
 ]

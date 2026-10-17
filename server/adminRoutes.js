@@ -149,8 +149,18 @@ async function handleAdminRoute(req, res, pathname) {
     if (body.discovery_interval_seconds !== undefined) updates.discovery_interval_seconds = parseInt(body.discovery_interval_seconds, 10) || 600;
     if (body.auto_update_cli !== undefined) updates.auto_update_cli = !!body.auto_update_cli;
     if (body.free_only !== undefined) updates.free_only = !!body.free_only;
+    if (body.smart_fallback !== undefined) updates.smart_fallback = !!body.smart_fallback;
+    if (body.max_retries !== undefined) updates.max_retries = parseInt(body.max_retries, 10) || 3;
     if (body.global_rpm_limit !== undefined) updates.global_rpm_limit = parseInt(body.global_rpm_limit, 10) || 0;
     if (body.global_tpm_limit !== undefined) updates.global_tpm_limit = parseInt(body.global_tpm_limit, 10) || 0;
+    if (body.upstream_zen_key !== undefined) updates.upstream_zen_key = body.upstream_zen_key.trim();
+    if (body.proxies !== undefined) {
+      if (Array.isArray(body.proxies)) {
+        updates.proxies = body.proxies.map(p => typeof p === 'string' ? p.trim() : '').filter(Boolean);
+      } else if (typeof body.proxies === 'string') {
+        updates.proxies = body.proxies.split(/[\n,]/).map(p => p.trim()).filter(Boolean);
+      }
+    }
 
     config.update(updates);
     notifications.add('Settings Updated', 'System gateway settings were saved successfully.', 'info');

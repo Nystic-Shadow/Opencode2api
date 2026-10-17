@@ -1,0 +1,161 @@
+{
+  "last_synced": "2026-10-17T15:41:31.706Z",
+  "count": 9,
+  "models": [
+    {
+      "id": "big-pickle",
+      "upstream_id": "big-pickle",
+      "name": "Big Pickle",
+      "description": "Reasoning model for deliberate analysis, multi-step problem solving, and tool use",
+      "context_window": 200000,
+      "max_output": 32000,
+      "modalities": [
+        "text"
+      ],
+      "supports_vision": false,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "is_free": true,
+      "family": "big-pickle"
+    },
+    {
+      "id": "beam",
+      "upstream_id": "beam-free",
+      "name": "Beam Free",
+      "description": "Sparse mixture-of-experts reasoning model with 23B active parameters for coding and agentic workflows",
+      "context_window": 1048576,
+      "max_output": 131072,
+      "modalities": [
+        "text"
+      ],
+      "supports_vision": false,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "is_free": true,
+      "family": "beam"
+    },
+    {
+      "id": "mimo-v2.6-flash",
+      "upstream_id": "mimo-v2.6-flash-free",
+      "name": "MiMo-V2.6-Flash Free",
+      "description": "MiMo Flash model for multimodal coding agents and long-context automation",
+      "context_window": 200000,
+      "max_output": 32000,
+      "modalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supports_vision": true,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "is_free": true,
+      "family": "mimo"
+    },
+    {
+      "id": "nemotron-3.5-super-vl",
+      "upstream_id": "nemotron-3.5-super-vl-free",
+      "name": "Nemotron 3.5 Super VL Free",
+      "description": "NVIDIA vision-language reasoning model for text, image, and video understanding and agentic tool use",
+      "context_window": 1048576,
+      "max_output": 131072,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "supports_vision": true,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "is_free": true,
+      "family": "nemotron-free"
+    },
+    {
+      "id": "nemotron-3.5-lightning",
+      "upstream_id": "nemotron-3.5-lightning-free",
+      "name": "Nemotron 3.5 Lightning Free",
+      "description": "Fast NVIDIA Nemotron MoE for reliable agentic tasks across enterprise workloads",
+      "context_window": 262144,
+      "max_output": 262144,
+      "modalities": [
+        "text"
+      ],
+      "supports_vision": false,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "is_free": true,
+      "family": "nemotron-free"
+    },
+    {
+      "id": "longcat-2.5-preview",
+      "upstream_id": "longcat-2.5-preview-free",
+      "name": "LongCat 2.5 Preview Free",
+      "description": "Meituan's multimodal reasoning model for coding and agent tasks, with image understanding and a 1M-token context window",
+      "context_window": 1000000,
+      "max_output": 131072,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "supports_vision": true,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "is_free": true,
+      "family": "longcat"
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "upstream_id": "deepseek-v4.1-flash-free",
+      "name": "DeepSeek V4.1 Flash Free",
+      "description": "DeepSeek V4.1 Flash model for reasoning and agentic coding",
+      "context_window": 200000,
+      "max_output": 32000,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "supports_vision": true,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "is_free": true,
+      "family": "deepseek-flash"
+    },
+    {
+      "id": "glm-5.3-flash",
+      "upstream_id": "glm-5.3-flash-free",
+      "name": "GLM-5.3-Flash Free",
+      "description": "Native multimodal GLM model for efficient coding and long-horizon agent tasks",
+      "context_window": 200000,
+      "max_output": 32000,
+      "modalities": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "supports_vision": true,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "is_free": true,
+      "family": "glm-flash"
+    },
+    {
+      "id": "space-bunny",
+      "upstream_id": "space-bunny-free",
+      "name": "Space Bunny Free",
+      "description": "Anonymous preview reasoning model for coding, agentic tasks, tool use, and multimodal input",
+      "context_window": 1048576,
+      "max_output": 524288,
+      "modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supports_vision": true,
+      "supports_reasoning": true,
+      "supports_tools": true,
+      "is_free": true,
+      "family": "opencode"
+    }
+  ]
+}

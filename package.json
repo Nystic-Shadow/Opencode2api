@@ -1,0 +1,23 @@
+{
+  "name": "opencode2api",
+  "version": "1.0.0",
+  "description": "High-performance OpenAI and Anthropic compatible API gateway for OpenCode free tier",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "build": "npm --prefix client run build",
+    "dev:client": "npm --prefix client run dev"
+  },
+  "keywords": [
+    "opencode",
+    "openai",
+    "anthropic",
+    "gateway",
+    "proxy",
+    "llm",
+    "deepseek",
+    "nemotron"
+  ],
+  "author": "",
+  "license": "MIT"
+}

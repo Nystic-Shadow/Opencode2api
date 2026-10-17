@@ -1,0 +1,16 @@
+[
+  {
+    "id": "key_master",
+    "name": "Master Admin Key",
+    "key": "O2P-master-key",
+    "rpm_limit": 0,
+    "tpm_limit": 0,
+    "total_tokens_budget": 0,
+    "is_unlimited": true,
+    "enabled": true,
+    "created_at": "2026-10-17T15:41:29.426Z",
+    "last_used": "2026-10-17T15:42:07.145Z",
+    "requests_count": 7,
+    "tokens_count": 10524
+  }
+]

@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  gateway:
+    build: .
+    container_name: opencode2api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - DASHBOARD_USER=admin
+      - DASHBOARD_PASS=admin123
+    volumes:
+      - ./data:/app/data

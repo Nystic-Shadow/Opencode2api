@@ -76,10 +76,12 @@ class CloudflareWarpManager {
     if (!this.isAvailable()) {
       return {
         available: false,
+        installed: false,
         status: 'Not Installed',
         mode: 'none',
         port: 40000,
-        connected: false
+        connected: false,
+        running: false
       };
     }
 
@@ -109,9 +111,11 @@ class CloudflareWarpManager {
 
       const result = {
         available: true,
+        installed: true,
         cliPath: this.cliPath,
         status: isConnected ? 'Connected' : 'Disconnected',
         connected: isConnected,
+        running: isConnected,
         mode: opMode,
         port: port,
         reason: statusJson?.reason || 'OK'
@@ -123,8 +127,10 @@ class CloudflareWarpManager {
     } catch (err) {
       return {
         available: true,
+        installed: true,
         status: 'Error',
         connected: false,
+        running: false,
         error: err.message,
         port: config.get('warp_port') || 40000
       };

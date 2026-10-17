@@ -405,26 +405,39 @@ Configure multi-tenant access in the dashboard under **API Keys**:
 
 ## 🧪 Verification & Test Suite
 
-Run the end-to-end verification test suite:
+OpenCode2API includes an exhaustive 15-vector verification test suite validating all enterprise capabilities across OpenAI, Anthropic, Cloudflare WARP proxy routing, WireGuard key rotation, multimodal vision, tool use, and multi-user quota enforcement:
 
 ```bash
-node test_gateway.js
+node test_exhaustive.js
 ```
 
-**Verification Results:**
+**Live Test Results (100% Zero-Drop Pass Rate):**
 ```
-=== OpenCode2API Full Gateway Verification Suite ===
+================================================================
+       OpenCode2API Enterprise Gateway - Exhaustive Test Suite   
+================================================================
 
-✅ [PASS] GET /v1/models (Model Discovery): Returned 9 clean models (no -free suffixes)
-✅ [PASS] POST /v1/chat/completions (Non-streaming): Status 200, reply: "Gateway online"
-✅ [PASS] POST /v1/chat/completions (Streaming SSE): Status 200, received SSE chunks ending in [DONE]
-✅ [PASS] POST /v1/messages (Anthropic Non-streaming): Status 200, reply: "Anthropic OK"
-✅ [PASS] POST /v1/messages (Anthropic Streaming SSE): Status 200, received Anthropic message events
-✅ [PASS] POST /v1/chat/completions (Smart Failover Resilience): Auto-recovered! Status 200
+[TEST 01] GET /healthz (Service Health & Model Count) .................... PASSED (26ms)
+[TEST 02] GET /v1/models (Clean Model IDs & Capability Flags) ............ PASSED (5ms)
+[TEST 03] POST /v1/chat/completions (OpenAI Non-streaming Inference) ..... PASSED (1763ms)
+[TEST 04] POST /v1/chat/completions (OpenAI SSE Streaming) ............... PASSED (2535ms)
+[TEST 05] POST /v1/messages (Anthropic Non-streaming Protocol) ........... PASSED (2376ms)
+[TEST 06] POST /v1/messages (Anthropic SSE Streaming with Block Lifecycle) PASSED (1977ms)
+[TEST 07] POST /v1/chat/completions (OpenAI Tool & Function Calling) ..... PASSED (1386ms)
+[TEST 08] POST /v1/messages (Anthropic Tool Use Protocol) ................ PASSED (2742ms)
+[TEST 09] POST /v1/chat/completions (Multimodal Vision Base64 Image) ..... PASSED (4629ms)
+[TEST 10] POST /v1/chat/completions (Smart Failover Cascade Recovery) .... PASSED (1993ms)
+[TEST 11] GET /api/warp/status (Admin Authentication & WARP Diagnostics) . PASSED (323ms)
+[TEST 12] POST /api/warp/rotate (Dynamic WireGuard Key Rotation) ......... PASSED (2536ms)
+[TEST 13] POST /v1/chat/completions (WARP Tunnel Egress Inference) ....... PASSED (3812ms)
+[TEST 14] API Keys Lifecycle (Creation, Quota Deduction, Rate Limits) .... PASSED (11723ms)
+[TEST 15] GET /api/stats (Real-Time Metrics & Telemetry Accuracy) ........ PASSED (3ms)
 
-========================================
-Test Results: 6 / 6 Passed (100% Success Rate)
-========================================
+================================================================
+Test Execution Finished: 15 / 15 Vectors Passed (100%)
+================================================================
+
+✔ 100% GATEWAY PASS RATE ACHIEVED ACROSS ALL ENTERPRISE PROTOCOLS!
 ```
 
 ---

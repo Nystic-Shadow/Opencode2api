@@ -207,36 +207,52 @@ class MetricsCollector {
   getStats() {
     const streamCount = this.recentRequests.filter(r => r.stream).length;
     const nonStreamCount = this.recentRequests.length - streamCount;
+    const historyList = this.history.length > 0 ? this.history : [{
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      rpm: this.getRPM(),
+      tpm: this.getTPM(),
+      latency: this.getAverageLatency(),
+      successRate: this.getSuccessRate()
+    }];
 
     return {
       uptimeSeconds: this.getUptimeSeconds(),
+      uptime_seconds: this.getUptimeSeconds(),
       bootTime: this.bootTime,
+      boot_time: this.bootTime,
       rpm: this.getRPM(),
       tpm: this.getTPM(),
       averageLatency: this.getAverageLatency(),
+      average_latency: this.getAverageLatency(),
       averageTPS: this.getAverageTPS(),
+      average_tps: this.getAverageTPS(),
       totalRequests: this.totalRequests,
+      total_requests: this.totalRequests,
       successfulRequests: this.successfulRequests,
+      success_requests: this.successfulRequests,
       failedRequests: this.failedRequests,
+      failed_requests: this.failedRequests,
       successRate: parseFloat(this.getSuccessRate().toFixed(1)),
+      success_rate: parseFloat(this.getSuccessRate().toFixed(1)),
       totalTokens: this.totalTokens,
+      total_tokens: this.totalTokens,
       totalPromptTokens: this.totalPromptTokens,
+      total_prompt_tokens: this.totalPromptTokens,
       totalCompletionTokens: this.totalCompletionTokens,
+      total_completion_tokens: this.totalCompletionTokens,
       totalReasoningTokens: this.totalReasoningTokens,
+      total_reasoning_tokens: this.totalReasoningTokens,
       averageTokensPerDay: this.getAverageTokensPerDay(),
       modelUsage: this.modelUsage,
+      models: this.modelUsage,
       streamDistribution: {
         stream: streamCount,
         nonStream: nonStreamCount
       },
       recentRequests: this.recentRequests.slice(0, 30),
-      history: this.history.length > 0 ? this.history : [{
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        rpm: this.getRPM(),
-        tpm: this.getTPM(),
-        latency: this.getAverageLatency(),
-        successRate: this.getSuccessRate()
-      }]
+      recent_requests: this.recentRequests.slice(0, 30),
+      history: historyList,
+      time_series: historyList
     };
   }
 }

@@ -1,5 +1,101 @@
 [
   {
+    "id": "notif_425e387c-e082-4b67-8588-9514d9e3136a",
+    "title": "API Key Created",
+    "message": "Created key \"CI-Exhaustive-Runner\" (O2P-372f60...)",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:56:37.064Z"
+  },
+  {
+    "id": "notif_a0fcb7c5-28c2-4685-9761-9fde0b27991e",
+    "title": "Settings Updated",
+    "message": "System gateway settings were saved successfully.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:56:37.060Z"
+  },
+  {
+    "id": "notif_dc465b6c-7412-42d7-9827-105348b1044e",
+    "title": "Settings Updated",
+    "message": "System gateway settings were saved successfully.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:56:33.251Z"
+  },
+  {
+    "id": "notif_bdbc8135-5ec0-4099-88eb-2f9f706cb438",
+    "title": "WARP Keys Rotated",
+    "message": "Cloudflare WARP tunnel keys were rotated to establish a fresh edge session.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:56:33.247Z"
+  },
+  {
+    "id": "notif_a4ef6c17-a036-4265-ad90-7c6b6e15462b",
+    "title": "API Key Created",
+    "message": "Created key \"CI-Exhaustive-Runner\" (O2P-ebd60f...)",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:55:54.379Z"
+  },
+  {
+    "id": "notif_bf94a311-4700-4534-82b7-38f3141260d7",
+    "title": "Settings Updated",
+    "message": "System gateway settings were saved successfully.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:55:54.373Z"
+  },
+  {
+    "id": "notif_c145d3db-a1fa-41fd-8420-2cd9f4cb8d03",
+    "title": "Settings Updated",
+    "message": "System gateway settings were saved successfully.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:55:51.541Z"
+  },
+  {
+    "id": "notif_328f83e2-b5dc-4b2f-908d-b4dba0001e5f",
+    "title": "WARP Keys Rotated",
+    "message": "Cloudflare WARP tunnel keys were rotated to establish a fresh edge session.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:55:51.537Z"
+  },
+  {
+    "id": "notif_f24c0e88-08ce-4fd5-8c99-ee6381d78272",
+    "title": "API Key Created",
+    "message": "Created key \"CI-Exhaustive-Runner\" (O2P-98acfa...)",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:52:59.876Z"
+  },
+  {
+    "id": "notif_b0804d92-5cd1-4daf-bdb1-b773599e95f2",
+    "title": "Settings Updated",
+    "message": "System gateway settings were saved successfully.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:52:59.871Z"
+  },
+  {
+    "id": "notif_7b365a43-3517-41de-80d0-01d427d9dec4",
+    "title": "Settings Updated",
+    "message": "System gateway settings were saved successfully.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:52:54.231Z"
+  },
+  {
+    "id": "notif_11f20323-1f81-47ce-96dc-58ffb5506287",
+    "title": "WARP Keys Rotated",
+    "message": "Cloudflare WARP tunnel keys were rotated to establish a fresh edge session.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:52:54.227Z"
+  },
+  {
     "id": "notif_a24c177f-b440-41c6-9440-2dfa6d9764de",
     "title": "Settings Updated",
     "message": "System gateway settings were saved successfully.",

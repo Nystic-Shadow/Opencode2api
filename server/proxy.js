@@ -694,7 +694,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       res.setHeader('x-opencode2api-resolved-model', resolvedModel);
 
       if (isClientStream) {
-        // Stream Anthropic SSE with zero buffering
+        // Stream Anthropic SSE with zero buffering & extended thinking / tool call support
         res.writeHead(200, {
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache, no-transform',
@@ -719,15 +719,76 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           }
         })}\n\n`);
 
-        res.write(`event: content_block_start\ndata: ${JSON.stringify({
-          type: 'content_block_start',
-          index: 0,
-          content_block: { type: 'text', text: '' }
-        })}\n\n`);
-
         let buffer = '';
         let promptTokens = 0;
         let completionTokens = 0;
+        let reasoningTokens = 0;
+        let activeBlockIndex = -1;
+        let activeBlockType = null;
+        let activeToolIndex = null;
+        let hasToolCalls = false;
+
+        function closeCurrentBlock() {
+          if (activeBlockIndex >= 0 && activeBlockType !== null) {
+            res.write(`event: content_block_stop\ndata: ${JSON.stringify({
+              type: 'content_block_stop',
+              index: activeBlockIndex
+            })}\n\n`);
+            activeBlockType = null;
+          }
+        }
+
+        function ensureThinkingBlock() {
+          if (activeBlockType !== 'thinking') {
+            closeCurrentBlock();
+            activeBlockIndex++;
+            activeBlockType = 'thinking';
+            res.write(`event: content_block_start\ndata: ${JSON.stringify({
+              type: 'content_block_start',
+              index: activeBlockIndex,
+              content_block: {
+                type: 'thinking',
+                thinking: ''
+              }
+            })}\n\n`);
+          }
+        }
+
+        function ensureTextBlock() {
+          if (activeBlockType !== 'text') {
+            closeCurrentBlock();
+            activeBlockIndex++;
+            activeBlockType = 'text';
+            res.write(`event: content_block_start\ndata: ${JSON.stringify({
+              type: 'content_block_start',
+              index: activeBlockIndex,
+              content_block: {
+                type: 'text',
+                text: ''
+              }
+            })}\n\n`);
+          }
+        }
+
+        function ensureToolBlock(toolIndex, toolId, toolName) {
+          if (activeBlockType !== 'tool_use' || activeToolIndex !== toolIndex) {
+            closeCurrentBlock();
+            activeBlockIndex++;
+            activeBlockType = 'tool_use';
+            activeToolIndex = toolIndex;
+            hasToolCalls = true;
+            res.write(`event: content_block_start\ndata: ${JSON.stringify({
+              type: 'content_block_start',
+              index: activeBlockIndex,
+              content_block: {
+                type: 'tool_use',
+                id: toolId || ('call_' + activeBlockIndex),
+                name: toolName || '',
+                input: {}
+              }
+            })}\n\n`);
+          }
+        }
 
         upstreamRes.on('data', (chunk) => {
           buffer += chunk.toString();
@@ -745,25 +806,67 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
               if (parsed.usage) {
                 promptTokens = parsed.usage.prompt_tokens || promptTokens;
                 completionTokens = parsed.usage.completion_tokens || completionTokens;
+                reasoningTokens = parsed.usage.completion_tokens_details?.reasoning_tokens || reasoningTokens;
               }
               const delta = parsed.choices?.[0]?.delta;
-              if (delta?.content) {
-                res.write(`event: content_block_delta\ndata: ${JSON.stringify({
-                  type: 'content_block_delta',
-                  index: 0,
-                  delta: { type: 'text_delta', text: delta.content }
-                })}\n\n`);
-                if (res.flush) res.flush();
+              if (delta) {
+                if (delta.reasoning_content) {
+                  ensureThinkingBlock();
+                  res.write(`event: content_block_delta\ndata: ${JSON.stringify({
+                    type: 'content_block_delta',
+                    index: activeBlockIndex,
+                    delta: { type: 'thinking_delta', thinking: delta.reasoning_content }
+                  })}\n\n`);
+                  if (res.flush) res.flush();
+                }
+
+                if (delta.content) {
+                  ensureTextBlock();
+                  res.write(`event: content_block_delta\ndata: ${JSON.stringify({
+                    type: 'content_block_delta',
+                    index: activeBlockIndex,
+                    delta: { type: 'text_delta', text: delta.content }
+                  })}\n\n`);
+                  if (res.flush) res.flush();
+                }
+
+                if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
+                  for (const tc of delta.tool_calls) {
+                    const tIndex = tc.index !== undefined ? tc.index : 0;
+                    ensureToolBlock(tIndex, tc.id, tc.function?.name);
+                    if (tc.function?.arguments) {
+                      res.write(`event: content_block_delta\ndata: ${JSON.stringify({
+                        type: 'content_block_delta',
+                        index: activeBlockIndex,
+                        delta: { type: 'input_json_delta', partial_json: tc.function.arguments }
+                      })}\n\n`);
+                      if (res.flush) res.flush();
+                    }
+                  }
+                }
               }
             } catch (e) {}
           }
         });
 
         upstreamRes.on('end', () => {
-          res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`);
+          closeCurrentBlock();
+
+          if (activeBlockIndex < 0) {
+            res.write(`event: content_block_start\ndata: ${JSON.stringify({
+              type: 'content_block_start',
+              index: 0,
+              content_block: { type: 'text', text: '' }
+            })}\n\n`);
+            res.write(`event: content_block_stop\ndata: ${JSON.stringify({
+              type: 'content_block_stop',
+              index: 0
+            })}\n\n`);
+          }
+
           res.write(`event: message_delta\ndata: ${JSON.stringify({
             type: 'message_delta',
-            delta: { stop_reason: 'end_turn', stop_sequence: null },
+            delta: { stop_reason: hasToolCalls ? 'tool_use' : 'end_turn', stop_sequence: null },
             usage: { output_tokens: completionTokens }
           })}\n\n`);
           res.write(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
@@ -775,7 +878,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           metrics.recordRequest({
             model: requestedModel,
             status: 200,
-            tokens: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: total, reasoning_tokens: 0 },
+            tokens: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: total, reasoning_tokens: reasoningTokens },
             latencyMs: latency,
             stream: true,
             keyId: keyObj.id

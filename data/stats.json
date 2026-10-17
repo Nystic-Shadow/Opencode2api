@@ -663,282 +663,6 @@
   ],
   "history": [
     {
-      "timestamp": "08:11 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "successRate": 96.6
-    },
-    {
-      "timestamp": "08:12 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "successRate": 96.6
-    },
-    {
-      "timestamp": "08:13 pm",
-      "rpm": 1,
-      "tpm": 2154,
-      "successRate": 96.7
-    },
-    {
-      "timestamp": "08:14 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "successRate": 96.7
-    },
-    {
-      "timestamp": "08:16 pm",
-      "rpm": 1,
-      "tpm": 0,
-      "latency": 7512,
-      "successRate": 93.5
-    },
-    {
-      "timestamp": "08:17 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7512,
-      "successRate": 93.5
-    },
-    {
-      "timestamp": "08:18 pm",
-      "rpm": 1,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:19 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:20 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:21 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:22 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:23 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:24 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:25 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:26 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:27 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:28 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:29 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:30 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7307,
-      "successRate": 90.6
-    },
-    {
-      "timestamp": "08:31 pm",
-      "rpm": 1,
-      "tpm": 1560,
-      "latency": 7193,
-      "successRate": 90.9
-    },
-    {
-      "timestamp": "08:32 pm",
-      "rpm": 1,
-      "tpm": 1589,
-      "latency": 7081,
-      "successRate": 91.2
-    },
-    {
-      "timestamp": "08:33 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7081,
-      "successRate": 91.2
-    },
-    {
-      "timestamp": "08:34 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 7081,
-      "successRate": 91.2
-    },
-    {
-      "timestamp": "08:35 pm",
-      "rpm": 2,
-      "tpm": 2192,
-      "latency": 6964,
-      "successRate": 88.9
-    },
-    {
-      "timestamp": "08:36 pm",
-      "rpm": 2,
-      "tpm": 3036,
-      "latency": 7091,
-      "successRate": 89.5
-    },
-    {
-      "timestamp": "08:37 pm",
-      "rpm": 3,
-      "tpm": 4804,
-      "latency": 6740,
-      "successRate": 90.2
-    },
-    {
-      "timestamp": "08:38 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6740,
-      "successRate": 90.2
-    },
-    {
-      "timestamp": "08:39 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6740,
-      "successRate": 90.2
-    },
-    {
-      "timestamp": "08:40 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6740,
-      "successRate": 90.2
-    },
-    {
-      "timestamp": "08:41 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6740,
-      "successRate": 90.2
-    },
-    {
-      "timestamp": "08:42 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6740,
-      "successRate": 90.2
-    },
-    {
-      "timestamp": "08:43 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6740,
-      "successRate": 90.2
-    },
-    {
-      "timestamp": "08:44 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6740,
-      "successRate": 90.2
-    },
-    {
-      "timestamp": "08:45 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6740,
-      "successRate": 90.2
-    },
-    {
-      "timestamp": "08:46 pm",
-      "rpm": 1,
-      "tpm": 1870,
-      "latency": 6631,
-      "successRate": 90.5
-    },
-    {
-      "timestamp": "08:47 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6631,
-      "successRate": 90.5
-    },
-    {
-      "timestamp": "08:48 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6631,
-      "successRate": 90.5
-    },
-    {
-      "timestamp": "08:49 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6631,
-      "successRate": 90.5
-    },
-    {
-      "timestamp": "08:50 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6631,
-      "successRate": 90.5
-    },
-    {
-      "timestamp": "08:51 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6631,
-      "successRate": 90.5
-    },
-    {
       "timestamp": "08:52 pm",
       "rpm": 0,
       "tpm": 0,
@@ -1073,6 +797,286 @@
     },
     {
       "timestamp": "09:13 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:14 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:15 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:16 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:17 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:18 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:19 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:20 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:21 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:22 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:23 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:24 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:25 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:26 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:27 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:28 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:29 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:30 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:31 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:32 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:33 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:34 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:35 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:36 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:37 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:38 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:39 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:40 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:41 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:42 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:43 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:44 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:45 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:46 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:47 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:48 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:49 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:50 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:51 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:52 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:53 pm",
       "rpm": 0,
       "tpm": 0,
       "latency": 6229,

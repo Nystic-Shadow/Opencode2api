@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="100%" height="340">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#02080e" />
+      <stop offset="50%" stop-color="#07131b" />
+      <stop offset="100%" stop-color="#02080e" />
+    </linearGradient>
+
+    <!-- Emerald Glow Gradient -->
+    <linearGradient id="primary-glow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2fbc5b" />
+      <stop offset="50%" stop-color="#32c364" />
+      <stop offset="100%" stop-color="#0083e0" />
+    </linearGradient>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#202a32" stroke-width="1" stroke-opacity="0.35" />
+    </pattern>
+
+    <!-- Glow Filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <style>
+    @keyframes pulse {
+      0%, 100% { opacity: 0.3; transform: scale(1); }
+      50% { opacity: 0.7; transform: scale(1.05); }
+    }
+    @keyframes scanline {
+      0% { transform: translateY(-340px); }
+      100% { transform: translateY(340px); }
+    }
+    @keyframes dash {
+      to { stroke-dashoffset: -100; }
+    }
+    .neon-pulse {
+      animation: pulse 4s ease-in-out infinite;
+      transform-origin: center;
+    }
+    .scanner {
+      animation: scanline 8s linear infinite;
+    }
+    .wire {
+      stroke-dasharray: 8, 8;
+      animation: dash 3s linear infinite;
+    }
+  </style>
+
+  <!-- Base background -->
+  <rect width="1200" height="340" fill="url(#bg)" rx="16" />
+  
+  <!-- Grid Overlay -->
+  <rect width="1200" height="340" fill="url(#grid)" rx="16" />
+
+  <!-- Ambient Glowing Orbs -->
+  <circle cx="200" cy="80" r="160" fill="#2fbc5b" opacity="0.12" filter="url(#glow)" class="neon-pulse" />
+  <circle cx="1000" cy="240" r="180" fill="#0083e0" opacity="0.1" filter="url(#glow)" class="neon-pulse" />
+
+  <!-- High-Tech Circuit Lines -->
+  <path d="M 50 170 L 220 170 L 270 120 L 930 120 L 980 170 L 1150 170" fill="none" stroke="#2fbc5b" stroke-width="1.5" opacity="0.4" class="wire" />
+  <path d="M 80 220 L 260 220 L 310 270 L 890 270 L 940 220 L 1120 220" fill="none" stroke="#319cfc" stroke-width="1.5" opacity="0.3" class="wire" />
+
+  <!-- Center Badge / Chip -->
+  <g transform="translate(600, 75)">
+    <rect x="-140" y="-18" width="280" height="36" rx="18" fill="#172128" stroke="#2fbc5b" stroke-width="1" stroke-opacity="0.6" />
+    <circle cx="-115" cy="0" r="5" fill="#2fbc5b">
+      <animate attributeName="opacity" values="1;0.2;1" dur="1.8s" repeatCount="indefinite" />
+    </circle>
+    <text x="-95" y="5" font-family="'Space Grotesk', system-ui, sans-serif" font-size="12" font-weight="700" fill="#2fbc5b" letter-spacing="2">100% RESILIENT GATEWAY &amp; CONTROL PLANE</text>
+  </g>
+
+  <!-- Main Title -->
+  <g transform="translate(600, 160)">
+    <text text-anchor="middle" font-family="'Space Grotesk', system-ui, sans-serif" font-size="46" font-weight="800" fill="#ffffff" letter-spacing="-1">
+      OPENCODE<tspan fill="url(#primary-glow)">2API</tspan>
+    </text>
+  </g>
+
+  <!-- Subtitle Tagline -->
+  <g transform="translate(600, 205)">
+    <text text-anchor="middle" font-family="'Space Grotesk', system-ui, sans-serif" font-size="17" font-weight="500" fill="#85919a" letter-spacing="0.5">
+      Turn OpenCode Zen Free Models into High-Performance, Zero-Latency OpenAI &amp; Anthropic Endpoints
+    </text>
+  </g>
+
+  <!-- Feature Pills Footer -->
+  <g transform="translate(600, 270)">
+    <!-- Pill 1: Dual API -->
+    <g transform="translate(-320, 0)">
+      <rect x="-85" y="-15" width="170" height="30" rx="8" fill="#172128" stroke="#202a32" stroke-width="1" />
+      <text text-anchor="middle" y="5" font-family="'Space Mono', monospace" font-size="11" font-weight="600" fill="#e9f0f5">⚡ OpenAI &amp; Anthropic</text>
+    </g>
+    <!-- Pill 2: Tool Calling -->
+    <g transform="translate(-105, 0)">
+      <rect x="-85" y="-15" width="170" height="30" rx="8" fill="#172128" stroke="#202a32" stroke-width="1" />
+      <text text-anchor="middle" y="5" font-family="'Space Mono', monospace" font-size="11" font-weight="600" fill="#2fbc5b">🛠️ Native Tool Calling</text>
+    </g>
+    <!-- Pill 3: Multimodal Vision -->
+    <g transform="translate(105, 0)">
+      <rect x="-85" y="-15" width="170" height="30" rx="8" fill="#172128" stroke="#202a32" stroke-width="1" />
+      <text text-anchor="middle" y="5" font-family="'Space Mono', monospace" font-size="11" font-weight="600" fill="#319cfc">👁️ Multimodal Vision</text>
+    </g>
+    <!-- Pill 4: Deep Reasoning -->
+    <g transform="translate(320, 0)">
+      <rect x="-85" y="-15" width="170" height="30" rx="8" fill="#172128" stroke="#202a32" stroke-width="1" />
+      <text text-anchor="middle" y="5" font-family="'Space Mono', monospace" font-size="11" font-weight="600" fill="#ff7f16">🧠 Thinking Tokens</text>
+    </g>
+  </g>
+</svg>

@@ -1,115 +1,129 @@
-# 🚀 OpenCode2API Gateway & Control Plane
+<div align="center">
 
-> **Turn OpenCode Zen Free Models into Enterprise-Grade, 100% Reliable OpenAI & Anthropic Compatible APIs.**
+![OpenCode2API Banner](docs/banner.svg)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/Node.js-v20%2B-blue.svg)](https://nodejs.org/)
-[![React](https://img.shields.io/badge/Dashboard-React%2019-cyan.svg)](https://react.dev/)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://www.docker.com/)
-[![Success Rate](https://img.shields.io/badge/Success%20Rate-100%25-brightgreen.svg)]()
-[![Upstream](https://img.shields.io/badge/OpenCode-CLI%20v2.0.29-blueviolet.svg)](https://opencode.ai/)
+# OpenCode2API Gateway & Control Plane
+
+> **Turn OpenCode Zen Free Models into Enterprise-Grade, 100% Resilient OpenAI & Anthropic Endpoints.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-2fbc5b.svg?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-v20%2B-339933.svg?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![React 19](https://img.shields.io/badge/Dashboard-React%2019-61DAFB.svg?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
+[![Docker Ready](https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=for-the-badge&logo=docker&logoColor=white)](Dockerfile)
+[![Success Rate](https://img.shields.io/badge/Gateway%20Success%20Rate-100%25-2fbc5b.svg?style=for-the-badge)]()
+[![OpenCode CLI](https://img.shields.io/badge/Fingerprint-CLI%20v2.0.29-blueviolet.svg?style=for-the-badge)](https://opencode.ai/)
+
+<br />
+
+**OpenCode2API** is a high-throughput, enterprise-resilient API Gateway and visual Control Plane designed to bridge free OpenCode Zen models directly into your daily coding tools and AI applications. Connect free models into **Cursor**, **Cline**, **Roo Code**, **Continue**, **LibreChat**, **OpenAI SDK**, **Anthropic SDK**, and custom autonomous agent loops with **native tool calling**, **multimodal vision**, and **real-time thinking tokens**.
+
+</div>
 
 ---
 
-## ⚡ Overview
+## ⚡ Core Features & Capabilities
 
-**OpenCode2API** is a high-performance, resilient API Gateway and telemetry Control Plane that transforms the free models from OpenCode Zen into standard **OpenAI** (`/v1/chat/completions`) and **Anthropic** (`/v1/messages`) endpoints.
+### 🛡️ 1. 100% High-Availability Resilience Engine
+- **Exact Millisecond Descending Session Minting:** Complies with OpenCode's `Identifier.descending()` specification (`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`). Decodes millisecond timestamps inverted with `~((Date.now() << 12) | 1)`, strictly satisfying temporal validation and eliminating `401` session expirations.
+- **Smart Model Failover Cascades:** If an individual upstream model experiences capacity bottlenecks or maintenance (such as `glm-5.3-flash` returning 429 *"Endpoint is unavailable"*), the gateway automatically reroutes to an equivalent healthy model (`deepseek-v4.1-flash` or `beam` for text, `nemotron-3.5-super-vl` or `mimo-v2.6-flash` for vision) and tags `x-opencode2api-fallback`, preserving 100% uptime for agents without dropping the client connection.
+- **Jittered Exponential Backoff:** Automatically retries transient network drops, `ECONNRESET`, timeouts, and `502`/`503` upstream errors up to 3 times before committing any error.
 
-It enables you to connect free-tier models into any AI agent, IDE, or tool—including **Cursor**, **Cline**, **Roo Code**, **Continue**, **LibreChat**, **OpenAI SDK**, **Anthropic SDK**, **LangChain**, and custom agentic workflows—with **native tool calling**, **multimodal vision**, and **real-time thinking tokens**.
+### 🌐 2. Dual Standard API Compatibility
+- **OpenAI API Specification:** Standard `/v1/chat/completions` and `/v1/models` endpoints.
+- **Anthropic Messages Specification:** Standard `/v1/messages` endpoint with structured content blocks.
+- **Zero-Latency SSE Streaming:** Immediate socket flushing and `X-Accel-Buffering: no` ensures prompt tokens and completions stream in real-time with zero buffering delay.
+
+### 🔄 3. Dynamic Model Auto-Discovery
+- **Auto-Sync:** Background cron polls active Zen models every 10 minutes (configurable).
+- **Clean Model Identifiers:** Automatically strips `-free` and `_free` suffixes from upstream IDs. Use clean model identifiers (`deepseek-v4.1-flash`, `nemotron-3.5-super-vl`, `beam`) in your client applications without having to maintain hardcoded mapping lists.
+
+### 🛠️ 4. Native Tool & Function Calling
+- **Anti-Bot Gate Bypass:** Automatically merges client tools with required OpenCode CLI core schemas to bypass the free-tier bot check.
+- **Structured Schema Handling:** Supports custom function definitions, argument parsing, and structured `tool_calls` output generation.
+
+### 👁️ 5. Multimodal Vision Analysis
+- **Full Image Understanding:** Complete support for image analysis using base64 and data URLs for vision-enabled models (`nemotron-3.5-super-vl`, `mimo-v2.6-flash`, `longcat-2.5-preview`).
+- Compatible with both OpenAI `image_url` data URIs and Anthropic `image` block formats.
+
+### 🧠 6. Deep Reasoning & Thinking Token Extraction
+- **Live Thinking Stream:** Extracts raw thinking tokens into OpenAI `reasoning_content` and Anthropic `thinking` blocks with cryptographic signatures.
+- **Adjustable Thinking Levels:** Fine-tune thinking budgets with custom levels: `auto`, `off` (fast / no think), `low` (4k tokens), `medium` (16k tokens), `high` (32k tokens), and `max` (64k tokens).
+
+### 📊 7. Cyberpunk / Liquid Glass UI Dashboard
+- **React 19 & WebGL:** Powered by React 19 and **Originkit Spark Lattice WebGL** ambient particle system.
+- **Live Telemetry:** Real-time RPM, TPM, Total Tokens served, Daily Token Trends, and Latency charts.
+- **Multi-User Key Quota Management:** Generate custom `O2P-` API keys with individual token allocation sliders (K/M), RPM/TPM caps, model whitelisting, and expiration dates.
+- **Interactive Playground:** Full markdown chat, vision attachment preview, thinking token inspectors, and model parameter drawers.
+
+### ⚡ 8. Zero External Server Dependencies
+- The backend runs 100% on native Node.js core libraries (`http`, `https`, `crypto`, `fs`, `path`). No heavy node_modules on the server, instant cold-starts, and minimal memory usage (<30MB).
+
+---
+
+## 🖼️ Dashboard & Visual UI Tour
+
+All screenshots captured live from the running OpenCode2API control plane at `1440x920` (Retina 2x):
+
+### 1. System Telemetry & Live Performance
+Monitor live RPM, TPM, total token volume, and request success rates in real-time.
+![Telemetry Dashboard](docs/screenshots/overview.png)
+
+---
+
+### 2. Interactive Test Playground
+Test reasoning models, inspect thinking tokens live, stream completions, and test prompt engineering.
+![Interactive Playground](docs/screenshots/playground.png)
+
+---
+
+### 3. Elevated Model Selector & Capability Inspector
+Clean model switcher displaying multimodal badges and context window limits floating above the chat feed.
+![Model Dropdown](docs/screenshots/model-dropdown.png)
+
+---
+
+### 4. Multi-User API Keys & Token Allocation Quotas
+Issue scoped `O2P-` keys for teammates or clients with custom token allocation sliders (K/M), RPM caps, and model restrictions.
+![API Key Management](docs/screenshots/api-keys.png)
+
+---
+
+### 5. Auto-Discovered Zen Models Catalog
+All active free models discovered from upstream with clean IDs, context limits, and one-click manual discovery sync.
+![Models Catalog](docs/screenshots/models.png)
+
+---
+
+## 🏗️ System Architecture
 
 ```
-[ Your AI App / IDE / Agent ]
-      │ (OpenAI / Anthropic REST & SSE Streaming)
-      ▼
-┌────────────────────────────────────────────────────────┐
-│               OpenCode2API Gateway                      │
-│                                                        │
-│  ├─ Multi-User Key Auth (`O2P-...`) & Token Quotas     │
-│  ├─ Model Auto-Discovery (Strips `-free` Suffixes)     │
-│  ├─ Smart Model Failover & Auto-Retry Engine (100% SR) │
-│  ├─ Invariant Gate Authentication & Session Minting    │
-│  └─ Pure Node.js Core (Zero External Server Deps)      │
-└────────────────────────────────────────────────────────┘
-      │ (Authentic OpenCode CLI Protocols & Keep-Alive TLS)
-      ▼
-[ OpenCode Zen Free Infrastructure ]
+                                    ┌────────────────────────────────────────────────────────┐
+                                    │               OpenCode2API Gateway Core                │
+                                    │                                                        │
+[ AI IDE / Custom Agent ]           │  ├─ Auth & Token Quota Validator (`O2P-...`)          │
+       │                            │  ├─ Dynamic Model Resolver (Clean ID -> Upstream ID)   │
+       ▼ (OpenAI / Anthropic REST)  │  ├─ Canonical Descending Session Minting (ses_...)     │
+┌───────────────────────────────┐   │  ├─ Client Tool Merging (Core CLI 403 Gate Bypass)     │
+│  http://127.0.0.1:8080/v1     │──▶│  ├─ Smart Model Failover Cascade (100% Resilience)     │
+│  /chat/completions            │   │  ├─ Jittered Exponential Retry Engine (429/503/Drops) │
+│  /messages                    │   │  ├─ Zero-Latency SSE Event Streamer                    │
+└───────────────────────────────┘   │  └─ Telemetry & Metrics Aggregator                     │
+                                    └────────────────────────────────────────────────────────┘
+                                                                 │
+                                                                 ▼ (Authentic CLI Fingerprint)
+                                    ┌────────────────────────────────────────────────────────┐
+                                    │            OpenCode Zen Free Cloud Engine              │
+                                    │   (DeepSeek, Nemotron, Beam, MiMo, LongCat, GLM...)    │
+                                    └────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## ✨ Features
+## 🚀 Quickstart & Deployment
 
-- **🌐 Dual API Compatibility:**
-  - Fully compatible with the **OpenAI API specification** (`/v1/chat/completions`, `/v1/models`).
-  - Fully compatible with the **Anthropic Messages API specification** (`/v1/messages`).
-  - Real-time Server-Sent Events (SSE) streaming with zero latency and immediate socket flushing.
+### Option A: Docker Compose (Recommended)
 
-- **🛡️ 100% High-Availability Resilience Engine:**
-  - **Exact Millisecond Descending Session Minting:** Complies with OpenCode's `Identifier.descending()` specification (`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`) preventing session expiration or temporal rejection.
-  - **Intelligent Auto-Retry:** Handles transient upstream network resets, `ECONNRESET`, timeouts, and 429/503 errors with exponential backoff and random jitter.
-  - **Smart Model Failover:** If an upstream provider experiences model-specific capacity issues (e.g. `glm-5.3-flash` returning 429 "Endpoint is unavailable"), requests automatically cascade to an equivalent healthy model (`deepseek-v4.1-flash` or `beam`) without dropping the client connection.
-
-- **🔄 Automatic Dynamic Model Discovery:**
-  - Continuously discovers newly added and deprecated models from OpenCode Zen.
-  - Automatically cleanses model IDs by stripping `-free` suffixes so client configs use clean names like `deepseek-v4.1-flash`, `nemotron-3.5-super-vl`, or `beam`.
-
-- **🛠️ Native Tool & Function Calling:**
-  - Transparently merges user tools with required OpenCode CLI core schemas to bypass the free-tier anti-bot gate.
-  - Full structured JSON arguments parsing and `tool_calls` output generation.
-
-- **👁️ Multimodal Vision Support:**
-  - Native support for image understanding via base64 data URLs in both OpenAI (`image_url`) and Anthropic (`image`) block formats on vision-capable models (`nemotron-3.5-super-vl`, `mimo-v2.6-flash`, `longcat-2.5-preview`).
-
-- **🧠 Deep Reasoning & Thinking Tokens:**
-  - Extracts raw thinking tokens into OpenAI `reasoning_content` and Anthropic `thinking` blocks.
-  - Granular control over thinking budgets: `auto`, `low` (4k), `medium` (16k), `high` (32k), and `max` (64k).
-
-- **📊 Cyberpunk / Liquid Glass UI Dashboard:**
-  - Built with **React 19** and **Originkit Spark Lattice WebGL** animated background.
-  - **Real-Time Telemetry:** Live RPM, TPM, Total Tokens served, Daily Token Trends, and Latency charts.
-  - **Multi-User Key Management:** Create custom `O2P-` API keys with individual token allocation sliders (K/M), RPM/TPM caps, model whitelisting, and expiration dates.
-  - **Interactive Playground:** Full markdown chat, vision attachment preview, thinking token inspectors, and model parameter drawers.
-  - **Zero Server Dependencies:** The gateway backend runs entirely on native Node.js libraries (`http`, `https`, `crypto`, `fs`).
-
----
-
-## 🖼️ Dashboard & Playground Preview
-
-| Interactive Model Playground | Discovered Models Catalog |
-| :---: | :---: |
-| ![Playground](docs/screenshots/playground.png) | ![Model Selector](docs/screenshots/model-dropdown.png) |
-
----
-
-## 🚀 Quick Start
-
-### Method 1: Local Installation
-
-**Prerequisites:** Node.js 18+ installed.
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/Nystic-Shadow/Opencode2api.git
-cd Opencode2api
-
-# 2. Build the React 19 Frontend Dashboard
-npm run build
-
-# 3. Start the Gateway Server
-npm start
-```
-
-The gateway is now live:
-- **Dashboard & Playground:** `http://127.0.0.1:8080/` (Login: `admin` / `admin123`)
-- **OpenAI Base URL:** `http://127.0.0.1:8080/v1`
-- **Anthropic Messages URL:** `http://127.0.0.1:8080/v1/messages`
-- **Master API Key:** `O2P-master-key`
-
----
-
-### Method 2: Docker & Docker Compose
-
-Deploy with a single command on any VPS, Dokploy, or Coolify instance:
+Run with a single command on any VPS, Dokploy, Coolify, or local Docker host:
 
 ```bash
 docker compose up -d --build
@@ -136,39 +150,90 @@ services:
 
 ---
 
-## 💻 API Integration Examples
+### Option B: Local Installation
 
-### 1. OpenAI Python SDK
+**Prerequisites:** Node.js 18+ installed.
+
+```bash
+# 1. Clone repository
+git clone https://github.com/Nystic-Shadow/opencode2api.git
+cd opencode2api
+
+# 2. Build the React 19 Frontend Dashboard
+npm run build
+
+# 3. Start the Gateway Server
+npm start
+```
+
+Default access points:
+- **Web Control Plane:** `http://127.0.0.1:8080/` (Default Login: `admin` / `admin123`)
+- **OpenAI Base URL:** `http://127.0.0.1:8080/v1`
+- **Anthropic Messages URL:** `http://127.0.0.1:8080/v1/messages`
+- **Master Root Key:** `O2P-master-key`
+
+---
+
+## 📚 Complete Documentation & SDK Integrations
+
+### 1. OpenAI Python SDK Integration
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:8080/v1",
-    api_key="O2P-master-key"
+    api_key="O2P-master-key"  # Or your custom O2P-... key
 )
 
-# Text Reasoning Completion
+# Text & Deep Reasoning with Streaming
 response = client.chat.completions.create(
     model="deepseek-v4.1-flash",
     messages=[
-        {"role": "user", "content": "Explain quantum superposition in 2 sentences."}
+        {"role": "user", "content": "Explain the difference between quantum entanglement and classical correlation."}
     ],
     stream=True
 )
 
 for chunk in response:
-    # Access thinking tokens if present
     delta = chunk.choices[0].delta
+    # Access live thinking tokens
     if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-        print(f"[Thinking]: {delta.reasoning_content}", end="")
+        print(f"\033[90m{delta.reasoning_content}\033[0m", end="")
     if delta.content:
         print(delta.content, end="")
 ```
 
 ---
 
-### 2. Anthropic Python SDK
+### 2. OpenAI Node.js / TypeScript SDK Integration
+
+```typescript
+import OpenAI from 'openai';
+
+const openai = new OpenAI({
+  baseURL: 'http://127.0.0.1:8080/v1',
+  apiKey: 'O2P-master-key'
+});
+
+async function main() {
+  const stream = await openai.chat.completions.create({
+    model: 'beam',
+    messages: [{ role: 'user', content: 'Write a high-performance LRU Cache in TypeScript.' }],
+    stream: true
+  });
+
+  for await (const chunk of stream) {
+    process.stdout.write(chunk.choices[0]?.delta?.content || '');
+  }
+}
+
+main();
+```
+
+---
+
+### 3. Anthropic Python SDK Integration
 
 ```python
 import anthropic
@@ -179,10 +244,10 @@ client = anthropic.Anthropic(
 )
 
 message = client.messages.create(
-    model="beam",
-    max_tokens=1024,
+    model="deepseek-v4.1-flash",
+    max_tokens=2048,
     messages=[
-        {"role": "user", "content": "Write a high-performance LRU cache in Python."}
+        {"role": "user", "content": "Provide 3 architectural patterns for microservices."}
     ]
 )
 
@@ -191,21 +256,21 @@ print(message.content[0].text)
 
 ---
 
-### 3. Tool Calling (Function Calling)
+### 4. Native Tool Calling (Function Calling)
 
 ```python
 tools = [
     {
         "type": "function",
         "function": {
-            "name": "get_current_weather",
-            "description": "Fetch real-time weather metrics for a city",
+            "name": "query_database",
+            "description": "Execute a safe read-only SQL query on the warehouse",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city": {"type": "string", "description": "City name"}
+                    "sql": {"type": "string", "description": "SQL query statement"}
                 },
-                "required": ["city"]
+                "required": ["sql"]
             }
         }
     }
@@ -213,25 +278,25 @@ tools = [
 
 response = client.chat.completions.create(
     model="deepseek-v4.1-flash",
-    messages=[{"role": "user", "content": "What is the weather in Tokyo?"}],
+    messages=[{"role": "user", "content": "How many active users signed up this week?"}],
     tools=tools,
     tool_choice="auto"
 )
 
 tool_call = response.choices[0].message.tool_calls[0]
-print(f"Function: {tool_call.function.name}")
-print(f"Arguments: {tool_call.function.arguments}")
+print(f"Tool to invoke: {tool_call.function.name}")
+print(f"SQL arguments:  {tool_call.function.arguments}")
 ```
 
 ---
 
-### 4. Multimodal Vision Analysis
+### 5. Multimodal Vision Analysis
 
 ```python
 import base64
 
-with open("diagram.png", "rb") as f:
-    base64_image = base64.b64encode(f.read()).decode("utf-8")
+with open("system_architecture.png", "rb") as f:
+    encoded_image = base64.b64encode(f.read()).decode("utf-8")
 
 response = client.chat.completions.create(
     model="nemotron-3.5-super-vl",
@@ -239,10 +304,10 @@ response = client.chat.completions.create(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": "Analyze this architecture diagram in detail:"},
+                {"type": "text", "text": "Analyze this architecture diagram and list all single points of failure:"},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{base64_image}"}
+                    "image_url": {"url": f"data:image/png;base64,{encoded_image}"}
                 }
             ]
         }
@@ -254,38 +319,73 @@ print(response.choices[0].message.content)
 
 ---
 
-## 📋 Discovered OpenCode Zen Models
+### 6. Custom Thinking Levels & Reasoning Budgets
 
-The gateway automatically discovers and cleanses model IDs (removing `-free` suffixes). Discovered models currently include:
+Control reasoning token depth via the `thinking_level` parameter:
 
-| Model ID | Family | Context Window | Vision | Reasoning | Description |
-| :--- | :--- | :--- | :---: | :---: | :--- |
-| `deepseek-v4.1-flash` | DeepSeek | 1,000,000 | ❌ | ✅ | Ultra-fast DeepSeek MoE with deep reasoning capabilities |
-| `beam` | Beam | 1,048,576 | ❌ | ✅ | Sparse mixture-of-experts model with 23B active parameters |
-| `nemotron-3.5-super-vl` | NVIDIA | 1,048,576 | ✅ | ✅ | NVIDIA flagship multimodal vision-language reasoning model |
-| `mimo-v2.6-flash` | MiMo | 200,000 | ✅ | ✅ | Multimodal coding and long-context agent automation |
-| `longcat-2.5-preview` | Meituan | 1,000,000 | ✅ | ✅ | Multimodal reasoning model with 1M-token context |
-| `big-pickle` | Pickle | 200,000 | ❌ | ✅ | Deliberate step-by-step reasoning and analytical problem solving |
-| `space-bunny` | Bunny | 200,000 | ❌ | ✅ | Fast compact reasoning model for agentic tool use |
-| `nemotron-3.5-lightning` | NVIDIA | 262,144 | ❌ | ✅ | High-throughput enterprise MoE for fast completions |
-| `glm-5.3-flash` | GLM | 200,000 | ❌ | ✅ | Fast general-purpose reasoning model |
+```bash
+curl -X POST http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer O2P-master-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4.1-flash",
+    "thinking_level": "high",
+    "messages": [{"role": "user", "content": "Solve the Riemann hypothesis implications on cryptography."}]
+  }'
+```
+
+**Supported Levels:**
+- `"off"`: Reasoning disabled (fastest, lowest latency).
+- `"low"`: 4,096 tokens reasoning budget.
+- `"medium"`: 16,384 tokens reasoning budget.
+- `"high"`: 32,768 tokens reasoning budget.
+- `"max"`: 65,536 extended reasoning budget.
+
+---
+
+### 7. cURL Streaming Example
+
+```bash
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer O2P-master-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "beam",
+    "stream": true,
+    "messages": [{"role": "user", "content": "Count from 1 to 5 with descriptions."}]
+  }'
+```
+
+---
+
+## 📋 Discovered OpenCode Zen Models Catalog
+
+| Model ID | Provider Family | Context Window | Max Output | Modalities | Reasoning | Description |
+| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| `deepseek-v4.1-flash` | DeepSeek | 1,000,000 | 131,072 | Text | ✅ | Ultra-fast DeepSeek MoE with high-depth mathematical reasoning |
+| `beam` | Beam MoE | 1,048,576 | 131,072 | Text | ✅ | Sparse MoE with 23B active parameters for coding & agents |
+| `nemotron-3.5-super-vl` | NVIDIA | 1,048,576 | 131,072 | Text, Image | ✅ | NVIDIA flagship vision-language reasoning engine |
+| `mimo-v2.6-flash` | MiMo | 200,000 | 32,000 | Text, Image, Audio | ✅ | Multimodal coding and long-context agentic automation |
+| `longcat-2.5-preview` | Meituan | 1,000,000 | 131,072 | Text, Image | ✅ | 1M context multimodal reasoning model |
+| `big-pickle` | Pickle | 200,000 | 32,000 | Text | ✅ | Deliberate step-by-step reasoning and problem solving |
+| `space-bunny` | Bunny | 200,000 | 32,000 | Text | ✅ | Fast compact reasoning model for agent tool calling |
+| `nemotron-3.5-lightning` | NVIDIA | 262,144 | 262,144 | Text | ✅ | High-throughput enterprise MoE for low-latency tasks |
+| `glm-5.3-flash` | GLM | 200,000 | 32,000 | Text | ✅ | Fast general-purpose reasoning model |
 
 ---
 
 ## 🔑 Multi-User API Key Quotas & Limits
 
-Create scoped API keys in the dashboard under **API Keys**:
-- **Custom Prefix:** Generates keys with standard `O2P-` prefixes (e.g. `O2P-prod-agent-7f8a9b`).
-- **Flexible Token Budgets:** Choose **Unlimited** or configure a specific token allowance using the interactive slider in **K (Thousands)** or **M (Millions)** of tokens.
-- **Rate Limits:** Enforce independent **RPM** (Requests Per Minute) and **TPM** (Tokens Per Minute) caps.
-- **Model Whitelists:** Restrict keys to specific models (e.g., text-only or vision-only).
-- **Expiration Policies:** Set keys to expire after 7 days, 30 days, 90 days, or never.
+Configure multi-tenant access in the dashboard under **API Keys**:
+- **Key Prefix:** Custom prefix with `O2P-` standard (e.g. `O2P-agent-team-8f92ab`).
+- **Token Quota Sliders:** Choose **Unlimited** or set exact token allowances in **K (Thousands)** or **M (Millions)**.
+- **Rate Limits:** Independent **RPM** (Requests Per Minute) and **TPM** (Tokens Per Minute) enforcement.
+- **Model Whitelists:** Restrict specific keys to text-only or vision-only models.
+- **Expiration Policies:** Expire keys after 7 days, 30 days, 90 days, or never.
 
 ---
 
-## ⚙️ Environment Variables
-
-Configure via `.env` or Docker environment variables:
+## ⚙️ Environment Variables Reference
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
@@ -293,13 +393,13 @@ Configure via `.env` or Docker environment variables:
 | `DASHBOARD_USER` | `admin` | Username for dashboard authentication |
 | `DASHBOARD_PASS` | `admin123` | Password for dashboard authentication |
 
-Runtime configurations (smart fallback toggles, rate limits, discovery interval) can be updated live from the **Settings** tab in the dashboard without restarting the service.
+*All runtime settings (smart fallback cascades, rate limits, discovery intervals) can be toggled live via the Settings tab.*
 
 ---
 
 ## 🧪 Verification & Test Suite
 
-Run the full end-to-end gateway test suite:
+Run the end-to-end verification test suite:
 
 ```bash
 node test_gateway.js

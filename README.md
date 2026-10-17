@@ -58,6 +58,12 @@
 ### ⚡ 8. Zero External Server Dependencies
 - The backend runs 100% on native Node.js core libraries (`http`, `https`, `crypto`, `fs`, `path`). No heavy node_modules on the server, instant cold-starts, and minimal memory usage (<30MB).
 
+### 🔒 9. Cloudflare WARP Proxy & Unauth Key Rotation Engine
+- **Native SOCKS5 Tunneling:** Seamlessly integrates with local Cloudflare WARP (`127.0.0.1:40000`) without external dependencies.
+- **Unauth Auto-Switching:** Automatically routes requests through Cloudflare WARP whenever upstream returns 401, 403, or `FreeTierError` on direct connections.
+- **Dynamic Key Rotation:** Automatically re-negotiates tunnel session keys on unauth drops to establish fresh Cloudflare edge egress sessions.
+- **Visual Control Panel:** Live connection status diagnostics, one-click manual key rotation, and configurable operating modes (`Auto Failover`, `Always WARP`, `Disabled`).
+
 ---
 
 ## 🖼️ Dashboard & Visual UI Tour

@@ -1,5 +1,29 @@
 [
   {
+    "id": "notif_a24c177f-b440-41c6-9440-2dfa6d9764de",
+    "title": "Settings Updated",
+    "message": "System gateway settings were saved successfully.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:38:31.406Z"
+  },
+  {
+    "id": "notif_f1c1d67b-00da-46fd-be8d-f1ffabe06cf0",
+    "title": "Settings Updated",
+    "message": "System gateway settings were saved successfully.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:38:29.755Z"
+  },
+  {
+    "id": "notif_7489c2b3-af01-4111-a257-ebf1aff21c3f",
+    "title": "WARP Keys Rotated",
+    "message": "Cloudflare WARP tunnel keys were rotated to establish a fresh edge session.",
+    "type": "info",
+    "read": false,
+    "timestamp": "2026-10-17T19:35:12.286Z"
+  },
+  {
     "id": "notif_bb1c05cf-1ea3-4dcf-aac6-25f3465a2375",
     "title": "API Key Created",
     "message": "Created key \"123\" (O2P-25c77f...)",

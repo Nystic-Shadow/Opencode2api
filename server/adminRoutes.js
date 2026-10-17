@@ -6,6 +6,7 @@ const discovery = require('./discovery');
 const updater = require('./updater');
 const notifications = require('./notifications');
 const proxy = require('./proxy');
+const warp = require('./warp');
 
 // In-memory admin sessions
 const sessions = new Set();
@@ -154,6 +155,10 @@ async function handleAdminRoute(req, res, pathname) {
     if (body.global_rpm_limit !== undefined) updates.global_rpm_limit = parseInt(body.global_rpm_limit, 10) || 0;
     if (body.global_tpm_limit !== undefined) updates.global_tpm_limit = parseInt(body.global_tpm_limit, 10) || 0;
     if (body.upstream_zen_key !== undefined) updates.upstream_zen_key = body.upstream_zen_key.trim();
+    if (body.warp_mode !== undefined) updates.warp_mode = body.warp_mode;
+    if (body.warp_auto_switch !== undefined) updates.warp_auto_switch = !!body.warp_auto_switch;
+    if (body.warp_rotate_on_unauth !== undefined) updates.warp_rotate_on_unauth = !!body.warp_rotate_on_unauth;
+    if (body.warp_port !== undefined) updates.warp_port = parseInt(body.warp_port, 10) || 40000;
     if (body.proxies !== undefined) {
       if (Array.isArray(body.proxies)) {
         updates.proxies = body.proxies.map(p => typeof p === 'string' ? p.trim() : '').filter(Boolean);
@@ -165,6 +170,29 @@ async function handleAdminRoute(req, res, pathname) {
     config.update(updates);
     notifications.add('Settings Updated', 'System gateway settings were saved successfully.', 'info');
     return sendJson(res, 200, { success: true });
+  }
+
+  // Cloudflare WARP: Status
+  if (pathname === '/api/warp/status' && req.method === 'GET') {
+    const status = await warp.getStatus();
+    return sendJson(res, 200, status);
+  }
+
+  // Cloudflare WARP: Manual Key Rotation
+  if (pathname === '/api/warp/rotate' && req.method === 'POST') {
+    const ok = await warp.rotateKeys();
+    const status = await warp.getStatus();
+    notifications.add('WARP Keys Rotated', 'Cloudflare WARP tunnel keys were rotated to establish a fresh edge session.', 'info');
+    return sendJson(res, 200, { success: ok, ...status });
+  }
+
+  // Cloudflare WARP: Connect & Configure Proxy Mode
+  if (pathname === '/api/warp/connect' && req.method === 'POST') {
+    const body = await parseBody(req);
+    const port = body.port || config.get('warp_port') || 40000;
+    const ok = await warp.ensureProxyMode(port);
+    const status = await warp.getStatus();
+    return sendJson(res, 200, { success: ok, ...status });
   }
 
   // Settings: Check CLI Update

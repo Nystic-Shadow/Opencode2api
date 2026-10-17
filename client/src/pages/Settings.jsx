@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { FiSettings, FiShield, FiRefreshCw, FiCheck, FiSliders, FiCpu } from '../components/Icons';
 import CustomToggle from '../components/CustomToggle';
+import CustomSelect from '../components/CustomSelect';
 
 export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate, isCheckingUpdate }) {
   const [username, setUsername] = useState(settings.admin_username || 'admin');
@@ -12,11 +13,74 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [maxRetries, setMaxRetries] = useState(settings.max_retries || 3);
   const [upstreamZenKey, setUpstreamZenKey] = useState(settings.upstream_zen_key || '');
   const [proxies, setProxies] = useState(Array.isArray(settings.proxies) ? settings.proxies.join('\n') : (settings.proxies || ''));
+  const [warpMode, setWarpMode] = useState(settings.warp_mode || 'auto');
+  const [warpAutoSwitch, setWarpAutoSwitch] = useState(settings.warp_auto_switch !== false);
+  const [warpRotateOnUnauth, setWarpRotateOnUnauth] = useState(settings.warp_rotate_on_unauth !== false);
+  const [warpPort, setWarpPort] = useState(settings.warp_port || 40000);
+  const [warpStatus, setWarpStatus] = useState(null);
+  const [isRotatingWarp, setIsRotatingWarp] = useState(false);
+  const [warpFeedback, setWarpFeedback] = useState(null);
   const [globalRpm, setGlobalRpm] = useState(settings.global_rpm_limit || 0);
   const [globalTpm, setGlobalTpm] = useState(settings.global_tpm_limit || 0);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [updateMsg, setUpdateMsg] = useState(null);
+
+  useEffect(() => {
+    const fetchWarp = async () => {
+      try {
+        const token = localStorage.getItem('o2p_token');
+        const res = await fetch('/api/warp/status', {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setWarpStatus(data);
+        }
+      } catch (e) {}
+    };
+    fetchWarp();
+  }, []);
+
+  const handleRotateWarp = async () => {
+    setIsRotatingWarp(true);
+    setWarpFeedback(null);
+    try {
+      const token = localStorage.getItem('o2p_token');
+      const res = await fetch('/api/warp/rotate', {
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setWarpStatus(data);
+        setWarpFeedback('Cloudflare WARP tunnel keys rotated! Fresh edge egress active.');
+      } else {
+        setWarpFeedback('Rotation error: ' + (data.error || 'Check WARP status'));
+      }
+      setTimeout(() => setWarpFeedback(null), 4000);
+    } catch (err) {
+      setWarpFeedback('Failed to rotate WARP: ' + err.message);
+    } finally {
+      setIsRotatingWarp(false);
+    }
+  };
+
+  const handleConnectWarp = async () => {
+    try {
+      const token = localStorage.getItem('o2p_token');
+      const res = await fetch('/api/warp/connect', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ port: parseInt(warpPort, 10) || 40000 })
+      });
+      const data = await res.json();
+      setWarpStatus(data);
+    } catch (e) {}
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -33,6 +97,10 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         max_retries: parseInt(maxRetries, 10) || 3,
         upstream_zen_key: upstreamZenKey.trim(),
         proxies: proxies.split('\n').map(p => p.trim()).filter(Boolean),
+        warp_mode: warpMode,
+        warp_auto_switch: warpAutoSwitch,
+        warp_rotate_on_unauth: warpRotateOnUnauth,
+        warp_port: parseInt(warpPort, 10) || 40000,
         global_rpm_limit: parseInt(globalRpm, 10),
         global_tpm_limit: parseInt(globalTpm, 10)
       });
@@ -108,6 +176,126 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             checked={autoUpdateCli}
             onChange={setAutoUpdateCli}
           />
+        </div>
+      </div>
+
+      {/* Cloudflare WARP Proxy & Unauth Auto-Switch Card */}
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+              <FiShield size={18} style={{ color: 'var(--primary)' }} />
+              <h3 style={{ fontSize: '1rem', fontWeight: '700' }}>Cloudflare WARP Proxy & Auto-Switch</h3>
+              {warpStatus?.available ? (
+                warpStatus.connected ? (
+                  <span className="badge badge-success">WARP Connected (127.0.0.1:{warpStatus.port})</span>
+                ) : (
+                  <span className="badge badge-warning">WARP Disconnected</span>
+                )
+              ) : (
+                <span className="badge badge-secondary">Not Installed</span>
+              )}
+            </div>
+            <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)' }}>
+              Routes through Cloudflare's global edge network via native SOCKS5 proxy to bypass anonymous IP limits and 403 blocks.
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            {warpStatus?.available && !warpStatus.connected && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={handleConnectWarp}
+              >
+                Connect WARP
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={handleRotateWarp}
+              disabled={isRotatingWarp || !warpStatus?.available}
+              title="Rotate tunnel session keys for a fresh Cloudflare egress IP"
+            >
+              <FiRefreshCw size={14} className={isRotatingWarp ? 'spin' : ''} />
+              <span>{isRotatingWarp ? 'Rotating...' : 'Rotate WARP Keys'}</span>
+            </button>
+          </div>
+        </div>
+
+        {warpFeedback && (
+          <div style={{
+            padding: '0.65rem',
+            backgroundColor: 'var(--muted)',
+            borderRadius: 'var(--radius)',
+            borderLeft: '3px solid var(--primary)',
+            fontSize: '0.8rem',
+            marginBottom: '1rem'
+          }}>
+            {warpFeedback}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.35rem' }}>
+              WARP Routing Mode
+            </label>
+            <CustomSelect
+              value={warpMode}
+              onChange={setWarpMode}
+              options={[
+                { value: 'auto', label: 'Auto (Recommended)', description: 'Direct connection first; auto-switches to WARP on 401/403/unauth' },
+                { value: 'always', label: 'Always WARP', description: 'Route 100% of gateway traffic through Cloudflare WARP proxy' },
+                { value: 'disabled', label: 'Disabled', description: 'Do not use Cloudflare WARP proxy' }
+              ]}
+            />
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
+            <div>
+              <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Auto-Switch to WARP on 403 / Unauth</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
+                Automatically fails over to WARP proxy whenever upstream returns 401, 403, or FreeTierError
+              </div>
+            </div>
+            <CustomToggle
+              checked={warpAutoSwitch}
+              onChange={setWarpAutoSwitch}
+            />
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
+            <div>
+              <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Rotate WARP Keys on Every Unauth</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
+                Re-negotiates Cloudflare tunnel keys on unauth drops to get fresh edge IP sessions
+              </div>
+            </div>
+            <CustomToggle
+              checked={warpRotateOnUnauth}
+              onChange={setWarpRotateOnUnauth}
+            />
+          </div>
+
+          <div style={{ paddingTop: '0.6rem', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <div>
+              <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
+                WARP SOCKS5 Port
+              </label>
+              <input
+                type="number"
+                className="input-field"
+                style={{ width: '120px' }}
+                value={warpPort}
+                onChange={e => setWarpPort(e.target.value)}
+                placeholder="40000"
+              />
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', marginTop: '1.25rem' }}>
+              Standard port: 40000 (127.0.0.1:40000)
+            </div>
+          </div>
         </div>
       </div>
 

@@ -45,6 +45,10 @@ const DEFAULT_CONFIG = {
   request_timeout_ms: 60000,
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
   proxies: process.env.PROXIES ? process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean) : [],
+  warp_mode: process.env.WARP_MODE || 'auto', // 'auto' | 'always' | 'disabled'
+  warp_auto_switch: process.env.WARP_AUTO_SWITCH !== 'false',
+  warp_rotate_on_unauth: process.env.WARP_ROTATE_ON_UNAUTH !== 'false',
+  warp_port: parseInt(process.env.WARP_PORT, 10) || 40000,
   upstream_models_url: 'https://opencode.ai/zen/v1/models',
   upstream_metadata_url: 'https://models.opencode.ai/api.json',
   upstream_inference_url: 'https://opencode.ai/inference/openai/v1/chat/completions'

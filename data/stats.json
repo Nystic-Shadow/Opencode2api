@@ -663,13 +663,6 @@
   ],
   "history": [
     {
-      "timestamp": "08:52 pm",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 6631,
-      "successRate": 90.5
-    },
-    {
       "timestamp": "08:53 pm",
       "rpm": 0,
       "tpm": 0,
@@ -1077,6 +1070,13 @@
     },
     {
       "timestamp": "09:53 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 6229,
+      "successRate": 92
+    },
+    {
+      "timestamp": "09:54 pm",
       "rpm": 0,
       "tpm": 0,
       "latency": 6229,

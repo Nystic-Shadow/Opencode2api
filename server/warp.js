@@ -63,7 +63,7 @@ class CloudflareWarpManager {
   }
 
   isReady() {
-    return Boolean(this.statusCache && (this.statusCache.connected || this.statusCache.socketAlive));
+    return Boolean(this.statusCache && this.statusCache.socketAlive === true);
   }
 
   execWarp(args) {
@@ -143,7 +143,9 @@ class CloudflareWarpManager {
         try { settingsJson = JSON.parse(settingsStr); } catch (e) {}
 
         const socketAlive = await this.probeSocks5(host, port);
-        const isConnected = statusJson?.status === 'Connected' || statusStr.toLowerCase().includes('connected') || socketAlive;
+        const cliStatus = statusJson?.status || (statusStr.includes('Connecting') ? 'Connecting' : (statusStr.includes('Disconnected') ? 'Disconnected' : 'Unknown'));
+        const cliConnected = String(statusJson?.status || '').toLowerCase() === 'connected' || (/\bconnected\b/i.test(statusStr) && !/disconnect|connecting/i.test(statusStr));
+        const isConnected = socketAlive || cliConnected;
         const opMode = settingsJson?.settings?.operation_mode || (statusStr.includes('proxy') ? 'proxy' : 'warp');
         const reportedPort = settingsJson?.settings?.proxy_port || port;
 
@@ -158,9 +160,9 @@ class CloudflareWarpManager {
           available: true,
           installed: true,
           cliPath: this.cliPath,
-          status: isConnected ? 'Connected' : (socketAlive ? 'Proxy Active' : (statusJson?.status || 'Connecting')),
+          status: socketAlive ? 'Connected' : (cliConnected ? 'Connected' : cliStatus),
           connected: isConnected,
-          running: isConnected || socketAlive,
+          running: isConnected,
           mode: opMode,
           host: host,
           port: reportedPort,

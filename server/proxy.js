@@ -519,7 +519,10 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       });
       res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
       let errPayload = attemptResult.body;
-      if (attemptResult.statusCode === 403 && typeof attemptResult.body === 'string' && attemptResult.body.includes('FreeTierError')) {
+      const isFreeTierErr = attemptResult.statusCode === 403 && typeof errPayload === 'string' &&
+        (errPayload.includes('FreeTierError') || errPayload.includes('FreeUsageLimitError') || errPayload.includes('capacity limit') || errPayload.includes('rate limit'));
+
+      if (isFreeTierErr) {
         errPayload = JSON.stringify({
           error: {
             message: "OpenCode Free Tier capacity limit reached for this IP window. Rate limits automatically reset shortly. You can also configure an upstream Zen key or proxy in Settings to continue without interruption.",
@@ -527,8 +530,20 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
             code: 403
           }
         });
+      } else {
+        try {
+          JSON.parse(errPayload);
+        } catch (e) {
+          errPayload = JSON.stringify({
+            error: {
+              message: typeof errPayload === 'string' && errPayload ? errPayload : `Upstream gateway error (Status ${attemptResult.statusCode})`,
+              type: 'upstream_error',
+              code: attemptResult.statusCode
+            }
+          });
+        }
       }
-      res.end(errPayload || JSON.stringify({ error: { message: `Upstream gateway error (Status ${attemptResult.statusCode})` } }));
+      res.end(errPayload);
       return;
     }
   }
@@ -1024,7 +1039,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
                        attemptResult.body.includes('Rate limit')
                      ));
 
-    if (isUnauth && warp.isAvailable()) {
+    if (isUnauth && warp.isReady()) {
       if (!useWarp && config.get('warp_auto_switch') !== false) {
         console.log(`[WARP] Anthropic Unauth/rate-limit detected (${attemptResult.statusCode}). Auto-switching route to Cloudflare WARP proxy for retry...`);
         useWarp = true;
@@ -1032,6 +1047,11 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         console.log('[WARP] WARP egress hit rate limit, rotating tunnel session keys...');
         await warp.rotateKeys();
       }
+    }
+
+    if (useWarp && typeof attemptResult.body === 'string' && (attemptResult.body.includes('ECONNREFUSED') || attemptResult.body.includes('timeout'))) {
+      console.warn('[Proxy] WARP proxy connection failed or refused, falling back to direct route...');
+      useWarp = false;
     }
 
     if (attempt <= maxRetries) {
@@ -1056,16 +1076,31 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       });
       res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
       let errPayload = attemptResult.body;
-      if (attemptResult.statusCode === 403 && typeof attemptResult.body === 'string' && attemptResult.body.includes('FreeTierError')) {
+      const isFreeTierErr = attemptResult.statusCode === 403 && typeof errPayload === 'string' &&
+        (errPayload.includes('FreeTierError') || errPayload.includes('FreeUsageLimitError') || errPayload.includes('capacity limit') || errPayload.includes('rate limit'));
+
+      if (isFreeTierErr) {
         errPayload = JSON.stringify({
           type: 'error',
           error: {
             type: 'rate_limit_error',
-            message: "OpenCode Free Tier capacity limit reached for this IP window. Rate limits automatically reset shortly. You can also configure an upstream Zen key or proxy in Settings to continue without interruption."
+            message: "OpenCode Free Tier capacity limit reached for this IP window. Rate limits automatically reset shortly. Configure Cloudflare WARP, an upstream proxy, or an upstream Zen key in Settings to continue without interruption."
           }
         });
+      } else {
+        try {
+          JSON.parse(errPayload);
+        } catch (e) {
+          errPayload = JSON.stringify({
+            type: 'error',
+            error: {
+              type: 'api_error',
+              message: typeof errPayload === 'string' && errPayload ? errPayload : `Upstream gateway error (${attemptResult.statusCode})`
+            }
+          });
+        }
       }
-      res.end(errPayload || JSON.stringify({ error: { type: 'api_error', message: `Upstream gateway error (${attemptResult.statusCode})` } }));
+      res.end(errPayload);
       return;
     }
   }

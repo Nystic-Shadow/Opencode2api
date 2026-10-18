@@ -176,8 +176,17 @@ export default function Playground({ models = [], token }) {
       });
 
       if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error?.message || `HTTP ${res.status}: Failed to generate response`);
+        let errMsg = `HTTP ${res.status}: Failed to generate response`;
+        try {
+          const errText = await res.text();
+          try {
+            const errJson = JSON.parse(errText);
+            errMsg = errJson.error?.message || errJson.message || errText || errMsg;
+          } catch (e) {
+            errMsg = errText || errMsg;
+          }
+        } catch (e) {}
+        throw new Error(errMsg);
       }
 
       const reader = res.body.getReader();

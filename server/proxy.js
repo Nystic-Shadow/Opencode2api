@@ -133,7 +133,7 @@ function getNextFallbackModel(currentModel, triedModels = new Set()) {
   }
 
   // Capability-based search if cascade is exhausted
-  const allModels = discovery.getModels();
+  const allModels = (discovery.getAllModels ? discovery.getAllModels() : discovery.models) || [];
   const currentMeta = allModels.find(m => m.id === currentModel);
   const wantsVision = currentMeta?.supports_vision;
 

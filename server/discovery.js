@@ -306,6 +306,10 @@ class ModelDiscoveryService {
     return [...this.models];
   }
 
+  getModels() {
+    return [...this.models];
+  }
+
   getModel(id) {
     const cleaned = cleanModelId(id);
     return this.models.find(m => m.id === cleaned || m.upstream_id === id);

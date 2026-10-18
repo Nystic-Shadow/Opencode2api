@@ -216,8 +216,10 @@ flowchart TD
 
 ### Option A: Docker Compose (Recommended)
 
+Pull and run with a single command without needing local source builds:
+
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
 ```yaml
@@ -225,6 +227,7 @@ version: '3.8'
 
 services:
   gateway:
+    image: ghcr.io/nystic-shadow/opencode2api:latest
     build: .
     container_name: opencode2api
     restart: unless-stopped

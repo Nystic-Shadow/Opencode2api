@@ -11,8 +11,8 @@
     "allowed_models": [],
     "enabled": true,
     "created_at": "2026-10-17T16:32:24.133Z",
-    "last_used": null,
-    "requests_count": 0,
-    "tokens_count": 0
+    "last_used": "2026-10-18T18:15:25.927Z",
+    "requests_count": 671,
+    "tokens_count": 1032587
   }
 ]

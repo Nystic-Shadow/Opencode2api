@@ -1,15 +1,146 @@
 {
-  "totalRequests": 99,
-  "successfulRequests": 96,
+  "totalRequests": 109,
+  "successfulRequests": 106,
   "failedRequests": 3,
-  "totalTokens": 139003,
-  "totalPromptTokens": 134482,
-  "totalCompletionTokens": 4521,
-  "totalReasoningTokens": 2592,
+  "totalTokens": 153491,
+  "totalPromptTokens": 148475,
+  "totalCompletionTokens": 5016,
+  "totalReasoningTokens": 2878,
   "dailyTokens": {
-    "2026-10-17": 139003
+    "2026-10-17": 139003,
+    "2026-10-18": 14488
   },
   "recentRequests": [
+    {
+      "id": "req_gpw33vn",
+      "model": "beam",
+      "status": 200,
+      "tokens": 1048,
+      "prompt_tokens": 1010,
+      "completion_tokens": 38,
+      "reasoning_tokens": 27,
+      "latency": 1390,
+      "stream": false,
+      "keyId": "key_54334762-8996-4e1d-8442-aebecc1d6af7",
+      "time": "2026-10-18T17:37:37.267Z"
+    },
+    {
+      "id": "req_3wnd23c",
+      "model": "deepseek-v4.1-flash",
+      "status": 200,
+      "tokens": 1056,
+      "prompt_tokens": 1016,
+      "completion_tokens": 40,
+      "reasoning_tokens": 35,
+      "latency": 2081,
+      "stream": false,
+      "keyId": "key_master",
+      "time": "2026-10-18T17:37:35.870Z"
+    },
+    {
+      "id": "req_njvtl7t",
+      "model": "glm-5.3-flash",
+      "status": 200,
+      "tokens": 1429,
+      "prompt_tokens": 1402,
+      "completion_tokens": 27,
+      "reasoning_tokens": 26,
+      "latency": 1678,
+      "stream": false,
+      "keyId": "key_master",
+      "time": "2026-10-18T17:37:31.048Z"
+    },
+    {
+      "id": "req_989hy2f",
+      "model": "nemotron-3.5-super-vl",
+      "status": 200,
+      "tokens": 2171,
+      "prompt_tokens": 2085,
+      "completion_tokens": 86,
+      "reasoning_tokens": 67,
+      "latency": 3133,
+      "stream": false,
+      "keyId": "key_master",
+      "time": "2026-10-18T17:37:29.368Z"
+    },
+    {
+      "id": "req_yunggur",
+      "model": "deepseek-v4.1-flash",
+      "status": 200,
+      "tokens": 1682,
+      "prompt_tokens": 1626,
+      "completion_tokens": 56,
+      "reasoning_tokens": 16,
+      "latency": 2294,
+      "stream": false,
+      "keyId": "key_master",
+      "time": "2026-10-18T17:37:26.233Z"
+    },
+    {
+      "id": "req_w26zn5z",
+      "model": "deepseek-v4.1-flash",
+      "status": 200,
+      "tokens": 1720,
+      "prompt_tokens": 1658,
+      "completion_tokens": 62,
+      "reasoning_tokens": 0,
+      "latency": 1565,
+      "stream": false,
+      "keyId": "key_master",
+      "time": "2026-10-18T17:37:23.937Z"
+    },
+    {
+      "id": "req_mamvtzb",
+      "model": "deepseek-v4.1-flash",
+      "status": 200,
+      "tokens": 1638,
+      "prompt_tokens": 1575,
+      "completion_tokens": 63,
+      "reasoning_tokens": 23,
+      "latency": 2144,
+      "stream": true,
+      "keyId": "key_master",
+      "time": "2026-10-18T17:37:22.371Z"
+    },
+    {
+      "id": "req_v4g9nin",
+      "model": "beam",
+      "status": 200,
+      "tokens": 1068,
+      "prompt_tokens": 1025,
+      "completion_tokens": 43,
+      "reasoning_tokens": 37,
+      "latency": 4917,
+      "stream": false,
+      "keyId": "key_master",
+      "time": "2026-10-18T17:37:20.225Z"
+    },
+    {
+      "id": "req_qwxuh82",
+      "model": "beam",
+      "status": 200,
+      "tokens": 1078,
+      "prompt_tokens": 1020,
+      "completion_tokens": 58,
+      "reasoning_tokens": 37,
+      "latency": 9468,
+      "stream": true,
+      "keyId": "key_master",
+      "time": "2026-10-18T17:37:15.306Z"
+    },
+    {
+      "id": "req_60w4g0t",
+      "model": "deepseek-v4.1-flash",
+      "status": 200,
+      "tokens": 1598,
+      "prompt_tokens": 1576,
+      "completion_tokens": 22,
+      "reasoning_tokens": 18,
+      "latency": 1963,
+      "stream": false,
+      "keyId": "key_master",
+      "time": "2026-10-18T17:37:05.834Z"
+    },
     {
       "id": "req_9n59hj8",
       "model": "beam",
@@ -529,570 +660,440 @@
       "stream": false,
       "keyId": "key_master",
       "time": "2026-10-17T19:37:10.474Z"
-    },
-    {
-      "id": "req_mpa0cdu",
-      "model": "beam",
-      "status": 502,
-      "tokens": 0,
-      "prompt_tokens": 0,
-      "completion_tokens": 0,
-      "reasoning_tokens": 0,
-      "latency": 2830,
-      "stream": true,
-      "keyId": "key_master",
-      "time": "2026-10-17T19:37:07.916Z"
-    },
-    {
-      "id": "req_sbx03vz",
-      "model": "deepseek-v4.1-flash",
-      "status": 200,
-      "tokens": 1423,
-      "prompt_tokens": 1404,
-      "completion_tokens": 19,
-      "reasoning_tokens": 15,
-      "latency": 6524,
-      "stream": false,
-      "keyId": "key_master",
-      "time": "2026-10-17T19:37:05.080Z"
-    },
-    {
-      "id": "req_4r5hasa",
-      "model": "beam",
-      "status": 403,
-      "tokens": 0,
-      "prompt_tokens": 0,
-      "completion_tokens": 0,
-      "reasoning_tokens": 0,
-      "latency": 4461,
-      "stream": false,
-      "keyId": "key_master",
-      "time": "2026-10-17T19:35:16.754Z"
-    },
-    {
-      "id": "req_slv24cy",
-      "model": "glm-5.3-flash",
-      "status": 200,
-      "tokens": 1510,
-      "prompt_tokens": 1402,
-      "completion_tokens": 108,
-      "reasoning_tokens": 112,
-      "latency": 2158,
-      "stream": false,
-      "keyId": "key_master",
-      "time": "2026-10-17T17:51:08.331Z"
-    },
-    {
-      "id": "req_m8auce5",
-      "model": "deepseek-v4.1-flash",
-      "status": 200,
-      "tokens": 1575,
-      "prompt_tokens": 1571,
-      "completion_tokens": 4,
-      "reasoning_tokens": 0,
-      "latency": 3312,
-      "stream": true,
-      "keyId": "key_master",
-      "time": "2026-10-17T17:51:06.170Z"
-    },
-    {
-      "id": "req_vjz8fd9",
-      "model": "beam",
-      "status": 200,
-      "tokens": 1045,
-      "prompt_tokens": 1015,
-      "completion_tokens": 30,
-      "reasoning_tokens": 24,
-      "latency": 714,
-      "stream": false,
-      "keyId": "key_master",
-      "time": "2026-10-17T17:51:02.855Z"
-    },
-    {
-      "id": "req_w8trpa0",
-      "model": "beam",
-      "status": 200,
-      "tokens": 1042,
-      "prompt_tokens": 1014,
-      "completion_tokens": 28,
-      "reasoning_tokens": 23,
-      "latency": 1195,
-      "stream": true,
-      "keyId": "key_master",
-      "time": "2026-10-17T17:51:02.139Z"
-    },
-    {
-      "id": "req_nrwwjwu",
-      "model": "deepseek-v4.1-flash",
-      "status": 200,
-      "tokens": 1577,
-      "prompt_tokens": 1574,
-      "completion_tokens": 3,
-      "reasoning_tokens": 0,
-      "latency": 2095,
-      "stream": false,
-      "keyId": "key_master",
-      "time": "2026-10-17T17:51:00.938Z"
-    },
-    {
-      "id": "req_ommdnpe",
-      "model": "glm-5.3-flash",
-      "status": 200,
-      "tokens": 1436,
-      "prompt_tokens": 1402,
-      "completion_tokens": 34,
-      "reasoning_tokens": 31,
-      "latency": 973,
-      "stream": false,
-      "keyId": "key_master",
-      "time": "2026-10-17T17:49:32.204Z"
-    },
-    {
-      "id": "req_zv8bwi3",
-      "model": "deepseek-v4.1-flash",
-      "status": 200,
-      "tokens": 1575,
-      "prompt_tokens": 1571,
-      "completion_tokens": 4,
-      "reasoning_tokens": 0,
-      "latency": 1852,
-      "stream": true,
-      "keyId": "key_master",
-      "time": "2026-10-17T17:49:31.229Z"
     }
   ],
   "history": [
     {
-      "timestamp": "12:21 am",
+      "timestamp": "02:09 am",
       "rpm": 0,
       "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:22 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:23 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:24 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:25 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:26 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:27 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:28 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:29 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:30 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:31 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:32 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:33 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:34 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:35 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:36 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:37 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:38 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:39 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:40 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:41 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:42 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:43 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:44 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:45 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:46 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:47 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:48 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:49 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:50 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:51 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:52 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:53 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:54 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:55 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:56 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:57 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:58 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "12:59 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "01:00 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "01:01 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "01:02 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "01:03 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2713,
-      "successRate": 100
-    },
-    {
-      "timestamp": "01:05 am",
-      "rpm": 1,
-      "tpm": 0,
-      "latency": 2801,
-      "successRate": 98.2
-    },
-    {
-      "timestamp": "01:08 am",
-      "rpm": 6,
-      "tpm": 7871,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:09 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:10 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:11 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:12 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:13 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:14 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:15 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:16 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:17 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:18 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:22 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 2836,
-      "successRate": 95.6
-    },
-    {
-      "timestamp": "01:23 am",
-      "rpm": 10,
-      "tpm": 13216,
-      "latency": 3454,
-      "successRate": 96.2
-    },
-    {
-      "timestamp": "01:24 am",
-      "rpm": 0,
-      "tpm": 0,
-      "latency": 3454,
-      "successRate": 96.2
-    },
-    {
-      "timestamp": "01:26 am",
-      "rpm": 10,
-      "tpm": 13316,
-      "latency": 3382,
-      "successRate": 96.6
-    },
-    {
-      "timestamp": "01:27 am",
-      "rpm": 10,
-      "tpm": 13039,
       "latency": 3673,
       "successRate": 97
+    },
+    {
+      "timestamp": "02:10 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:11 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:12 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:13 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:14 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:15 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:16 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:17 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:18 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:19 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:20 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:21 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:22 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:23 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:24 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:25 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:26 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:27 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:28 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:29 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:30 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:31 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:32 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:33 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:34 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:35 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:36 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:37 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:38 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:39 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:40 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:41 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:42 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:43 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:44 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:45 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:46 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:47 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:48 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "02:49 am",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3673,
+      "successRate": 97
+    },
+    {
+      "timestamp": "11:07 pm",
+      "rpm": 10,
+      "tpm": 14488,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:08 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:09 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:10 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:11 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:12 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:13 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:14 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:15 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:16 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:17 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:18 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:19 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:20 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:21 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:22 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:23 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:24 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
+    },
+    {
+      "timestamp": "11:25 pm",
+      "rpm": 0,
+      "tpm": 0,
+      "latency": 3764,
+      "successRate": 97.2
     }
   ],
   "modelUsage": {
     "deepseek-v4.1-flash": {
-      "requests": 45,
-      "tokens": 45858,
-      "reasoning_tokens": 927
+      "requests": 50,
+      "tokens": 53552,
+      "reasoning_tokens": 1019
     },
     "nemotron-3.5-super-vl": {
-      "requests": 8,
-      "tokens": 8474,
-      "reasoning_tokens": 240
+      "requests": 9,
+      "tokens": 10645,
+      "reasoning_tokens": 307
     },
     "big-pickle": {
       "requests": 4,
@@ -1100,14 +1101,14 @@
       "reasoning_tokens": 71
     },
     "beam": {
-      "requests": 31,
-      "tokens": 26526,
-      "reasoning_tokens": 231
+      "requests": 34,
+      "tokens": 29720,
+      "reasoning_tokens": 332
     },
     "glm-5.3-flash": {
-      "requests": 13,
-      "tokens": 9640,
-      "reasoning_tokens": 331
+      "requests": 14,
+      "tokens": 11069,
+      "reasoning_tokens": 357
     },
     "mimo-v2.6-flash": {
       "requests": 2,

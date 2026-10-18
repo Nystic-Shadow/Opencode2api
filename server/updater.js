@@ -25,9 +25,16 @@ class OpenCodeCliUpdater {
 
   startChecker() {
     if (this.timer) clearInterval(this.timer);
+    // Initial check 5 seconds after boot
+    setTimeout(() => {
+      if (config.get('auto_update_cli') !== false) {
+        this.checkForUpdate().catch(e => console.warn('[Updater] Initial check failed:', e.message));
+      }
+    }, 5000);
+
     // Check every 30 minutes for new OpenCode CLI releases
     this.timer = setInterval(() => {
-      if (config.get('auto_update_cli')) {
+      if (config.get('auto_update_cli') !== false) {
         this.checkForUpdate().catch(e => console.warn('[Updater] Periodic check failed:', e.message));
       }
     }, 1800 * 1000);
@@ -58,7 +65,15 @@ class OpenCodeCliUpdater {
         // 2. Hot-update version in config
         config.update({ client_version: cleanedTag });
 
-        // 3. Post success notification
+        // 3. Trigger immediate model discovery for new models in this release
+        try {
+          const discovery = require('./discovery');
+          await discovery.sync();
+        } catch (e) {
+          console.warn('[Updater] Model discovery sync after update warning:', e.message);
+        }
+
+        // 4. Post success notification
         notifications.add(
           'OpenCode CLI Auto-Updated',
           `Successfully upgraded client fingerprint to OpenCode CLI v${cleanedTag} with zero container downtime.`,

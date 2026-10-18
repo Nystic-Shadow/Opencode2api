@@ -7,26 +7,23 @@ RUN cd client && npm install
 COPY client/ ./client/
 RUN cd client && npm run build
 
-# Production runtime stage with integrated Cloudflare WARP client
+# Production runtime stage with integrated userspace Cloudflare WARP engine (wireproxy)
 FROM node:20-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install dependencies, D-Bus, iptables, and Cloudflare WARP official client
+# Install dependencies, ca-certificates, curl, and wireproxy (userspace WireGuard + SOCKS5 client)
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    gnupg \
-    lsb-release \
-    dbus \
-    iptables \
-    procps \
     ca-certificates \
-    && mkdir -p /usr/share/keyrings \
-    && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ bookworm main" > /etc/apt/sources.list.d/cloudflare-client.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends cloudflare-warp \
+    procps \
+    && ARCH="${TARGETARCH:-amd64}" \
+    && curl -fsSL "https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_linux_${ARCH}.tar.gz" -o /tmp/wireproxy.tar.gz \
+    && tar -xzf /tmp/wireproxy.tar.gz -C /usr/local/bin/ wireproxy \
+    && chmod +x /usr/local/bin/wireproxy \
+    && rm -f /tmp/wireproxy.tar.gz \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -35,7 +32,7 @@ COPY server/ ./server/
 COPY scripts/ ./scripts/
 COPY --from=builder /app/dist ./dist
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh scripts/*.sh && mkdir -p /app/data /var/lib/cloudflare-warp /var/run/dbus
+RUN chmod +x /entrypoint.sh scripts/*.sh && mkdir -p /app/data
 
 EXPOSE 8080
 

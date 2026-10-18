@@ -191,16 +191,16 @@ async function handleAdminRoute(req, res, pathname) {
   // Cloudflare WARP: Connect & Configure Proxy Mode
   if (pathname === '/api/warp/connect' && req.method === 'POST') {
     const body = await parseBody(req);
-    const port = body.port || config.get('warp_port') || 40000;
-    const ok = await warp.ensureProxyMode(port);
+    const ok = await warp.autoBootstrap(true);
     const status = await warp.getStatus();
     return sendJson(res, 200, { success: ok, ...status });
   }
 
-  // Cloudflare WARP: Auto-Install on Host
+  // Cloudflare WARP: Auto-Install / Auto-Bootstrap
   if (pathname === '/api/warp/install' && req.method === 'POST') {
     const resInstall = await warp.triggerAutoInstall();
-    return sendJson(res, 200, resInstall);
+    const status = await warp.getStatus();
+    return sendJson(res, 200, { ...resInstall, ...status });
   }
 
   // Settings: Check CLI Update

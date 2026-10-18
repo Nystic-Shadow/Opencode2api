@@ -70,6 +70,8 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   };
 
   const handleConnectWarp = async () => {
+    setIsInstallingWarp(true);
+    setWarpFeedback(null);
     try {
       const token = localStorage.getItem('o2p_token');
       const res = await fetch('/api/warp/connect', {
@@ -82,7 +84,17 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
       });
       const data = await res.json();
       setWarpStatus(data);
-    } catch (e) {}
+      if (data.connected) {
+        setWarpFeedback('Cloudflare WARP connected successfully!');
+      } else {
+        setWarpFeedback(data.reason || 'Could not connect to WARP socket.');
+      }
+      setTimeout(() => setWarpFeedback(null), 4000);
+    } catch (e) {
+      setWarpFeedback('Connection error: ' + e.message);
+    } finally {
+      setIsInstallingWarp(false);
+    }
   };
 
   const handleInstallWarp = async () => {
@@ -95,11 +107,13 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         headers: token ? { 'Authorization': `Bearer ${token}` } : {}
       });
       const data = await res.json();
-      if (data.success) {
-        setWarpFeedback('WARP auto-installation initiated in background. Please wait ~15s, then check status.');
+      setWarpStatus(data);
+      if (data.success || data.connected) {
+        setWarpFeedback('Cloudflare WARP auto-setup complete & connected successfully!');
       } else {
-        setWarpFeedback('Notice: ' + (data.error || 'Please execute the 1-line curl command below in server terminal.'));
+        setWarpFeedback(data.error || 'Please run the 1-line script below on your host server.');
       }
+      setTimeout(() => setWarpFeedback(null), 5000);
     } catch (e) {
       setWarpFeedback('Failed to trigger auto-install: ' + e.message);
     } finally {
@@ -214,7 +228,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               <h3 style={{ fontSize: '1rem', fontWeight: '700' }}>Cloudflare WARP Proxy & Auto-Switch</h3>
               {warpStatus?.available ? (
                 warpStatus.connected ? (
-                  <span className="badge badge-success">WARP Connected (127.0.0.1:{warpStatus.port})</span>
+                  <span className="badge badge-success">WARP Connected ({warpStatus.engine ? `${warpStatus.engine} • ` : ''}{warpStatus.host || '127.0.0.1'}:{warpStatus.port})</span>
                 ) : (
                   <span className="badge badge-warning">WARP Disconnected</span>
                 )
@@ -233,11 +247,11 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                 className="btn-primary"
                 onClick={handleInstallWarp}
                 disabled={isInstallingWarp}
-                title="Automatically install Cloudflare WARP via system package manager"
+                title="Automatically configure and connect userspace Cloudflare WARP proxy"
                 style={{ fontSize: '0.8rem', padding: '0.4rem 0.75rem' }}
               >
                 <FiZap size={13} />
-                <span>{isInstallingWarp ? 'Installing...' : 'Auto-Install WARP'}</span>
+                <span>{isInstallingWarp ? 'Setting up...' : 'Auto-Setup WARP'}</span>
               </button>
             )}
             {warpStatus?.available && !warpStatus.connected && (

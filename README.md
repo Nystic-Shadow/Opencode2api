@@ -246,11 +246,39 @@ services:
       - PORT=8080
       - DASHBOARD_USER=admin
       - DASHBOARD_PASS=admin123
+      - WARP_HOST=warp
+      - WARP_PORT=1080
     volumes:
       - ./data:/app/data
+    depends_on:
+      - warp
+
+  warp:
+    image: caomingjun/warp:latest
+    container_name: opencode2api-warp
+    restart: unless-stopped
+    environment:
+      - WARP_SLEEP=2
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - warp-data:/var/lib/cloudflare-warp
+
+volumes:
+  warp-data:
 ```
 
-### Option B: Local Node.js (v18+)
+### Option B: Cloudflare WARP 1-Line Host Auto-Installer
+If running directly on a Linux VPS / host without Docker compose:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Nystic-Shadow/Opencode2api/main/scripts/install-warp.sh | sudo bash
+```
+*Installs the official Cloudflare WARP client, registers the device, configures SOCKS5 proxy on `127.0.0.1:40000`, and verifies upstream edge handshake.*
+
+### Option C: Local Node.js (v18+)
 
 ```bash
 git clone https://github.com/Nystic-Shadow/Opencode2api.git

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FiSettings, FiShield, FiRefreshCw, FiCheck, FiSliders, FiCpu } from '../components/Icons';
+import { FiSettings, FiShield, FiRefreshCw, FiCheck, FiSliders, FiCpu, FiZap, FiTerminal, FiCopy } from '../components/Icons';
 import CustomToggle from '../components/CustomToggle';
 import CustomSelect from '../components/CustomSelect';
 
@@ -14,11 +14,14 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [upstreamZenKey, setUpstreamZenKey] = useState(settings.upstream_zen_key || '');
   const [proxies, setProxies] = useState(Array.isArray(settings.proxies) ? settings.proxies.join('\n') : (settings.proxies || ''));
   const [warpMode, setWarpMode] = useState(settings.warp_mode || 'auto');
+  const [warpHost, setWarpHost] = useState(settings.warp_host || '127.0.0.1');
   const [warpAutoSwitch, setWarpAutoSwitch] = useState(settings.warp_auto_switch !== false);
   const [warpRotateOnUnauth, setWarpRotateOnUnauth] = useState(settings.warp_rotate_on_unauth !== false);
   const [warpPort, setWarpPort] = useState(settings.warp_port || 40000);
   const [warpStatus, setWarpStatus] = useState(null);
   const [isRotatingWarp, setIsRotatingWarp] = useState(false);
+  const [isInstallingWarp, setIsInstallingWarp] = useState(false);
+  const [copiedCmd, setCopiedCmd] = useState(false);
   const [warpFeedback, setWarpFeedback] = useState(null);
   const [globalRpm, setGlobalRpm] = useState(settings.global_rpm_limit || 0);
   const [globalTpm, setGlobalTpm] = useState(settings.global_tpm_limit || 0);
@@ -75,11 +78,33 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
           'Content-Type': 'application/json',
           ...(token ? { 'Authorization': `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({ port: parseInt(warpPort, 10) || 40000 })
+        body: JSON.stringify({ host: warpHost.trim(), port: parseInt(warpPort, 10) || 40000 })
       });
       const data = await res.json();
       setWarpStatus(data);
     } catch (e) {}
+  };
+
+  const handleInstallWarp = async () => {
+    setIsInstallingWarp(true);
+    setWarpFeedback(null);
+    try {
+      const token = localStorage.getItem('o2p_token');
+      const res = await fetch('/api/warp/install', {
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      const data = await res.json();
+      if (data.success) {
+        setWarpFeedback('WARP auto-installation initiated in background. Please wait ~15s, then check status.');
+      } else {
+        setWarpFeedback('Notice: ' + (data.error || 'Please execute the 1-line curl command below in server terminal.'));
+      }
+    } catch (e) {
+      setWarpFeedback('Failed to trigger auto-install: ' + e.message);
+    } finally {
+      setIsInstallingWarp(false);
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -98,6 +123,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         upstream_zen_key: upstreamZenKey.trim(),
         proxies: proxies.split('\n').map(p => p.trim()).filter(Boolean),
         warp_mode: warpMode,
+        warp_host: warpHost.trim() || '127.0.0.1',
         warp_auto_switch: warpAutoSwitch,
         warp_rotate_on_unauth: warpRotateOnUnauth,
         warp_port: parseInt(warpPort, 10) || 40000,
@@ -200,12 +226,26 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               Routes through Cloudflare's global edge network via native SOCKS5 proxy to bypass anonymous IP limits and 403 blocks.
             </p>
           </div>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            {!warpStatus?.connected && (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={handleInstallWarp}
+                disabled={isInstallingWarp}
+                title="Automatically install Cloudflare WARP via system package manager"
+                style={{ fontSize: '0.8rem', padding: '0.4rem 0.75rem' }}
+              >
+                <FiZap size={13} />
+                <span>{isInstallingWarp ? 'Installing...' : 'Auto-Install WARP'}</span>
+              </button>
+            )}
             {warpStatus?.available && !warpStatus.connected && (
               <button
                 type="button"
                 className="btn-secondary"
                 onClick={handleConnectWarp}
+                style={{ fontSize: '0.8rem', padding: '0.4rem 0.75rem' }}
               >
                 Connect WARP
               </button>
@@ -216,12 +256,62 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               onClick={handleRotateWarp}
               disabled={isRotatingWarp || !warpStatus?.available}
               title="Rotate tunnel session keys for a fresh Cloudflare egress IP"
+              style={{ fontSize: '0.8rem', padding: '0.4rem 0.75rem' }}
             >
-              <FiRefreshCw size={14} className={isRotatingWarp ? 'spin' : ''} />
+              <FiRefreshCw size={13} className={isRotatingWarp ? 'spin' : ''} />
               <span>{isRotatingWarp ? 'Rotating...' : 'Rotate WARP Keys'}</span>
             </button>
           </div>
         </div>
+
+        {!warpStatus?.connected && (
+          <div style={{
+            padding: '0.85rem 1rem',
+            backgroundColor: 'rgba(242, 153, 74, 0.08)',
+            border: '1px solid rgba(242, 153, 74, 0.25)',
+            borderRadius: 'var(--radius)',
+            fontSize: '0.82rem',
+            marginBottom: '1rem',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.45rem'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontWeight: '600', color: '#f2994a', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                <FiTerminal size={14} />
+                <span>Cloudflare WARP 1-Line Host Auto-Installer</span>
+              </span>
+              <button
+                type="button"
+                className="badge badge-muted"
+                style={{ cursor: 'pointer', background: 'transparent', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
+                onClick={() => {
+                  navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/Nystic-Shadow/Opencode2api/main/scripts/install-warp.sh | sudo bash');
+                  setCopiedCmd(true);
+                  setTimeout(() => setCopiedCmd(false), 2000);
+                }}
+              >
+                <FiCopy size={11} />
+                <span>{copiedCmd ? '✓ Copied' : 'Copy Command'}</span>
+              </button>
+            </div>
+            <code style={{
+              display: 'block',
+              padding: '0.45rem 0.65rem',
+              backgroundColor: 'var(--background)',
+              borderRadius: 'var(--radius)',
+              fontFamily: 'monospace',
+              fontSize: '0.78rem',
+              color: 'var(--foreground)',
+              overflowX: 'auto'
+            }}>
+              curl -fsSL https://raw.githubusercontent.com/Nystic-Shadow/Opencode2api/main/scripts/install-warp.sh | sudo bash
+            </code>
+            <div style={{ fontSize: '0.74rem', color: 'var(--muted-foreground)' }}>
+              Works across Debian, Ubuntu, CentOS, RHEL, Fedora, & Arch. If deployed via Docker Compose, the <code>warp</code> sidecar runs out-of-the-box!
+            </div>
+          </div>
+        )}
 
         {warpFeedback && (
           <div style={{
@@ -278,7 +368,24 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             />
           </div>
 
-          <div style={{ paddingTop: '0.6rem', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <div style={{ paddingTop: '0.6rem', borderTop: '1px solid var(--border)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+            <div>
+              <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
+                WARP Proxy Host
+              </label>
+              <input
+                type="text"
+                className="input-field"
+                style={{ width: '100%' }}
+                value={warpHost}
+                onChange={e => setWarpHost(e.target.value)}
+                placeholder="127.0.0.1"
+              />
+              <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)', display: 'block', marginTop: '0.25rem' }}>
+                <code>127.0.0.1</code> for container/host, or <code>warp</code> for Docker Compose sidecar.
+              </span>
+            </div>
+
             <div>
               <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
                 WARP SOCKS5 Port
@@ -286,14 +393,14 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               <input
                 type="number"
                 className="input-field"
-                style={{ width: '120px' }}
+                style={{ width: '100%' }}
                 value={warpPort}
                 onChange={e => setWarpPort(e.target.value)}
                 placeholder="40000"
               />
-            </div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', marginTop: '1.25rem' }}>
-              Standard port: 40000 (127.0.0.1:40000)
+              <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)', display: 'block', marginTop: '0.25rem' }}>
+                <code>40000</code> (standalone) or <code>1080</code> (Compose sidecar).
+              </span>
             </div>
           </div>
         </div>

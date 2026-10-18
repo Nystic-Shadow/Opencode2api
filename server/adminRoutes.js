@@ -157,6 +157,7 @@ async function handleAdminRoute(req, res, pathname) {
     if (body.global_tpm_limit !== undefined) updates.global_tpm_limit = parseInt(body.global_tpm_limit, 10) || 0;
     if (body.upstream_zen_key !== undefined) updates.upstream_zen_key = body.upstream_zen_key.trim();
     if (body.warp_mode !== undefined) updates.warp_mode = body.warp_mode;
+    if (body.warp_host !== undefined) updates.warp_host = (body.warp_host || '127.0.0.1').trim();
     if (body.warp_auto_switch !== undefined) updates.warp_auto_switch = !!body.warp_auto_switch;
     if (body.warp_rotate_on_unauth !== undefined) updates.warp_rotate_on_unauth = !!body.warp_rotate_on_unauth;
     if (body.warp_port !== undefined) updates.warp_port = parseInt(body.warp_port, 10) || 40000;
@@ -194,6 +195,12 @@ async function handleAdminRoute(req, res, pathname) {
     const ok = await warp.ensureProxyMode(port);
     const status = await warp.getStatus();
     return sendJson(res, 200, { success: ok, ...status });
+  }
+
+  // Cloudflare WARP: Auto-Install on Host
+  if (pathname === '/api/warp/install' && req.method === 'POST') {
+    const resInstall = await warp.triggerAutoInstall();
+    return sendJson(res, 200, resInstall);
   }
 
   // Settings: Check CLI Update

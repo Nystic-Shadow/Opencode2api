@@ -1,4 +1,4 @@
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
@@ -12,7 +12,7 @@ class CloudflareWarpManager {
     this.lastRotationTime = 0;
     this.rotationCooldownMs = 4000;
     this.cachedAgent = null;
-    this.cachedPort = 0;
+    this.cachedKey = '';
     this.statusCache = null;
     this.lastStatusCheck = 0;
 
@@ -23,7 +23,16 @@ class CloudflareWarpManager {
         console.warn('[WARP] Initial proxy mode check warning:', err.message);
       });
     } else {
-      console.log('[WARP] Cloudflare WARP CLI not detected on system.');
+      console.log('[WARP] Cloudflare WARP CLI not detected. Checking SOCKS5 socket...');
+      this.probeSocks5().then(alive => {
+        if (alive) {
+          const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+          const port = config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
+          console.log(`[WARP] Cloudflare WARP SOCKS5 proxy detected and active on ${host}:${port}`);
+        } else {
+          console.log('[WARP] SOCKS5 proxy socket not active. WARP proxy idle.');
+        }
+      }).catch(() => {});
     }
   }
 
@@ -67,74 +76,126 @@ class CloudflareWarpManager {
     });
   }
 
+  /**
+   * Fast SOCKS5 socket probe (RFC 1928) to test if proxy is answering on host:port
+   */
+  probeSocks5(host, port) {
+    const targetHost = host || config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+    const targetPort = port || config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
+
+    return new Promise((resolve) => {
+      const socket = net.connect({ host: targetHost, port: targetPort, timeout: 2000 }, () => {
+        // Send SOCKS5 handshake: VER=5, NMETHODS=1, METHOD=0
+        socket.write(Buffer.from([0x05, 0x01, 0x00]));
+      });
+
+      socket.on('data', (data) => {
+        socket.destroy();
+        resolve(data.length >= 2 && data[0] === 0x05 && data[1] === 0x00);
+      });
+
+      socket.on('error', () => {
+        socket.destroy();
+        resolve(false);
+      });
+
+      socket.on('timeout', () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+  }
+
   async getStatus() {
     const now = Date.now();
     if (this.statusCache && (now - this.lastStatusCheck < 3000)) {
       return this.statusCache;
     }
 
-    if (!this.isAvailable()) {
-      return {
-        available: false,
-        installed: false,
-        status: 'Not Installed',
-        mode: 'none',
-        port: 40000,
-        connected: false,
-        running: false
-      };
+    const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+    const port = config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
+
+    // 1. If CLI is present, check official CLI status
+    if (this.isAvailable()) {
+      try {
+        let statusStr = '';
+        let settingsStr = '';
+
+        try {
+          statusStr = await this.execWarp(['--json', 'status']);
+        } catch (e) {
+          statusStr = await this.execWarp(['status']);
+        }
+
+        try {
+          settingsStr = await this.execWarp(['--json', 'settings', 'list']);
+        } catch (e) {}
+
+        let statusJson = null;
+        let settingsJson = null;
+
+        try { statusJson = JSON.parse(statusStr); } catch (e) {}
+        try { settingsJson = JSON.parse(settingsStr); } catch (e) {}
+
+        const isConnected = statusJson?.status === 'Connected' || statusStr.toLowerCase().includes('connected');
+        const opMode = settingsJson?.settings?.operation_mode || (statusStr.includes('proxy') ? 'proxy' : 'warp');
+        const reportedPort = settingsJson?.settings?.proxy_port || port;
+
+        const result = {
+          available: true,
+          installed: true,
+          cliPath: this.cliPath,
+          status: isConnected ? 'Connected' : 'Disconnected',
+          connected: isConnected,
+          running: isConnected,
+          mode: opMode,
+          host: host,
+          port: reportedPort,
+          reason: statusJson?.reason || 'OK'
+        };
+
+        this.statusCache = result;
+        this.lastStatusCheck = now;
+        return result;
+      } catch (err) {
+        // Fall through to probe check
+      }
     }
 
-    try {
-      let statusStr = '';
-      let settingsStr = '';
-
-      try {
-        statusStr = await this.execWarp(['--json', 'status']);
-      } catch (e) {
-        statusStr = await this.execWarp(['status']);
-      }
-
-      try {
-        settingsStr = await this.execWarp(['--json', 'settings', 'list']);
-      } catch (e) {}
-
-      let statusJson = null;
-      let settingsJson = null;
-
-      try { statusJson = JSON.parse(statusStr); } catch (e) {}
-      try { settingsJson = JSON.parse(settingsStr); } catch (e) {}
-
-      const isConnected = statusJson?.status === 'Connected' || statusStr.toLowerCase().includes('connected');
-      const opMode = settingsJson?.settings?.operation_mode || (statusStr.includes('proxy') ? 'proxy' : 'warp');
-      const port = settingsJson?.settings?.proxy_port || config.get('warp_port') || 40000;
-
+    // 2. If CLI is absent or failed, check if SOCKS5 proxy port is active (e.g. sidecar or host daemon)
+    const isSocketAlive = await this.probeSocks5(host, port);
+    if (isSocketAlive) {
       const result = {
         available: true,
         installed: true,
-        cliPath: this.cliPath,
-        status: isConnected ? 'Connected' : 'Disconnected',
-        connected: isConnected,
-        running: isConnected,
-        mode: opMode,
+        cliPath: this.cliPath || 'SOCKS5 Daemon / Sidecar',
+        status: 'Connected',
+        connected: true,
+        running: true,
+        mode: 'proxy',
+        host: host,
         port: port,
-        reason: statusJson?.reason || 'OK'
+        reason: 'SOCKS5 Active'
       };
-
       this.statusCache = result;
       this.lastStatusCheck = now;
       return result;
-    } catch (err) {
-      return {
-        available: true,
-        installed: true,
-        status: 'Error',
-        connected: false,
-        running: false,
-        error: err.message,
-        port: config.get('warp_port') || 40000
-      };
     }
+
+    const uninstalledResult = {
+      available: false,
+      installed: false,
+      status: 'Not Installed',
+      mode: 'none',
+      host: host,
+      port: port,
+      connected: false,
+      running: false,
+      installCmd: 'curl -fsSL https://raw.githubusercontent.com/Nystic-Shadow/Opencode2api/main/scripts/install-warp.sh | sudo bash'
+    };
+    this.statusCache = uninstalledResult;
+    this.lastStatusCheck = now;
+    return uninstalledResult;
   }
 
   async ensureProxyMode(targetPort) {
@@ -147,7 +208,8 @@ class CloudflareWarpManager {
         await this.execWarp(['proxy', 'port', String(port)]);
       } catch (e) {}
       await this.execWarp(['connect']);
-      console.log(`[WARP] Cloudflare WARP proxy mode active on 127.0.0.1:${port}`);
+      const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+      console.log(`[WARP] Cloudflare WARP proxy mode active on ${host}:${port}`);
       this.statusCache = null; // Invalidate cache
       return true;
     } catch (err) {
@@ -157,18 +219,22 @@ class CloudflareWarpManager {
   }
 
   async rotateKeys() {
-    if (!this.isAvailable()) return false;
-
     const now = Date.now();
     if (now - this.lastRotationTime < this.rotationCooldownMs) {
       return true; // Throttle excessive rotations
     }
     this.lastRotationTime = now;
 
+    if (!this.isAvailable()) {
+      // Re-probe socket
+      const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+      const port = config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
+      return await this.probeSocks5(host, port);
+    }
+
     try {
       console.log('[WARP] Rotating tunnel keys / switching Cloudflare edge session on unauth...');
       await this.execWarp(['tunnel', 'rotate-keys']);
-      // Allow brief moment for WARP to establish new tunnel handshake
       await new Promise(r => setTimeout(r, 1200));
       console.log('[WARP] Cloudflare WARP tunnel keys successfully rotated (fresh edge egress active).');
       this.statusCache = null;
@@ -188,12 +254,38 @@ class CloudflareWarpManager {
     }
   }
 
+  async triggerAutoInstall() {
+    if (process.platform === 'win32') {
+      return { success: false, error: 'Automatic installation on Windows requires manual installer download from https://1.1.1.1' };
+    }
+    const scriptPath = path.join(__dirname, '..', 'scripts', 'install-warp.sh');
+    if (!fs.existsSync(scriptPath)) {
+      return { success: false, error: 'Install script not found on disk at scripts/install-warp.sh' };
+    }
+
+    return new Promise((resolve) => {
+      try {
+        const child = spawn('bash', [scriptPath], { detached: true, stdio: 'ignore' });
+        child.unref();
+        resolve({
+          success: true,
+          message: 'Cloudflare WARP installation initiated in background. Refresh status in 15 seconds.'
+        });
+      } catch (err) {
+        resolve({ success: false, error: 'Failed to launch installer: ' + err.message });
+      }
+    });
+  }
+
   /**
    * Pure native SOCKS5 socket creator (RFC 1928, Zero dependencies).
    */
-  createSocks5Connection(targetHost, targetPort, proxyHost = '127.0.0.1', proxyPort = 40000) {
+  createSocks5Connection(targetHost, targetPort, proxyHost, proxyPort) {
+    const pHost = proxyHost || config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+    const pPort = proxyPort || config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
+
     return new Promise((resolve, reject) => {
-      const socket = net.connect({ host: proxyHost, port: proxyPort }, () => {
+      const socket = net.connect({ host: pHost, port: pPort }, () => {
         // Handshake: [VER=5, NMETHODS=1, METHOD=0 (NO_AUTH)]
         socket.write(Buffer.from([0x05, 0x01, 0x00]));
       });
@@ -236,14 +328,17 @@ class CloudflareWarpManager {
   /**
    * Returns an https.Agent routed through Cloudflare WARP SOCKS5.
    */
-  getWarpAgent(port) {
-    const targetPort = port || config.get('warp_port') || 40000;
-    if (this.cachedAgent && this.cachedPort === targetPort) {
+  getWarpAgent(port, host) {
+    const targetHost = host || config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+    const targetPort = port || config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
+    const cacheKey = `${targetHost}:${targetPort}`;
+
+    if (this.cachedAgent && this.cachedKey === cacheKey) {
       return this.cachedAgent;
     }
 
     const manager = this;
-    this.cachedPort = targetPort;
+    this.cachedKey = cacheKey;
     const agent = new https.Agent({
       keepAlive: true,
       maxSockets: 128,
@@ -253,13 +348,13 @@ class CloudflareWarpManager {
     });
 
     agent.createConnection = function(options, callback) {
-      const targetHost = options.host || options.hostname || 'opencode.ai';
+      const destHost = options.host || options.hostname || 'opencode.ai';
       const destPort = options.port || 443;
-      manager.createSocks5Connection(targetHost, destPort, '127.0.0.1', targetPort)
+      manager.createSocks5Connection(destHost, destPort, targetHost, targetPort)
         .then((rawSocket) => {
           const tlsSocket = tls.connect({
             socket: rawSocket,
-            servername: options.servername || targetHost
+            servername: options.servername || destHost
           }, () => {
             callback(null, tlsSocket);
           });

@@ -55,6 +55,7 @@ const DEFAULT_CONFIG = {
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
   proxies: process.env.PROXIES ? process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean) : [],
   warp_mode: process.env.WARP_MODE || 'auto', // 'auto' | 'always' | 'disabled'
+  warp_host: process.env.WARP_HOST || '127.0.0.1',
   warp_auto_switch: process.env.WARP_AUTO_SWITCH !== 'false',
   warp_rotate_on_unauth: process.env.WARP_ROTATE_ON_UNAUTH !== 'false',
   warp_port: parseInt(process.env.WARP_PORT, 10) || 40000,
@@ -110,6 +111,12 @@ class ConfigManager {
       }
       if (process.env.WARP_MODE) {
         this.config.warp_mode = process.env.WARP_MODE.trim();
+      }
+      if (process.env.WARP_HOST) {
+        this.config.warp_host = process.env.WARP_HOST.trim();
+      }
+      if (process.env.WARP_PORT) {
+        this.config.warp_port = parseInt(process.env.WARP_PORT, 10);
       }
 
       this.save();

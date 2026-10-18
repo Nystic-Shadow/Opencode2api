@@ -7,10 +7,31 @@ services:
     container_name: opencode2api
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${PORT:-8080}:8080"
     environment:
       - PORT=${PORT:-8080}
       - DASHBOARD_USER=${DASHBOARD_USER:-admin}
       - DASHBOARD_PASS=${DASHBOARD_PASS:-admin123}
+      - WARP_HOST=${WARP_HOST:-warp}
+      - WARP_PORT=${WARP_PORT:-1080}
     volumes:
       - ./data:/app/data
+    depends_on:
+      - warp
+
+  warp:
+    image: caomingjun/warp:latest
+    container_name: opencode2api-warp
+    restart: unless-stopped
+    environment:
+      - WARP_SLEEP=2
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - warp-data:/var/lib/cloudflare-warp
+
+volumes:
+  warp-data:

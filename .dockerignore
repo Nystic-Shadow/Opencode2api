@@ -3,3 +3,4 @@ client/node_modules
 .env
 .git
 *.log
+data/

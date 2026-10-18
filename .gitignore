@@ -14,3 +14,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local database state (fresh per environment)
+data/*.json
+!data/.gitkeep

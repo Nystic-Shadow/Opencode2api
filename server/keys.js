@@ -19,11 +19,12 @@ class ApiKeyManager {
       }
       if (!Array.isArray(this.keys) || this.keys.length === 0) {
         // Create initial master key with predictable O2P prefix
+        const initialKey = process.env.INITIAL_KEY || process.env.MASTER_KEY || 'O2P-master-key';
         this.keys = [
           {
             id: 'key_master',
             name: 'Master Admin Key',
-            key: 'O2P-master-key',
+            key: initialKey,
             rpm_limit: 0,
             tpm_limit: 0,
             total_tokens_budget: 0,
@@ -146,8 +147,9 @@ class ApiKeyManager {
     }
 
     // Support master key & local legacy keys
+    const masterEnvKey = process.env.INITIAL_KEY || process.env.MASTER_KEY || 'O2P-master-key';
     const key = this.keys.find(k => k.key === token) || 
-                ((token === 'O2P-master-key' || token === 'sk-opencode-free-master') ? { id: 'key_master', name: 'Master Admin Key', key: token, enabled: true, is_unlimited: true } : null);
+                ((token === masterEnvKey || token === 'O2P-master-key' || token === 'sk-opencode-free-master') ? { id: 'key_master', name: 'Master Admin Key', key: token, enabled: true, is_unlimited: true } : null);
 
     if (!key) {
       return { valid: false, status: 401, error: 'Invalid API key.' };

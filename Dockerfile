@@ -14,8 +14,8 @@ ENV NODE_ENV=production
 
 COPY package*.json ./
 COPY server/ ./server/
-COPY data/ ./data/
 COPY --from=builder /app/dist ./dist
+RUN mkdir -p /app/data
 
 EXPOSE 8080
 

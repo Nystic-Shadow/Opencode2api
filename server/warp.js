@@ -67,9 +67,10 @@ class CloudflareWarpManager {
       if (!this.cliPath) {
         return reject(new Error('Cloudflare WARP CLI is not installed or detected.'));
       }
-      execFile(this.cliPath, args, { timeout: 8000, windowsHide: true }, (err, stdout, stderr) => {
+      const finalArgs = args.includes('--accept-tos') ? args : ['--accept-tos', ...args];
+      execFile(this.cliPath, finalArgs, { timeout: 8000, windowsHide: true }, (err, stdout, stderr) => {
         if (err) {
-          return reject(new Error(`warp-cli ${args.join(' ')} failed: ${err.message}. ${stderr || ''}`));
+          return reject(new Error(`warp-cli ${finalArgs.join(' ')} failed: ${err.message}. ${stderr || ''}`));
         }
         resolve(stdout.trim());
       });
@@ -203,6 +204,9 @@ class CloudflareWarpManager {
     const port = targetPort || config.get('warp_port') || 40000;
 
     try {
+      try {
+        await this.execWarp(['registration', 'new']);
+      } catch (e) {}
       await this.execWarp(['mode', 'proxy']);
       try {
         await this.execWarp(['proxy', 'port', String(port)]);

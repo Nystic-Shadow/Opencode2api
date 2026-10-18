@@ -26,8 +26,9 @@ if command -v warp-svc >/dev/null 2>&1; then
     sleep 3
     if command -v warp-cli >/dev/null 2>&1; then
       warp-cli --accept-tos registration new 2>/dev/null || true
-      warp-cli --accept-tos mode proxy 2>/dev/null || true
-      warp-cli --accept-tos proxy port 40000 2>/dev/null || true
+      warp-cli --accept-tos tunnel protocol set MASQUE 2>/dev/null || true
+      warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli --accept-tos set-mode proxy 2>/dev/null || true
+      warp-cli --accept-tos proxy port 40000 2>/dev/null || warp-cli --accept-tos set-proxy-port 40000 2>/dev/null || true
       warp-cli --accept-tos connect 2>/dev/null || true
       echo "[Entrypoint] Cloudflare WARP daemon active in proxy mode on 127.0.0.1:40000"
     fi

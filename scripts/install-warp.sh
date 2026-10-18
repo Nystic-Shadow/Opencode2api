@@ -82,10 +82,11 @@ fi
 if command -v warp-cli >/dev/null 2>&1; then
   echo "⚙️ Initializing WARP device registration..."
   warp-cli --accept-tos registration new 2>/dev/null || true
+  warp-cli --accept-tos tunnel protocol set MASQUE 2>/dev/null || true
   
   echo "⚙️ Switching to proxy mode on port 40000..."
-  warp-cli --accept-tos mode proxy 2>/dev/null || true
-  warp-cli --accept-tos proxy port 40000 2>/dev/null || true
+  warp-cli --accept-tos mode proxy 2>/dev/null || warp-cli --accept-tos set-mode proxy 2>/dev/null || true
+  warp-cli --accept-tos proxy port 40000 2>/dev/null || warp-cli --accept-tos set-proxy-port 40000 2>/dev/null || true
   warp-cli --accept-tos connect 2>/dev/null || true
   sleep 2
 

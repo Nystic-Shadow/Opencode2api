@@ -138,21 +138,30 @@ class CloudflareWarpManager {
         try { statusJson = JSON.parse(statusStr); } catch (e) {}
         try { settingsJson = JSON.parse(settingsStr); } catch (e) {}
 
-        const isConnected = statusJson?.status === 'Connected' || statusStr.toLowerCase().includes('connected');
+        const socketAlive = await this.probeSocks5(host, port);
+        const isConnected = statusJson?.status === 'Connected' || statusStr.toLowerCase().includes('connected') || socketAlive;
         const opMode = settingsJson?.settings?.operation_mode || (statusStr.includes('proxy') ? 'proxy' : 'warp');
         const reportedPort = settingsJson?.settings?.proxy_port || port;
+
+        let reasonStr = 'OK';
+        if (statusJson?.reason) {
+          reasonStr = typeof statusJson.reason === 'object' ? JSON.stringify(statusJson.reason) : String(statusJson.reason);
+        } else if (socketAlive) {
+          reasonStr = 'SOCKS5 Active';
+        }
 
         const result = {
           available: true,
           installed: true,
           cliPath: this.cliPath,
-          status: isConnected ? 'Connected' : 'Disconnected',
+          status: isConnected ? 'Connected' : (socketAlive ? 'Proxy Active' : (statusJson?.status || 'Connecting')),
           connected: isConnected,
-          running: isConnected,
+          running: isConnected || socketAlive,
           mode: opMode,
           host: host,
           port: reportedPort,
-          reason: statusJson?.reason || 'OK'
+          socketAlive,
+          reason: reasonStr
         };
 
         this.statusCache = result;
@@ -207,10 +216,19 @@ class CloudflareWarpManager {
       try {
         await this.execWarp(['registration', 'new']);
       } catch (e) {}
-      await this.execWarp(['mode', 'proxy']);
+      try {
+        await this.execWarp(['tunnel', 'protocol', 'set', 'MASQUE']);
+      } catch (e) {}
+      try {
+        await this.execWarp(['mode', 'proxy']);
+      } catch (e) {
+        try { await this.execWarp(['set-mode', 'proxy']); } catch (e2) {}
+      }
       try {
         await this.execWarp(['proxy', 'port', String(port)]);
-      } catch (e) {}
+      } catch (e) {
+        try { await this.execWarp(['set-proxy-port', String(port)]); } catch (e2) {}
+      }
       await this.execWarp(['connect']);
       const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
       console.log(`[WARP] Cloudflare WARP proxy mode active on ${host}:${port}`);

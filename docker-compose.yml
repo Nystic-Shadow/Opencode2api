@@ -9,8 +9,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - PORT=8080
-      - DASHBOARD_USER=admin
-      - DASHBOARD_PASS=admin123
+      - PORT=${PORT:-8080}
+      - DASHBOARD_USER=${DASHBOARD_USER:-admin}
+      - DASHBOARD_PASS=${DASHBOARD_PASS:-admin123}
     volumes:
       - ./data:/app/data

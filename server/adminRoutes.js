@@ -40,6 +40,7 @@ function sendJson(res, statusCode, data) {
 async function handleAdminRoute(req, res, pathname) {
   // Login
   if (pathname === '/api/auth/login' && req.method === 'POST') {
+    config.refreshFromEnv();
     const { username, password } = await parseBody(req);
     const expectedUser = config.get('admin_username');
     const expectedPass = config.get('admin_password');

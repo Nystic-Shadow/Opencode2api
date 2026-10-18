@@ -4,19 +4,28 @@ const path = require('path');
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
-// Simple .env parser
-function loadEnv() {
+// Clean and strip quotes from .env values
+function parseEnvVal(val) {
+  let v = (val || '').trim();
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+    v = v.slice(1, -1);
+  }
+  return v;
+}
+
+// Simple .env parser - dynamic reloader
+function loadEnv(force = false) {
   const envPath = path.join(__dirname, '..', '.env');
   if (fs.existsSync(envPath)) {
-    const lines = fs.readFileSync(envPath, 'utf8').split('\n');
+    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
       const idx = trimmed.indexOf('=');
       if (idx !== -1) {
         const key = trimmed.slice(0, idx).trim();
-        const val = trimmed.slice(idx + 1).trim();
-        if (!process.env[key]) {
+        const val = parseEnvVal(trimmed.slice(idx + 1));
+        if (force || process.env[key] === undefined) {
           process.env[key] = val;
         }
       }
@@ -61,14 +70,49 @@ class ConfigManager {
     this.load();
   }
 
+  refreshFromEnv() {
+    loadEnv(true);
+    if (process.env.DASHBOARD_USER && process.env.DASHBOARD_USER.trim()) {
+      this.config.admin_username = process.env.DASHBOARD_USER.trim();
+    }
+    if (process.env.DASHBOARD_PASS && process.env.DASHBOARD_PASS.trim()) {
+      this.config.admin_password = process.env.DASHBOARD_PASS.trim();
+    }
+  }
+
   load() {
+    loadEnv(true);
     try {
+      let fileConfig = {};
       if (fs.existsSync(CONFIG_FILE)) {
         const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
-        this.config = { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
-      } else {
-        this.save();
+        try {
+          fileConfig = JSON.parse(raw);
+        } catch (e) {
+          fileConfig = {};
+        }
       }
+
+      this.config = { ...DEFAULT_CONFIG, ...fileConfig };
+
+      // Explicit environment / .env variables ALWAYS take strict precedence over cached disk values:
+      if (process.env.DASHBOARD_USER && process.env.DASHBOARD_USER.trim()) {
+        this.config.admin_username = process.env.DASHBOARD_USER.trim();
+      }
+      if (process.env.DASHBOARD_PASS && process.env.DASHBOARD_PASS.trim()) {
+        this.config.admin_password = process.env.DASHBOARD_PASS.trim();
+      }
+      if (process.env.PORT) {
+        this.config.port = parseInt(process.env.PORT, 10);
+      }
+      if (process.env.OPENCODE_ZEN_KEY) {
+        this.config.upstream_zen_key = process.env.OPENCODE_ZEN_KEY.trim();
+      }
+      if (process.env.WARP_MODE) {
+        this.config.warp_mode = process.env.WARP_MODE.trim();
+      }
+
+      this.save();
     } catch (err) {
       console.error('[Config] Error loading config:', err.message);
       this.config = { ...DEFAULT_CONFIG };
@@ -84,14 +128,30 @@ class ConfigManager {
   }
 
   get(key) {
+    if (key === 'admin_username') {
+      return (process.env.DASHBOARD_USER && process.env.DASHBOARD_USER.trim()) || this.config.admin_username || 'admin';
+    }
+    if (key === 'admin_password') {
+      return (process.env.DASHBOARD_PASS && process.env.DASHBOARD_PASS.trim()) || this.config.admin_password || 'admin123';
+    }
     return this.config[key];
   }
 
   getAll() {
-    return { ...this.config };
+    return {
+      ...this.config,
+      admin_username: this.get('admin_username'),
+      admin_password: this.get('admin_password')
+    };
   }
 
   update(newVals) {
+    if (newVals.admin_username) {
+      process.env.DASHBOARD_USER = newVals.admin_username;
+    }
+    if (newVals.admin_password) {
+      process.env.DASHBOARD_PASS = newVals.admin_password;
+    }
     this.config = { ...this.config, ...newVals };
     this.save();
     for (const listener of this.listeners) {

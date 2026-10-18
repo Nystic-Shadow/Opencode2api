@@ -59,7 +59,7 @@ export default function App() {
   const [token, setToken] = useState(localStorage.getItem('o2p_token') || '');
 
   // Login form state
-  const [loginUser, setLoginUser] = useState('admin');
+  const [loginUser, setLoginUser] = useState('');
   const [loginPass, setLoginPass] = useState('');
   const [loginError, setLoginError] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
@@ -318,6 +318,8 @@ export default function App() {
                 style={{ width: '100%' }}
                 value={loginUser}
                 onChange={e => setLoginUser(e.target.value)}
+                placeholder="Enter admin username..."
+                autoComplete="username"
                 required
               />
             </div>
@@ -333,7 +335,8 @@ export default function App() {
                 style={{ width: '100%' }}
                 value={loginPass}
                 onChange={e => setLoginPass(e.target.value)}
-                placeholder="Enter password..."
+                placeholder="Enter admin password..."
+                autoComplete="current-password"
                 required
               />
             </div>
@@ -342,18 +345,6 @@ export default function App() {
               <FiZap size={16} />
               <span>{isLoggingIn ? 'Authenticating...' : 'Sign In to Gateway'}</span>
             </button>
-
-            {/* Quick Demo Credentials Fill */}
-            <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.25rem' }}>
-              <button
-                type="button"
-                className="badge badge-muted"
-                style={{ cursor: 'pointer', background: 'transparent', padding: '0.3rem 0.6rem' }}
-                onClick={() => { setLoginUser('admin'); setLoginPass('admin123'); }}
-              >
-                Click to fill default: admin / admin123
-              </button>
-            </div>
           </form>
         </div>
       </div>

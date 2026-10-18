@@ -185,7 +185,7 @@ discovery.sync().then(() => {
     console.log(`\n=============================================================`);
     console.log(`🚀 OpenCode2API Gateway Live on http://127.0.0.1:${PORT}`);
     console.log(`📊 Admin Dashboard: http://127.0.0.1:${PORT}/`);
-    console.log(`🔑 Default Admin: ${config.get('admin_username')} / ${config.get('admin_password')}`);
+    console.log(`🔑 Admin Credentials: ${config.get('admin_username')} / ${config.get('admin_password')}`);
     console.log(`🌐 OpenAI Base URL: http://127.0.0.1:${PORT}/v1`);
     console.log(`🌐 Anthropic Messages URL: http://127.0.0.1:${PORT}/v1/messages`);
     console.log(`✨ Discovered Models: ${discovery.models.length} (clean IDs, free suffixes auto-removed)`);

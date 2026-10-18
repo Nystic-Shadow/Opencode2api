@@ -69,6 +69,7 @@ export default function App() {
   const [keys, setKeys] = useState([]);
   const [modelsData, setModelsData] = useState({ models: [], last_synced: null });
   const [settings, setSettings] = useState({});
+  const [warpStatus, setWarpStatus] = useState(null);
   const [notifications, setNotifications] = useState([]);
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
@@ -148,6 +149,10 @@ export default function App() {
       // Settings
       const settingsRes = await fetch('/api/settings', { headers: authHeaders });
       if (settingsRes.ok) setSettings(await settingsRes.json());
+
+      // WARP Status & Progress
+      const warpRes = await fetch('/api/warp/status', { headers: authHeaders });
+      if (warpRes.ok) setWarpStatus(await warpRes.json());
 
       // Notifications
       const notifRes = await fetch('/api/notifications', { headers: authHeaders });
@@ -346,6 +351,105 @@ export default function App() {
               <span>{isLoggingIn ? 'Authenticating...' : 'Sign In to Gateway'}</span>
             </button>
           </form>
+        </div>
+      </div>
+    );
+  }
+
+  // If WARP is actively bootstrapping on first load, display the gateway connection screen with progress bar
+  if (token && warpStatus?.bootstrapping && !warpStatus?.connected) {
+    const percent = warpStatus.progress?.percent || 35;
+    const msg = warpStatus.progress?.message || 'Connecting to Cloudflare edge network...';
+
+    return (
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100vh',
+        width: '100vw',
+        position: 'relative',
+        backgroundColor: 'var(--background)',
+        color: 'var(--foreground)',
+        overflow: 'hidden'
+      }}>
+        <AppBackground theme={theme} />
+
+        <div style={{
+          position: 'relative',
+          zIndex: 10,
+          width: '100%',
+          maxWidth: '480px',
+          padding: '2.5rem 2rem',
+          backgroundColor: 'rgba(8, 18, 27, 0.75)',
+          backdropFilter: 'blur(20px)',
+          border: '1px solid rgba(47, 188, 91, 0.3)',
+          borderRadius: '16px',
+          boxShadow: '0 20px 60px rgba(0, 0, 0, 0.6), 0 0 40px rgba(47, 188, 91, 0.15)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          textAlign: 'center',
+          gap: '1.25rem'
+        }}>
+          {/* Animated Shield Logo */}
+          <div style={{
+            position: 'relative',
+            width: '64px',
+            height: '64px',
+            borderRadius: '16px',
+            background: 'linear-gradient(135deg, rgba(47, 188, 91, 0.2), rgba(0, 210, 255, 0.2))',
+            border: '1px solid rgba(47, 188, 91, 0.4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 0 30px rgba(47, 188, 91, 0.35)'
+          }}>
+            <FiShield size={32} style={{ color: '#2fbc5b' }} />
+          </div>
+
+          <div>
+            <h2 style={{ fontSize: '1.35rem', fontWeight: 800, margin: '0 0 0.4rem', letterSpacing: '-0.02em' }}>
+              Connecting Cloudflare WARP
+            </h2>
+            <p style={{ fontSize: '0.85rem', color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
+              OpenCode2API requires a verified Cloudflare edge egress session before opening the control plane.
+            </p>
+          </div>
+
+          {/* Progress Bar Container */}
+          <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '0.6rem', marginTop: '0.5rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem' }}>
+              <span style={{ color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <FiZap size={13} style={{ color: '#2fbc5b' }} className="spin" />
+                <span style={{ fontWeight: 500 }}>{msg}</span>
+              </span>
+              <span style={{ fontWeight: 700, color: '#2fbc5b' }}>{percent}%</span>
+            </div>
+
+            <div style={{
+              width: '100%',
+              height: '8px',
+              backgroundColor: 'rgba(255, 255, 255, 0.08)',
+              borderRadius: '999px',
+              overflow: 'hidden'
+            }}>
+              <div style={{
+                height: '100%',
+                width: `${percent}%`,
+                background: 'linear-gradient(90deg, #2fbc5b, #00d2ff)',
+                borderRadius: '999px',
+                boxShadow: '0 0 15px rgba(47, 188, 91, 0.7)',
+                transition: 'width 0.4s ease-out'
+              }} />
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--muted-foreground)', marginTop: '0.2rem' }}>
+              <span>Curve25519 Handshake</span>
+              <span>WireProxy Tunnel</span>
+              <span>127.0.0.1:40000 Ready</span>
+            </div>
+          </div>
         </div>
       </div>
     );

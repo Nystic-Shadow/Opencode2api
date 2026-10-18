@@ -45,9 +45,32 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
     fetchWarp();
   }, []);
 
+  const pollWarpProgress = () => {
+    const token = localStorage.getItem('o2p_token');
+    let polls = 0;
+    const interval = setInterval(async () => {
+      polls++;
+      try {
+        const res = await fetch('/api/warp/status', {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setWarpStatus(data);
+          if (data.connected && (!data.progress || data.progress.percent >= 100)) {
+            clearInterval(interval);
+          }
+        }
+      } catch (e) {}
+      if (polls > 35) clearInterval(interval);
+    }, 400);
+    return interval;
+  };
+
   const handleRotateWarp = async () => {
     setIsRotatingWarp(true);
     setWarpFeedback(null);
+    pollWarpProgress();
     try {
       const token = localStorage.getItem('o2p_token');
       const res = await fetch('/api/warp/rotate', {
@@ -72,6 +95,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const handleConnectWarp = async () => {
     setIsInstallingWarp(true);
     setWarpFeedback(null);
+    pollWarpProgress();
     try {
       const token = localStorage.getItem('o2p_token');
       const res = await fetch('/api/warp/connect', {
@@ -100,6 +124,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const handleInstallWarp = async () => {
     setIsInstallingWarp(true);
     setWarpFeedback(null);
+    pollWarpProgress();
     try {
       const token = localStorage.getItem('o2p_token');
       const res = await fetch('/api/warp/install', {
@@ -277,6 +302,57 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             </button>
           </div>
         </div>
+
+        {/* Real-time WARP Progress Bar */}
+        {(isInstallingWarp || isRotatingWarp || (warpStatus?.progress && warpStatus.progress.percent < 100) || warpStatus?.bootstrapping) && (
+          <div style={{
+            padding: '0.85rem 1rem',
+            backgroundColor: 'rgba(47, 188, 91, 0.08)',
+            border: '1px solid rgba(47, 188, 91, 0.3)',
+            borderRadius: 'var(--radius)',
+            marginBottom: '1rem',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.55rem'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <FiRefreshCw size={13} className="spin" style={{ color: 'var(--primary)' }} />
+                <span style={{ fontSize: '0.82rem', fontWeight: '600', color: 'var(--foreground)' }}>
+                  {warpStatus?.progress?.message || (isRotatingWarp ? 'Rotating Cloudflare tunnel session...' : 'Bootstrapping userspace WARP tunnel...')}
+                </span>
+              </div>
+              <span className="badge badge-success" style={{ fontWeight: 700, fontSize: '0.78rem' }}>
+                {warpStatus?.progress?.percent || (isRotatingWarp ? 45 : 65)}%
+              </span>
+            </div>
+
+            {/* Glowing Gradient Progress Bar */}
+            <div style={{
+              width: '100%',
+              height: '8px',
+              backgroundColor: 'rgba(0, 0, 0, 0.35)',
+              borderRadius: '999px',
+              overflow: 'hidden',
+              position: 'relative'
+            }}>
+              <div style={{
+                height: '100%',
+                width: `${Math.min(100, Math.max(8, warpStatus?.progress?.percent || (isRotatingWarp ? 45 : 65)))}%`,
+                background: 'linear-gradient(90deg, #2fbc5b, #00d2ff)',
+                borderRadius: '999px',
+                boxShadow: '0 0 12px rgba(47, 188, 91, 0.6)',
+                transition: 'width 0.35s ease-out'
+              }} />
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>
+              <span>Curve25519 Handshake</span>
+              <span>WireProxy Userspace Engine</span>
+              <span>SOCKS5 127.0.0.1:40000</span>
+            </div>
+          </div>
+        )}
 
         {!warpStatus?.connected && (
           <div style={{

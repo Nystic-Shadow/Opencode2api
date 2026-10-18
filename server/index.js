@@ -7,6 +7,7 @@ const config = require('./config');
 const keys = require('./keys');
 const discovery = require('./discovery');
 const proxy = require('./proxy');
+const warp = require('./warp');
 const adminRoutes = require('./adminRoutes');
 
 const PORT = config.get('port') || 8080;
@@ -179,8 +180,38 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: { message: 'Route not found' } }));
 });
 
-// Boot discovery and server
-discovery.sync().then(() => {
+// Sequenced Boot: Ensure WARP is connected before dashboard/server starts
+async function boot() {
+  console.log(`\n=============================================================`);
+  console.log(`⚡ OpenCode2API Gateway Boot Sequence Initiated`);
+  console.log(`=============================================================`);
+
+  // Step 1: Establish Cloudflare WARP connection first so gateway egress is ready
+  console.log(`[Boot] Step 1/3: Establishing Cloudflare WARP connection...`);
+  try {
+    const warpReady = await Promise.race([
+      warp.autoBootstrap(),
+      new Promise(resolve => setTimeout(() => resolve(false), 12000))
+    ]);
+    if (warpReady) {
+      console.log(`[Boot] Cloudflare WARP successfully connected on port ${config.get('warp_port') || 40000} (warp=on)`);
+    } else {
+      console.warn(`[Boot] WARP bootstrap in progress or timed out. Proceeding in background...`);
+    }
+  } catch (err) {
+    console.warn(`[Boot] WARP bootstrap notice:`, err.message);
+  }
+
+  // Step 2: Discover models from OpenCode Zen (routes through WARP)
+  console.log(`[Boot] Step 2/3: Discovering upstream models from OpenCode Zen...`);
+  try {
+    await discovery.sync();
+  } catch (err) {
+    console.warn(`[Boot] Initial model discovery notice:`, err.message);
+  }
+
+  // Step 3: Launch Gateway HTTP Server & Dashboard
+  console.log(`[Boot] Step 3/3: Launching HTTP API & Control Plane on port ${PORT}...`);
   server.listen(PORT, () => {
     console.log(`\n=============================================================`);
     console.log(`🚀 OpenCode2API Gateway Live on http://127.0.0.1:${PORT}`);
@@ -190,11 +221,14 @@ discovery.sync().then(() => {
     console.log(`🌐 Anthropic Messages URL: http://127.0.0.1:${PORT}/v1/messages`);
     console.log(`✨ Discovered Models: ${discovery.models.length} (clean IDs, free suffixes auto-removed)`);
     console.log(`⚡ OpenCode CLI Fingerprint: v${config.get('client_version')}`);
+    console.log(`🛡️  WARP Status: ${warp.isReady() ? 'Connected (warp=on)' : 'Connecting / Idle'}`);
     console.log(`=============================================================\n`);
   });
-}).catch(err => {
-  console.error('[Server] Initial boot error:', err.message);
+}
+
+boot().catch(err => {
+  console.error('[Boot] Critical error during startup:', err);
   server.listen(PORT, () => {
-    console.log(`🚀 OpenCode2API Gateway started in fallback mode on http://127.0.0.1:${PORT}`);
+    console.log(`🚀 OpenCode2API Gateway started in emergency fallback mode on http://127.0.0.1:${PORT}`);
   });
 });

@@ -23,13 +23,19 @@ class CloudflareWarpManager {
     this.statusCache = null;
     this.lastStatusCheck = 0;
     this.isBootstrapping = false;
+    this.progress = {
+      percent: 0,
+      stage: 'idle',
+      message: 'WARP Engine Idle'
+    };
+  }
 
-    // Auto-bootstrap on startup in background
-    setTimeout(() => {
-      this.autoBootstrap().catch(err => {
-        console.warn('[WARP] Startup bootstrap notice:', err.message);
-      });
-    }, 1000);
+  setProgress(percent, stage, message) {
+    this.progress = { percent, stage, message, timestamp: Date.now() };
+    if (this.statusCache) {
+      this.statusCache.progress = this.progress;
+      this.statusCache.bootstrapping = this.isBootstrapping;
+    }
   }
 
   detectWireproxyPath() {
@@ -92,6 +98,7 @@ class CloudflareWarpManager {
    */
   async registerCloudflareAccount() {
     console.log('[WARP] Generating fresh X25519 keypair & registering with Cloudflare WARP API...');
+    this.setProgress(30, 'generating_keys', 'Generating Curve25519 (X25519) cryptographic keypair...');
     const { privateKey, publicKey } = crypto.generateKeyPairSync('x25519');
     const pubKey = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64');
     const privKey = privateKey.export({ type: 'pkcs8', format: 'der' }).subarray(-32).toString('base64');
@@ -105,6 +112,8 @@ class CloudflareWarpManager {
       serial_number: '',
       locale: 'en_US'
     });
+
+    this.setProgress(50, 'registering', 'Negotiating secure session with Cloudflare Edge API...');
 
     return new Promise((resolve, reject) => {
       const req = https.request('https://api.cloudflareclient.com/v0a3371/reg', {
@@ -181,6 +190,8 @@ class CloudflareWarpManager {
     const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const port = config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
 
+    this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port}...`);
+
     // Terminate existing wireproxy child process if running
     if (this.wireproxyProcess) {
       try {
@@ -207,6 +218,7 @@ BindAddress = ${host}:${port}
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(WIREPROXY_CONF, confContent);
 
+    this.setProgress(75, 'launching_tunnel', 'Starting userspace WireProxy SOCKS5 daemon...');
     console.log(`[WARP] Starting userspace WireProxy SOCKS5 daemon on ${host}:${port}...`);
     const proc = spawn(this.wireproxyPath, ['-c', WIREPROXY_CONF], {
       detached: false,
@@ -233,13 +245,15 @@ BindAddress = ${host}:${port}
 
     this.wireproxyProcess = proc;
 
+    this.setProgress(85, 'verifying_socket', `Probing SOCKS5 handshake on ${host}:${port}...`);
     // Poll until SOCKS5 socket answers handshake (up to 8 seconds)
     const startTime = Date.now();
     while (Date.now() - startTime < 8000) {
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 400));
       const alive = await this.probeSocks5(host, port);
       if (alive) {
         console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${host}:${port} (warp=on)`);
+        this.setProgress(100, 'connected', `Cloudflare WARP Egress Active on ${host}:${port} (warp=on)`);
         this.statusCache = null;
         return true;
       }
@@ -286,15 +300,18 @@ BindAddress = ${host}:${port}
   async autoBootstrap(forceRestart = false) {
     if (this.isBootstrapping && !forceRestart) return false;
     this.isBootstrapping = true;
+    this.setProgress(10, 'initializing', 'Initializing Cloudflare WARP engine...');
 
     const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const port = config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
 
     try {
       // 1. Check if SOCKS5 port is already answering
+      this.setProgress(20, 'checking_socket', `Probing SOCKS5 proxy on ${host}:${port}...`);
       const alreadyAlive = await this.probeSocks5(host, port);
       if (alreadyAlive && !forceRestart) {
         console.log(`[WARP] SOCKS5 proxy already active and answering on ${host}:${port}`);
+        this.setProgress(100, 'connected', `Cloudflare WARP active on ${host}:${port} (warp=on)`);
         this.statusCache = null;
         return true;
       }
@@ -302,24 +319,33 @@ BindAddress = ${host}:${port}
       // 2. Prioritize userspace WireProxy (runs without root/capabilities in Docker)
       if (this.wireproxyPath) {
         console.log('[WARP] Auto-bootstrapping userspace Cloudflare WARP engine...');
+        this.setProgress(30, 'preparing_keys', 'Verifying Curve25519 tunnel credentials...');
         let account = this.loadCachedAccount();
         if (!account || forceRestart) {
           account = await this.registerCloudflareAccount();
         }
         await this.startWireproxy(account);
+        this.setProgress(100, 'connected', `Cloudflare WARP Connected on ${host}:${port} (warp=on)`);
         return true;
       }
 
       // 3. Fallback to official warp-cli daemon if present
       if (this.cliPath) {
         console.log('[WARP] Configuring official Cloudflare WARP CLI proxy mode...');
-        return await this.ensureProxyMode(port);
+        this.setProgress(50, 'configuring_cli', 'Configuring warp-cli daemon proxy mode...');
+        const ok = await this.ensureProxyMode(port);
+        if (ok) {
+          this.setProgress(100, 'connected', `Cloudflare WARP CLI Connected on ${host}:${port}`);
+        }
+        return ok;
       }
 
+      this.setProgress(0, 'idle', 'No local WARP engine found. Egress direct or via custom proxy.');
       console.log('[WARP] No local WARP engine found. Egress direct or via custom proxy.');
       return false;
     } catch (err) {
       console.warn('[WARP] Auto-bootstrap error:', err.message);
+      this.setProgress(0, 'error', 'Bootstrap notice: ' + err.message);
       return false;
     } finally {
       this.isBootstrapping = false;
@@ -371,7 +397,7 @@ BindAddress = ${host}:${port}
 
   async getStatus() {
     const now = Date.now();
-    if (this.statusCache && (now - this.lastStatusCheck < 3000)) {
+    if (this.statusCache && (now - this.lastStatusCheck < 2000)) {
       return this.statusCache;
     }
 
@@ -383,6 +409,7 @@ BindAddress = ${host}:${port}
 
     if (socketAlive) {
       const engine = this.wireproxyPath ? 'Userspace WireGuard' : (this.cliPath ? 'CLI Daemon' : 'SOCKS5 Proxy');
+      this.setProgress(100, 'connected', `Cloudflare WARP Egress Active (${engine} • ${host}:${port})`);
       const result = {
         available: true,
         installed: true,
@@ -394,7 +421,9 @@ BindAddress = ${host}:${port}
         port: port,
         engine: engine,
         socketAlive: true,
-        reason: 'Active & Answering (warp=on)'
+        reason: 'Active & Answering (warp=on)',
+        bootstrapping: this.isBootstrapping,
+        progress: this.progress
       };
       this.statusCache = result;
       this.lastStatusCheck = now;
@@ -406,7 +435,7 @@ BindAddress = ${host}:${port}
       const result = {
         available: true,
         installed: true,
-        status: 'Disconnected',
+        status: this.isBootstrapping ? 'Connecting' : 'Disconnected',
         connected: false,
         running: false,
         mode: 'proxy',
@@ -414,7 +443,9 @@ BindAddress = ${host}:${port}
         port: port,
         engine: this.wireproxyPath ? 'Userspace WireGuard' : 'CLI Daemon',
         socketAlive: false,
-        reason: 'SOCKS5 socket inactive'
+        reason: this.isBootstrapping ? 'Establishing tunnel...' : 'SOCKS5 socket inactive',
+        bootstrapping: this.isBootstrapping,
+        progress: this.progress
       };
       this.statusCache = result;
       this.lastStatusCheck = now;
@@ -430,6 +461,8 @@ BindAddress = ${host}:${port}
       port: port,
       connected: false,
       running: false,
+      bootstrapping: this.isBootstrapping,
+      progress: this.progress,
       installCmd: 'curl -fsSL https://raw.githubusercontent.com/Nystic-Shadow/Opencode2api/main/scripts/install-warp.sh | sudo bash'
     };
     this.statusCache = uninstalledResult;
@@ -446,18 +479,23 @@ BindAddress = ${host}:${port}
       return true; // Throttle excessive rotations
     }
     this.lastRotationTime = now;
+    this.setProgress(20, 'rotating', 'Rotating Cloudflare WARP tunnel session keys...');
 
     // 1. If running Userspace WireProxy, register fresh account & restart
     if (this.wireproxyPath) {
       try {
         console.log('[WARP] Rotating Userspace WireProxy tunnel keys...');
+        this.setProgress(40, 'registering', 'Negotiating fresh session with Cloudflare Edge API...');
         const newAccount = await this.registerCloudflareAccount();
+        this.setProgress(70, 'reconnecting', 'Reloading WireProxy tunnel with fresh credentials...');
         await this.startWireproxy(newAccount);
+        this.setProgress(100, 'connected', 'Cloudflare WARP connected with fresh edge session (warp=on)');
         this.statusCache = null;
         console.log('[WARP] Fresh Cloudflare edge session established successfully.');
         return true;
       } catch (err) {
         console.error('[WARP] WireProxy key rotation failed:', err.message);
+        this.setProgress(0, 'error', 'Key rotation failed: ' + err.message);
         return false;
       }
     }
@@ -469,6 +507,7 @@ BindAddress = ${host}:${port}
         await this.execWarp(['tunnel', 'rotate-keys']);
         await new Promise(r => setTimeout(r, 1200));
         this.statusCache = null;
+        this.setProgress(100, 'connected', 'Cloudflare WARP CLI keys rotated');
         return true;
       } catch (err) {
         console.warn('[WARP] CLI tunnel rotation failed, attempting reconnect:', err.message);
@@ -476,8 +515,10 @@ BindAddress = ${host}:${port}
           await this.execWarp(['disconnect']);
           await new Promise(r => setTimeout(r, 800));
           await this.execWarp(['connect']);
+          this.setProgress(100, 'connected', 'Cloudflare WARP CLI reconnected');
           return true;
         } catch (e2) {
+          this.setProgress(0, 'error', 'CLI rotation failed');
           return false;
         }
       }

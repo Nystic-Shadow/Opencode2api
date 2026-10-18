@@ -29,8 +29,8 @@ let proxyIndex = 0;
  */
 function getUpstreamAgent(attempt = 1, useWarp = false) {
   const warpMode = config.get('warp_mode') || 'auto';
-  if ((useWarp || warpMode === 'always') && warp.isAvailable()) {
-    return warp.getWarpAgent(config.get('warp_port'));
+  if ((useWarp || warpMode === 'always') && warp.isReady()) {
+    return warp.getWarpAgent(config.get('warp_port'), config.get('warp_host'));
   }
 
   const envProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -45,8 +45,8 @@ function getUpstreamAgent(attempt = 1, useWarp = false) {
 
   // If retrying past the number of proxies, try WARP before falling back to direct IPv4
   if (attempt > proxyList.length) {
-    if (warpMode !== 'disabled' && warp.isAvailable()) {
-      return warp.getWarpAgent(config.get('warp_port'));
+    if (warpMode !== 'disabled' && warp.isReady()) {
+      return warp.getWarpAgent(config.get('warp_port'), config.get('warp_host'));
     }
     return upstreamAgent;
   }
@@ -477,7 +477,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
                        attemptResult.body.includes('Rate limit')
                      ));
 
-    if (isUnauth && warp.isAvailable()) {
+    if (isUnauth && warp.isReady()) {
       if (!useWarp && config.get('warp_auto_switch') !== false) {
         console.log(`[WARP] Unauth/rate-limit detected (${attemptResult.statusCode}). Auto-switching route to Cloudflare WARP proxy for retry...`);
         useWarp = true;
@@ -485,6 +485,11 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         console.log('[WARP] WARP egress hit rate limit, rotating tunnel session keys...');
         await warp.rotateKeys();
       }
+    }
+
+    if (useWarp && typeof attemptResult.body === 'string' && (attemptResult.body.includes('ECONNREFUSED') || attemptResult.body.includes('timeout'))) {
+      console.warn('[Proxy] WARP proxy connection failed or refused, falling back to direct route...');
+      useWarp = false;
     }
 
     if (attempt <= maxRetries) {

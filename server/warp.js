@@ -59,7 +59,11 @@ class CloudflareWarpManager {
   }
 
   isAvailable() {
-    return Boolean(this.cliPath && fs.existsSync(this.cliPath));
+    return Boolean((this.cliPath && fs.existsSync(this.cliPath)) || (this.statusCache && this.statusCache.socketAlive));
+  }
+
+  isReady() {
+    return Boolean(this.statusCache && (this.statusCache.connected || this.statusCache.socketAlive));
   }
 
   execWarp(args) {

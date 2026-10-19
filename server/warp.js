@@ -147,8 +147,9 @@ class CloudflareWarpManager {
               accountId: json.id,
               token: json.token,
               addressV4: json.config?.interface?.addresses?.v4 || '172.16.0.2',
+              addressV6: json.config?.interface?.addresses?.v6 || '',
               peerPublicKey: json.config?.peers?.[0]?.public_key || 'bmXOC+F1FxEMF9dyiK2H5/1SUtzHP0JyV5VC9G3ZDio=',
-              endpoint: '162.159.192.1:2408',
+              endpoint: json.config?.peers?.[0]?.endpoint?.host || '162.159.192.1:2408',
               registeredAt: new Date().toISOString()
             };
 
@@ -159,7 +160,7 @@ class CloudflareWarpManager {
               console.warn('[WARP] Warning saving account file:', fsErr.message);
             }
 
-            console.log(`[WARP] Successfully registered Cloudflare WARP account (ID: ${account.accountId})`);
+            console.log(`[WARP] Successfully registered Cloudflare WARP account (ID: ${account.accountId}, v6: ${account.addressV6 ? 'enabled' : 'none'})`);
             resolve(account);
           } catch (parseErr) {
             reject(new Error('Failed to parse Cloudflare registration response: ' + parseErr.message));
@@ -181,7 +182,10 @@ class CloudflareWarpManager {
     try {
       if (fs.existsSync(ACCOUNT_FILE)) {
         const raw = fs.readFileSync(ACCOUNT_FILE, 'utf-8');
-        return JSON.parse(raw);
+        const acc = JSON.parse(raw);
+        // If cached account doesn't have IPv6 address, upgrade it with fresh registration
+        if (!acc.addressV6) return null;
+        return acc;
       }
     } catch (e) {}
     return null;
@@ -209,14 +213,19 @@ class CloudflareWarpManager {
       await new Promise(r => setTimeout(r, 600));
     }
 
+    const addresses = [];
+    if (account.addressV4) addresses.push(`${account.addressV4}/32`);
+    if (account.addressV6) addresses.push(`${account.addressV6}/128`);
+    if (addresses.length === 0) addresses.push('172.16.0.2/32');
+
     const confContent = `[Interface]
 PrivateKey = ${account.privateKey}
-Address = ${account.addressV4}/32
-DNS = 1.1.1.1
+Address = ${addresses.join(', ')}
+DNS = 1.1.1.1, 2606:4700:4700::1111
 
 [Peer]
 PublicKey = ${account.peerPublicKey}
-Endpoint = 162.159.192.1:2408
+Endpoint = ${account.endpoint || '162.159.192.1:2408'}
 KeepAlive = 25
 
 [Socks5]

@@ -425,7 +425,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               value={warpMode}
               onChange={setWarpMode}
               options={[
-                { value: 'auto', label: 'Auto (Recommended)', description: 'Direct connection first; auto-switches to WARP on 401/403/unauth' },
+                { value: 'auto', label: 'Auto (Recommended)', description: 'Direct connection first; auto-promotes WARP whenever direct route is blocked or degraded' },
                 { value: 'always', label: 'Always WARP', description: 'Route 100% of gateway traffic through Cloudflare WARP proxy' },
                 { value: 'disabled', label: 'Disabled', description: 'Do not use Cloudflare WARP proxy' }
               ]}
@@ -434,9 +434,9 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
             <div>
-              <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Auto-Switch to WARP on 403 / Unauth</div>
+              <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Auto-Switch to WARP on Block / Error</div>
               <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-                Automatically fails over to WARP proxy whenever upstream returns 401, 403, or FreeTierError
+                Automatically routes to WARP proxy whenever upstream direct route is blocked (403), rate-limited (429), or errors
               </div>
             </div>
             <CustomToggle
@@ -449,7 +449,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             <div>
               <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Rotate WARP Keys on Every Unauth</div>
               <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-                Re-negotiates Cloudflare tunnel keys on unauth drops to get fresh edge IP sessions
+                Re-negotiates Cloudflare tunnel keys on unauth drops (disabled by default to prevent socket drops during live traffic)
               </div>
             </div>
             <CustomToggle
@@ -570,9 +570,9 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         {/* Smart Failover Toggle */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.5rem', borderTop: '1px solid var(--border)' }}>
           <div>
-            <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Zero-Drop Smart Failover</div>
+            <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Cross-Model Fallback (Smart Failover)</div>
             <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-              Automatically fails over to active equivalent models on 403 / 429 / 5xx upstream hiccups
+              When enabled, fails over across equivalent models on upstream errors. (Disabled by default to strictly preserve requested model identity).
             </div>
           </div>
           <CustomToggle

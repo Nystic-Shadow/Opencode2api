@@ -49,7 +49,7 @@ const DEFAULT_CONFIG = {
   free_only: true,
   global_rpm_limit: 0, // 0 = unlimited
   global_tpm_limit: 0, // 0 = unlimited
-  smart_fallback: true, // Auto-failover to healthy equivalent model on 403/429/503
+  smart_fallback: false, // Strict model routing by default (zero silent cross-model substitutions)
   max_retries: 3, // Auto-retry attempts on transient upstream drops
   request_timeout_ms: 60000,
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
@@ -57,7 +57,7 @@ const DEFAULT_CONFIG = {
   warp_mode: process.env.WARP_MODE || 'auto', // 'auto' | 'always' | 'disabled'
   warp_host: process.env.WARP_HOST || '127.0.0.1',
   warp_auto_switch: process.env.WARP_AUTO_SWITCH !== 'false',
-  warp_rotate_on_unauth: process.env.WARP_ROTATE_ON_UNAUTH !== 'false',
+  warp_rotate_on_unauth: process.env.WARP_ROTATE_ON_UNAUTH === 'true', // false by default: never kill WireProxy during live traffic
   warp_port: parseInt(process.env.WARP_PORT, 10) || 40000,
   upstream_models_url: 'https://opencode.ai/zen/v1/models',
   upstream_metadata_url: 'https://models.opencode.ai/api.json',

@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const notifications = require('./notifications');
+const warp = require('./warp');
 
 const MODELS_CACHE_FILE = path.join(__dirname, '..', 'data', 'models.json');
 
@@ -118,11 +119,16 @@ class ModelDiscoveryService {
   async fetchJson(url, headers = {}) {
     return new Promise((resolve, reject) => {
       const u = new URL(url);
+      const warpMode = config.get('warp_mode') || 'auto';
+      const useWarp = warpMode !== 'disabled' && warp.isReady();
+      const agent = useWarp ? warp.getWarpAgent(config.get('warp_port'), config.get('warp_host')) : undefined;
+
       const req = https.request({
         hostname: u.hostname,
         port: u.port || 443,
         path: u.pathname + u.search,
         method: 'GET',
+        agent,
         family: 4,
         headers: {
           'Accept': 'application/json',

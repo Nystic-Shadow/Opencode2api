@@ -17,7 +17,7 @@ class CloudflareWarpManager {
     this.cliPath = this.detectCliPath();
     this.wireproxyProcess = null;
     this.lastRotationTime = 0;
-    this.rotationCooldownMs = 60000;
+    this.rotationCooldownMs = 120000;
     this.isRotating = false;
     this.cachedAgent = null;
     this.cachedKey = '';
@@ -564,12 +564,14 @@ BindAddress = ${host}:${port}
 
   /**
    * Pure native SOCKS5 socket creator (RFC 1928, Zero dependencies).
+   * Robust handshake with strict timeout cleanup to prevent socket destruction during inference.
    */
   createSocks5Connection(targetHost, targetPort, proxyHost, proxyPort) {
     const pHost = proxyHost || config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const pPort = proxyPort || config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
 
     return new Promise((resolve, reject) => {
+      let resolved = false;
       const socket = net.connect({ host: pHost, port: pPort }, () => {
         // Handshake: [VER=5, NMETHODS=1, METHOD=0 (NO_AUTH)]
         socket.write(Buffer.from([0x05, 0x01, 0x00]));
@@ -577,10 +579,19 @@ BindAddress = ${host}:${port}
 
       let state = 'handshake';
 
+      const cleanupHandshake = () => {
+        socket.removeAllListeners('data');
+        socket.removeAllListeners('error');
+        socket.removeAllListeners('timeout');
+        socket.setTimeout(0);
+      };
+
       socket.on('data', (data) => {
         if (state === 'handshake') {
           if (data[0] !== 0x05 || data[1] !== 0x00) {
+            cleanupHandshake();
             socket.destroy();
+            resolved = true;
             return reject(new Error('SOCKS5 auth negotiation failed with WARP daemon'));
           }
           // CONNECT request: [VER=5, CMD=1, RSV=0, ATYP=3 (DOMAIN), LEN, ...domain, PORT_HI, PORT_LO]
@@ -594,18 +605,33 @@ BindAddress = ${host}:${port}
           socket.write(req);
         } else if (state === 'connect') {
           if (data[0] !== 0x05 || data[1] !== 0x00) {
+            cleanupHandshake();
             socket.destroy();
+            resolved = true;
             return reject(new Error(`SOCKS5 WARP tunnel rejected target: ${targetHost}, code: ${data[1]}`));
           }
-          socket.removeAllListeners('data');
+          // Handshake complete: clean up temporary listeners & clear handshake timeout
+          cleanupHandshake();
+          resolved = true;
           resolve(socket);
         }
       });
 
-      socket.on('error', reject);
-      socket.setTimeout(8000, () => {
-        socket.destroy();
-        reject(new Error('SOCKS5 connection to Cloudflare WARP timed out'));
+      socket.on('error', (err) => {
+        if (!resolved) {
+          cleanupHandshake();
+          resolved = true;
+          reject(err);
+        }
+      });
+
+      socket.setTimeout(12000, () => {
+        if (!resolved) {
+          cleanupHandshake();
+          socket.destroy();
+          resolved = true;
+          reject(new Error('SOCKS5 connection to Cloudflare WARP timed out during handshake'));
+        }
       });
     });
   }
@@ -626,31 +652,38 @@ BindAddress = ${host}:${port}
     this.cachedKey = cacheKey;
     const agent = new https.Agent({
       keepAlive: true,
-      maxSockets: 128,
-      maxFreeSockets: 32,
+      maxSockets: 64,
+      maxFreeSockets: 16,
       timeout: 60000,
-      keepAliveMsecs: 30000
+      keepAliveMsecs: 10000
     });
 
     agent.createConnection = function(options, callback) {
       const destHost = options.host || options.hostname || 'opencode.ai';
       const destPort = options.port || 443;
+      let connected = false;
+
       manager.createSocks5Connection(destHost, destPort, targetHost, targetPort)
         .then((rawSocket) => {
           const tlsSocket = tls.connect({
             socket: rawSocket,
             servername: options.servername || destHost
           }, () => {
+            connected = true;
             callback(null, tlsSocket);
           });
           tlsSocket.on('error', err => {
             manager.cachedAgent = null;
-            callback(err);
+            if (!connected) {
+              callback(err);
+            }
           });
         })
         .catch(err => {
           manager.cachedAgent = null;
-          callback(err);
+          if (!connected) {
+            callback(err);
+          }
         });
     };
 

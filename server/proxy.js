@@ -23,13 +23,51 @@ const upstreamAgent = new https.Agent({
 
 let proxyIndex = 0;
 
+// Adaptive Route Health & Intelligent Egress Router
+const routeHealth = {
+  directDegradedUntil: 0,
+  directConsecutiveFailures: 0,
+  directLastReason: '',
+
+  markDirectDegraded(reason = 'upstream error') {
+    // Keep degraded for 3 minutes so subsequent requests immediately route through WARP without delay
+    this.directDegradedUntil = Date.now() + (3 * 60 * 1000);
+    this.directConsecutiveFailures++;
+    this.directLastReason = String(reason);
+    console.warn(`[RouteManager] Direct route degraded (${reason}). Auto-promoting Cloudflare WARP as primary egress...`);
+  },
+
+  markDirectHealthy() {
+    this.directDegradedUntil = 0;
+    this.directConsecutiveFailures = 0;
+  },
+
+  isDirectDegraded() {
+    return Date.now() < this.directDegradedUntil;
+  },
+
+  shouldUseWarp(attempt = 1) {
+    const warpMode = config.get('warp_mode') || 'auto';
+    if (warpMode === 'disabled') return false;
+    if (!warp.isReady()) return false;
+    if (warpMode === 'always') return true;
+
+    // In 'auto' mode:
+    // If direct route is currently degraded (e.g. cloud VPS IP blocked with 403),
+    // or if this is a retry attempt (attempt > 1):
+    if (this.isDirectDegraded() || attempt > 1) {
+      return true;
+    }
+
+    return false;
+  }
+};
+
 /**
- * Returns either a direct keepAlive agent, Cloudflare WARP SOCKS5 agent, or a proxy tunnel agent.
- * Automatically switches to WARP when needed or when explicitly configured.
+ * Returns either a Cloudflare WARP SOCKS5 agent, proxy tunnel agent, or direct keepAlive agent.
  */
 function getUpstreamAgent(attempt = 1, useWarp = false) {
-  const warpMode = config.get('warp_mode') || 'auto';
-  if ((useWarp || warpMode === 'always') && warp.isReady()) {
+  if (useWarp && warp.isReady()) {
     return warp.getWarpAgent(config.get('warp_port'), config.get('warp_host'));
   }
 
@@ -39,68 +77,56 @@ function getUpstreamAgent(attempt = 1, useWarp = false) {
     ? configuredProxies
     : (envProxy ? [envProxy] : []);
 
-  if (proxyList.length === 0) {
-    return upstreamAgent;
-  }
-
-  // If retrying past the number of proxies, try WARP before falling back to direct IPv4
-  if (attempt > proxyList.length) {
-    if (warpMode !== 'disabled' && warp.isReady()) {
-      return warp.getWarpAgent(config.get('warp_port'), config.get('warp_host'));
-    }
-    return upstreamAgent;
-  }
-
-  // Rotate through configured proxies
-  const proxyUrlStr = proxyList[proxyIndex % proxyList.length];
-  proxyIndex++;
-
-  try {
-    const proxyUrl = new URL(proxyUrlStr);
-    const agent = new https.Agent({
-      keepAlive: true,
-      family: 4
-    });
-    agent.createConnection = function(options, callback) {
-      const targetHost = options.host || options.hostname || 'opencode.ai';
-      const targetPort = options.port || 443;
-      const connectReq = http.request({
-        host: proxyUrl.hostname,
-        port: proxyUrl.port || 80,
-        method: 'CONNECT',
-        path: `${targetHost}:${targetPort}`,
-        headers: {
-          Host: `${targetHost}:${targetPort}`,
-          ...(proxyUrl.username ? {
-            'Proxy-Authorization': 'Basic ' + Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString('base64')
-          } : {})
-        },
-        timeout: 10000
+  if (proxyList.length > 0) {
+    const proxyUrlStr = proxyList[(attempt - 1) % proxyList.length];
+    try {
+      const proxyUrl = new URL(proxyUrlStr);
+      const agent = new https.Agent({
+        keepAlive: true,
+        family: 4
       });
-      connectReq.on('timeout', () => {
-        connectReq.destroy(new Error(`Proxy CONNECT to ${proxyUrl.host} timed out`));
-      });
-      connectReq.on('connect', (res, socket, head) => {
-        if (res.statusCode !== 200) {
-          callback(new Error(`Proxy CONNECT returned HTTP ${res.statusCode}`));
-          return;
-        }
-        const tlsSocket = tls.connect({
-          socket: socket,
-          servername: options.servername || targetHost
-        }, () => {
-          callback(null, tlsSocket);
+      agent.createConnection = function(options, callback) {
+        const targetHost = options.host || options.hostname || 'opencode.ai';
+        const targetPort = options.port || 443;
+        const connectReq = http.request({
+          host: proxyUrl.hostname,
+          port: proxyUrl.port || 80,
+          method: 'CONNECT',
+          path: `${targetHost}:${targetPort}`,
+          headers: {
+            Host: `${targetHost}:${targetPort}`,
+            ...(proxyUrl.username ? {
+              'Proxy-Authorization': 'Basic ' + Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString('base64')
+            } : {})
+          },
+          timeout: 10000
         });
-        tlsSocket.on('error', err => callback(err));
-      });
-      connectReq.on('error', err => callback(err));
-      connectReq.end();
-    };
-    return agent;
-  } catch (err) {
-    console.error('[ProxyAgent] Failed to create proxy agent, falling back to direct:', err.message);
-    return upstreamAgent;
+        connectReq.on('timeout', () => {
+          connectReq.destroy(new Error(`Proxy CONNECT to ${proxyUrl.host} timed out`));
+        });
+        connectReq.on('connect', (res, socket, head) => {
+          if (res.statusCode !== 200) {
+            callback(new Error(`Proxy CONNECT returned HTTP ${res.statusCode}`));
+            return;
+          }
+          const tlsSocket = tls.connect({
+            socket: socket,
+            servername: options.servername || targetHost
+          }, () => {
+            callback(null, tlsSocket);
+          });
+          tlsSocket.on('error', err => callback(err));
+        });
+        connectReq.on('error', err => callback(err));
+        connectReq.end();
+      };
+      return agent;
+    } catch (err) {
+      console.error('[ProxyAgent] Failed to create proxy agent, falling back to direct:', err.message);
+    }
   }
+
+  return upstreamAgent;
 }
 
 function normalizeModelId(id) {
@@ -110,11 +136,10 @@ function normalizeModelId(id) {
 
 /**
  * Determine the next healthy fallback model for resilient failover.
- * Only genuine free models are eligible to cascade across equivalent free models.
- * Paid models (Claude Opus, GPT, etc.) must NEVER silently failover to an unrelated model!
+ * Disabled by default to guarantee 100% strict model routing unless explicitly enabled in Settings.
  */
 function getNextFallbackModel(currentModel, triedModels = new Set()) {
-  if (config.get('smart_fallback') === false) return null;
+  if (config.get('smart_fallback') !== true) return null;
 
   // Strict: only free models participate in failover cascades
   const isFree = discovery.isModelFree(currentModel);
@@ -238,9 +263,12 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const triedModels = new Set([currentModel]);
   const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 2;
   const requestTimeout = config.get('request_timeout_ms') || 60000;
-  let useWarp = config.get('warp_mode') === 'always';
+  let useWarp = routeHealth.shouldUseWarp(1);
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    if (attempt > 1) {
+      useWarp = routeHealth.shouldUseWarp(attempt);
+    }
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const sessionId = identity.generateCanonicalSessionId();
     const projectId = identity.generateProjectId();
@@ -318,6 +346,12 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
     if (attemptResult.success) {
       const { upstreamRes, upstreamReq, resolvedModel } = attemptResult;
+
+      if (!useWarp) {
+        routeHealth.markDirectHealthy();
+      } else {
+        routeHealth.warpConsecutiveFailures = 0;
+      }
 
       // Set fallback headers if auto-failover occurred
       if (resolvedModel !== requestedModel) {
@@ -503,13 +537,19 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       ))
     );
 
-    // If WARP proxy failed or socket dropped, immediately fallback to direct route without burning a retry attempt
+    // If WARP proxy failed or socket dropped, immediately fallback to direct route
     if (isWarpFailure) {
-      console.warn(`[Proxy] WARP proxy failed or refused (${attemptResult.body}), falling back to direct route...`);
+      console.warn(`[Proxy] WARP proxy error (${attemptResult.body}), falling back to direct route...`);
       useWarp = false;
-      attempt--;
-      await new Promise(r => setTimeout(r, 300));
-      continue;
+      routeHealth.warpConsecutiveFailures++;
+    } else if (!useWarp) {
+      // Direct route failed (e.g. 403 Forbidden on VPS, 429, timeout, network error)
+      // Auto-promote WARP as primary egress for all subsequent requests!
+      routeHealth.markDirectDegraded(attemptResult.statusCode || attemptResult.body);
+      if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
+        console.log(`[WARP] Direct route error (${attemptResult.statusCode || attemptResult.body}). Auto-switching route to Cloudflare WARP proxy for retry...`);
+        useWarp = true;
+      }
     }
 
     // Strict Model Isolation: Paid models (Claude Opus, GPT, etc.) must NEVER failover to a different model!
@@ -537,50 +577,19 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       return;
     }
 
-    const isUnavailable = attemptResult.statusCode === 429 ||
-                          attemptResult.statusCode === 403 ||
-                          attemptResult.statusCode === 401 ||
-                          (typeof attemptResult.body === 'string' && (
-                            attemptResult.body.includes('unavailable') ||
-                            attemptResult.body.includes('FreeTierError') ||
-                            attemptResult.body.includes('FreeUsageLimitError') ||
-                            attemptResult.body.includes('Rate limit exceeded')
-                          )) ||
-                          attemptResult.statusCode >= 500;
-
-    // Cloudflare WARP dynamic rotation & switch whenever unauth/rate-limit occurs
-    const isUnauth = attemptResult.statusCode === 401 ||
-                     attemptResult.statusCode === 403 ||
-                     (typeof attemptResult.body === 'string' && (
-                       attemptResult.body.includes('FreeTierError') ||
-                       attemptResult.body.includes('FreeUsageLimitError') ||
-                       attemptResult.body.includes('Rate limit')
-                     ));
-
-    if (isUnauth && warp.isReady()) {
-      if (!useWarp && config.get('warp_auto_switch') !== false) {
-        console.log(`[WARP] Unauth/rate-limit detected (${attemptResult.statusCode}). Auto-switching route to Cloudflare WARP proxy for retry...`);
-        useWarp = true;
-      } else if (useWarp && config.get('warp_rotate_on_unauth') !== false) {
-        console.log('[WARP] WARP egress hit rate limit, requesting key rotation in background...');
-        warp.rotateKeys().catch(e => console.warn('[WARP] Rotation notice:', e.message));
-      }
-    }
-
     if (attempt <= maxRetries) {
-      if (isUnavailable) {
-        const fallback = getNextFallbackModel(currentModel, triedModels);
-        if (fallback) {
-          console.log(`[Proxy] Model ${currentModel} returned ${attemptResult.statusCode}. Smart failover to ${fallback} (Attempt ${attempt}/${maxRetries + 1})...`);
-          currentModel = fallback;
-          triedModels.add(fallback);
-        } else {
-          console.log(`[Proxy] Upstream transient ${attemptResult.statusCode} on ${currentModel}. Retrying with fresh session ID...`);
-        }
+      const fallback = getNextFallbackModel(currentModel, triedModels);
+      if (fallback) {
+        console.log(`[Proxy] Model ${currentModel} returned ${attemptResult.statusCode}. Smart failover to ${fallback} (Attempt ${attempt}/${maxRetries + 1})...`);
+        currentModel = fallback;
+        triedModels.add(fallback);
+      } else {
+        const routeLabel = useWarp ? 'Cloudflare WARP' : 'direct route';
+        console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
       }
 
       // Exponential backoff with random jitter
-      const backoffMs = Math.min(400 * Math.pow(1.8, attempt - 1) + Math.random() * 250, 3000);
+      const backoffMs = Math.min(300 * Math.pow(1.5, attempt - 1) + Math.random() * 200, 2000);
       await new Promise(r => setTimeout(r, backoffMs));
     } else {
       // Retries exhausted
@@ -740,9 +749,12 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const triedModels = new Set([currentModel]);
   const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 2;
   const requestTimeout = config.get('request_timeout_ms') || 60000;
-  let useWarp = config.get('warp_mode') === 'always';
+  let useWarp = routeHealth.shouldUseWarp(1);
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    if (attempt > 1) {
+      useWarp = routeHealth.shouldUseWarp(attempt);
+    }
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const sessionId = identity.generateCanonicalSessionId();
     const projectId = identity.generateProjectId();
@@ -819,6 +831,12 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     if (attemptResult.success) {
       const { upstreamRes, upstreamReq, resolvedModel } = attemptResult;
       const messageId = 'msg_' + crypto.randomUUID().replace(/-/g, '').slice(0, 20);
+
+      if (!useWarp) {
+        routeHealth.markDirectHealthy();
+      } else {
+        routeHealth.warpConsecutiveFailures = 0;
+      }
 
       if (resolvedModel !== requestedModel) {
         res.setHeader('x-opencode2api-fallback', `${requestedModel} -> ${resolvedModel}`);
@@ -1143,13 +1161,19 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       ))
     );
 
-    // If WARP proxy failed or socket dropped, immediately fallback to direct route without burning a retry attempt
+    // If WARP proxy failed or socket dropped, immediately fallback to direct route
     if (isWarpFailure) {
-      console.warn(`[Proxy] Anthropic WARP proxy failed or refused (${attemptResult.body}), falling back to direct route...`);
+      console.warn(`[Proxy] Anthropic WARP proxy error (${attemptResult.body}), falling back to direct route...`);
       useWarp = false;
-      attempt--;
-      await new Promise(r => setTimeout(r, 300));
-      continue;
+      routeHealth.warpConsecutiveFailures++;
+    } else if (!useWarp) {
+      // Direct route failed (e.g. 403 Forbidden on VPS, 429, timeout, network error)
+      // Auto-promote WARP as primary egress for all subsequent requests!
+      routeHealth.markDirectDegraded(attemptResult.statusCode || attemptResult.body);
+      if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
+        console.log(`[WARP] Anthropic direct route error (${attemptResult.statusCode || attemptResult.body}). Auto-switching route to Cloudflare WARP proxy for retry...`);
+        useWarp = true;
+      }
     }
 
     // Strict Model Isolation: Paid models (Claude Opus, GPT, etc.) must NEVER failover to a different model!
@@ -1177,46 +1201,17 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       return;
     }
 
-    const isUnavailable = attemptResult.statusCode === 429 ||
-                          attemptResult.statusCode === 403 ||
-                          attemptResult.statusCode === 401 ||
-                          (typeof attemptResult.body === 'string' && (
-                            attemptResult.body.includes('unavailable') ||
-                            attemptResult.body.includes('FreeTierError') ||
-                            attemptResult.body.includes('FreeUsageLimitError') ||
-                            attemptResult.body.includes('Rate limit exceeded')
-                          )) ||
-                          attemptResult.statusCode >= 500;
-
-    // Cloudflare WARP dynamic rotation & switch whenever unauth/rate-limit occurs
-    const isUnauth = attemptResult.statusCode === 401 ||
-                     attemptResult.statusCode === 403 ||
-                     (typeof attemptResult.body === 'string' && (
-                       attemptResult.body.includes('FreeTierError') ||
-                       attemptResult.body.includes('FreeUsageLimitError') ||
-                       attemptResult.body.includes('Rate limit')
-                     ));
-
-    if (isUnauth && warp.isReady()) {
-      if (!useWarp && config.get('warp_auto_switch') !== false) {
-        console.log(`[WARP] Anthropic Unauth/rate-limit detected (${attemptResult.statusCode}). Auto-switching route to Cloudflare WARP proxy for retry...`);
-        useWarp = true;
-      } else if (useWarp && config.get('warp_rotate_on_unauth') !== false) {
-        console.log('[WARP] WARP egress hit rate limit, requesting key rotation in background...');
-        warp.rotateKeys().catch(e => console.warn('[WARP] Rotation notice:', e.message));
-      }
-    }
-
     if (attempt <= maxRetries) {
-      if (isUnavailable) {
-        const fallback = getNextFallbackModel(currentModel, triedModels);
-        if (fallback) {
-          console.log(`[Proxy] Anthropic Model ${currentModel} returned ${attemptResult.statusCode}. Smart failover to ${fallback}...`);
-          currentModel = fallback;
-          triedModels.add(fallback);
-        }
+      const fallback = getNextFallbackModel(currentModel, triedModels);
+      if (fallback) {
+        console.log(`[Proxy] Anthropic Model ${currentModel} returned ${attemptResult.statusCode}. Smart failover to ${fallback}...`);
+        currentModel = fallback;
+        triedModels.add(fallback);
+      } else {
+        const routeLabel = useWarp ? 'Cloudflare WARP' : 'direct route';
+        console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on Anthropic model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
       }
-      const backoffMs = Math.min(400 * Math.pow(1.8, attempt - 1) + Math.random() * 250, 3000);
+      const backoffMs = Math.min(300 * Math.pow(1.5, attempt - 1) + Math.random() * 200, 2000);
       await new Promise(r => setTimeout(r, backoffMs));
     } else {
       metrics.recordRequest({
@@ -1261,5 +1256,6 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
 module.exports = {
   handleChatCompletions,
-  handleAnthropicMessages
+  handleAnthropicMessages,
+  routeHealth
 };

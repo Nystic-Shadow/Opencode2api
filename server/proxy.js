@@ -103,6 +103,11 @@ function getUpstreamAgent(attempt = 1, useWarp = false) {
   }
 }
 
+function normalizeModelId(id) {
+  if (!id) return '';
+  return id.replace(/[-_]?free$/i, '');
+}
+
 // Resilient fallback cascades by model family & capability
 const FALLBACK_CASCADES = {
   // Multimodal Vision models
@@ -111,10 +116,11 @@ const FALLBACK_CASCADES = {
   'longcat-2.5-preview': ['nemotron-3.5-super-vl', 'mimo-v2.6-flash', 'beam', 'deepseek-v4.1-flash'],
 
   // High performance text / reasoning models
-  'glm-5.3-flash': ['beam', 'deepseek-v4.1-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle'],
-  'deepseek-v4.1-flash': ['beam', 'glm-5.3-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle'],
-  'beam': ['deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle'],
-  'nemotron-3.5-lightning': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'space-bunny'],
+  'glm-5.3-flash': ['beam', 'deepseek-v4.1-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle', 'nemotron-3-ultra'],
+  'deepseek-v4.1-flash': ['beam', 'glm-5.3-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle', 'nemotron-3-ultra'],
+  'beam': ['deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle', 'nemotron-3-ultra'],
+  'nemotron-3.5-lightning': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'space-bunny', 'nemotron-3-ultra'],
+  'nemotron-3-ultra': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'space-bunny', 'nemotron-3.5-lightning'],
   'big-pickle': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'space-bunny'],
   'space-bunny': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash']
 };
@@ -125,20 +131,22 @@ const FALLBACK_CASCADES = {
 function getNextFallbackModel(currentModel, triedModels = new Set()) {
   if (config.get('smart_fallback') === false) return null;
 
-  const cascade = FALLBACK_CASCADES[currentModel] || [];
+  const norm = normalizeModelId(currentModel);
+  const cascade = FALLBACK_CASCADES[norm] || FALLBACK_CASCADES[currentModel] || [];
   for (const candidate of cascade) {
-    if (!triedModels.has(candidate)) {
+    if (!triedModels.has(candidate) && !triedModels.has(candidate + '-free')) {
       return candidate;
     }
   }
 
   // Capability-based search if cascade is exhausted
   const allModels = (discovery.getAllModels ? discovery.getAllModels() : discovery.models) || [];
-  const currentMeta = allModels.find(m => m.id === currentModel);
+  const currentMeta = allModels.find(m => m.id === currentModel || m.id === norm);
   const wantsVision = currentMeta?.supports_vision;
 
   for (const m of allModels) {
-    if (!triedModels.has(m.id)) {
+    const mNorm = normalizeModelId(m.id);
+    if (!triedModels.has(m.id) && !triedModels.has(mNorm)) {
       if (wantsVision ? m.supports_vision : true) {
         return m.id;
       }
@@ -457,6 +465,27 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     }
 
     // Upstream failed this attempt — inspect if we can retry or failover
+    const isWarpFailure = useWarp && (
+      attemptResult.statusCode === 502 ||
+      attemptResult.statusCode === 504 ||
+      (typeof attemptResult.body === 'string' && (
+        attemptResult.body.includes('ECONNREFUSED') ||
+        attemptResult.body.includes('timeout') ||
+        attemptResult.body.includes('ETIMEDOUT') ||
+        attemptResult.body.includes('ECONNRESET') ||
+        attemptResult.body.includes('SOCKS5')
+      ))
+    );
+
+    // If WARP proxy failed or socket dropped, immediately fallback to direct route without burning a retry attempt
+    if (isWarpFailure) {
+      console.warn(`[Proxy] WARP proxy failed or refused (${attemptResult.body}), falling back to direct route...`);
+      useWarp = false;
+      attempt--;
+      await new Promise(r => setTimeout(r, 300));
+      continue;
+    }
+
     const isUnavailable = attemptResult.statusCode === 429 ||
                           attemptResult.statusCode === 403 ||
                           attemptResult.statusCode === 401 ||
@@ -482,14 +511,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         console.log(`[WARP] Unauth/rate-limit detected (${attemptResult.statusCode}). Auto-switching route to Cloudflare WARP proxy for retry...`);
         useWarp = true;
       } else if (useWarp && config.get('warp_rotate_on_unauth') !== false) {
-        console.log('[WARP] WARP egress hit rate limit, rotating tunnel session keys...');
-        await warp.rotateKeys();
+        console.log('[WARP] WARP egress hit rate limit, requesting key rotation in background...');
+        warp.rotateKeys().catch(e => console.warn('[WARP] Rotation notice:', e.message));
       }
-    }
-
-    if (useWarp && typeof attemptResult.body === 'string' && (attemptResult.body.includes('ECONNREFUSED') || attemptResult.body.includes('timeout'))) {
-      console.warn('[Proxy] WARP proxy connection failed or refused, falling back to direct route...');
-      useWarp = false;
     }
 
     if (attempt <= maxRetries) {
@@ -505,7 +529,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       }
 
       // Exponential backoff with random jitter
-      const backoffMs = Math.min(250 * Math.pow(1.5, attempt - 1) + Math.random() * 200, 2500);
+      const backoffMs = Math.min(400 * Math.pow(1.8, attempt - 1) + Math.random() * 250, 3000);
       await new Promise(r => setTimeout(r, backoffMs));
     } else {
       // Retries exhausted
@@ -519,15 +543,15 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       });
       res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
       let errPayload = attemptResult.body;
-      const isFreeTierErr = attemptResult.statusCode === 403 && typeof errPayload === 'string' &&
-        (errPayload.includes('FreeTierError') || errPayload.includes('FreeUsageLimitError') || errPayload.includes('capacity limit') || errPayload.includes('rate limit'));
+      const isFreeTierErr = (attemptResult.statusCode === 403 || attemptResult.statusCode === 429) && typeof errPayload === 'string' &&
+        (errPayload.includes('FreeTierError') || errPayload.includes('FreeUsageLimitError') || errPayload.includes('capacity limit') || errPayload.includes('rate limit') || errPayload.includes('Rate limit'));
 
       if (isFreeTierErr) {
         errPayload = JSON.stringify({
           error: {
             message: "OpenCode Free Tier capacity limit reached for this IP window. Rate limits automatically reset shortly. You can also configure an upstream Zen key or proxy in Settings to continue without interruption.",
             type: "free_tier_rate_limit",
-            code: 403
+            code: attemptResult.statusCode
           }
         });
       } else {
@@ -1019,6 +1043,27 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     }
 
     // Upstream error on Anthropic request
+    const isWarpFailure = useWarp && (
+      attemptResult.statusCode === 502 ||
+      attemptResult.statusCode === 504 ||
+      (typeof attemptResult.body === 'string' && (
+        attemptResult.body.includes('ECONNREFUSED') ||
+        attemptResult.body.includes('timeout') ||
+        attemptResult.body.includes('ETIMEDOUT') ||
+        attemptResult.body.includes('ECONNRESET') ||
+        attemptResult.body.includes('SOCKS5')
+      ))
+    );
+
+    // If WARP proxy failed or socket dropped, immediately fallback to direct route without burning a retry attempt
+    if (isWarpFailure) {
+      console.warn(`[Proxy] Anthropic WARP proxy failed or refused (${attemptResult.body}), falling back to direct route...`);
+      useWarp = false;
+      attempt--;
+      await new Promise(r => setTimeout(r, 300));
+      continue;
+    }
+
     const isUnavailable = attemptResult.statusCode === 429 ||
                           attemptResult.statusCode === 403 ||
                           attemptResult.statusCode === 401 ||
@@ -1044,14 +1089,9 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         console.log(`[WARP] Anthropic Unauth/rate-limit detected (${attemptResult.statusCode}). Auto-switching route to Cloudflare WARP proxy for retry...`);
         useWarp = true;
       } else if (useWarp && config.get('warp_rotate_on_unauth') !== false) {
-        console.log('[WARP] WARP egress hit rate limit, rotating tunnel session keys...');
-        await warp.rotateKeys();
+        console.log('[WARP] WARP egress hit rate limit, requesting key rotation in background...');
+        warp.rotateKeys().catch(e => console.warn('[WARP] Rotation notice:', e.message));
       }
-    }
-
-    if (useWarp && typeof attemptResult.body === 'string' && (attemptResult.body.includes('ECONNREFUSED') || attemptResult.body.includes('timeout'))) {
-      console.warn('[Proxy] WARP proxy connection failed or refused, falling back to direct route...');
-      useWarp = false;
     }
 
     if (attempt <= maxRetries) {
@@ -1063,7 +1103,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           triedModels.add(fallback);
         }
       }
-      const backoffMs = Math.min(250 * Math.pow(1.5, attempt - 1) + Math.random() * 200, 2500);
+      const backoffMs = Math.min(400 * Math.pow(1.8, attempt - 1) + Math.random() * 250, 3000);
       await new Promise(r => setTimeout(r, backoffMs));
     } else {
       metrics.recordRequest({
@@ -1076,8 +1116,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       });
       res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
       let errPayload = attemptResult.body;
-      const isFreeTierErr = attemptResult.statusCode === 403 && typeof errPayload === 'string' &&
-        (errPayload.includes('FreeTierError') || errPayload.includes('FreeUsageLimitError') || errPayload.includes('capacity limit') || errPayload.includes('rate limit'));
+      const isFreeTierErr = (attemptResult.statusCode === 403 || attemptResult.statusCode === 429) && typeof errPayload === 'string' &&
+        (errPayload.includes('FreeTierError') || errPayload.includes('FreeUsageLimitError') || errPayload.includes('capacity limit') || errPayload.includes('rate limit') || errPayload.includes('Rate limit'));
 
       if (isFreeTierErr) {
         errPayload = JSON.stringify({

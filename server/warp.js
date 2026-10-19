@@ -17,10 +17,12 @@ class CloudflareWarpManager {
     this.cliPath = this.detectCliPath();
     this.wireproxyProcess = null;
     this.lastRotationTime = 0;
-    this.rotationCooldownMs = 4000;
+    this.rotationCooldownMs = 60000;
+    this.isRotating = false;
     this.cachedAgent = null;
     this.cachedKey = '';
     this.statusCache = null;
+    this.socketAlive = false;
     this.lastStatusCheck = 0;
     this.isBootstrapping = false;
     this.progress = {
@@ -28,6 +30,9 @@ class CloudflareWarpManager {
       stage: 'idle',
       message: 'WARP Engine Idle'
     };
+
+    // Fast initial background probe so socketAlive state is immediately populated
+    this.probeSocks5().catch(() => {});
   }
 
   setProgress(percent, stage, message) {
@@ -90,7 +95,10 @@ class CloudflareWarpManager {
   }
 
   isReady() {
-    return Boolean(this.statusCache && this.statusCache.socketAlive === true);
+    if (this.statusCache && typeof this.statusCache.socketAlive === 'boolean') {
+      return this.statusCache.socketAlive;
+    }
+    return this.socketAlive === true;
   }
 
   /**
@@ -277,16 +285,20 @@ BindAddress = ${host}:${port}
 
       socket.on('data', (data) => {
         socket.destroy();
-        resolve(data.length >= 2 && data[0] === 0x05 && data[1] === 0x00);
+        const ok = data.length >= 2 && data[0] === 0x05 && data[1] === 0x00;
+        this.socketAlive = ok;
+        resolve(ok);
       });
 
       socket.on('error', () => {
         socket.destroy();
+        this.socketAlive = false;
         resolve(false);
       });
 
       socket.on('timeout', () => {
         socket.destroy();
+        this.socketAlive = false;
         resolve(false);
       });
     });
@@ -475,15 +487,16 @@ BindAddress = ${host}:${port}
    */
   async rotateKeys() {
     const now = Date.now();
-    if (now - this.lastRotationTime < this.rotationCooldownMs) {
-      return true; // Throttle excessive rotations
+    if (this.isRotating || (now - this.lastRotationTime < this.rotationCooldownMs)) {
+      return true; // Throttle excessive rotations to prevent socket drops during retries
     }
+    this.isRotating = true;
     this.lastRotationTime = now;
     this.setProgress(20, 'rotating', 'Rotating Cloudflare WARP tunnel session keys...');
 
-    // 1. If running Userspace WireProxy, register fresh account & restart
-    if (this.wireproxyPath) {
-      try {
+    try {
+      // 1. If running Userspace WireProxy, register fresh account & restart
+      if (this.wireproxyPath) {
         console.log('[WARP] Rotating Userspace WireProxy tunnel keys...');
         this.setProgress(40, 'registering', 'Negotiating fresh session with Cloudflare Edge API...');
         const newAccount = await this.registerCloudflareAccount();
@@ -491,43 +504,33 @@ BindAddress = ${host}:${port}
         await this.startWireproxy(newAccount);
         this.setProgress(100, 'connected', 'Cloudflare WARP connected with fresh edge session (warp=on)');
         this.statusCache = null;
+        this.cachedAgent = null;
         console.log('[WARP] Fresh Cloudflare edge session established successfully.');
         return true;
-      } catch (err) {
-        console.error('[WARP] WireProxy key rotation failed:', err.message);
-        this.setProgress(0, 'error', 'Key rotation failed: ' + err.message);
-        return false;
       }
-    }
 
-    // 2. If running official CLI
-    if (this.cliPath) {
-      try {
+      // 2. If running official CLI
+      if (this.cliPath) {
         console.log('[WARP] Rotating CLI tunnel keys...');
         await this.execWarp(['tunnel', 'rotate-keys']);
         await new Promise(r => setTimeout(r, 1200));
         this.statusCache = null;
+        this.cachedAgent = null;
         this.setProgress(100, 'connected', 'Cloudflare WARP CLI keys rotated');
         return true;
-      } catch (err) {
-        console.warn('[WARP] CLI tunnel rotation failed, attempting reconnect:', err.message);
-        try {
-          await this.execWarp(['disconnect']);
-          await new Promise(r => setTimeout(r, 800));
-          await this.execWarp(['connect']);
-          this.setProgress(100, 'connected', 'Cloudflare WARP CLI reconnected');
-          return true;
-        } catch (e2) {
-          this.setProgress(0, 'error', 'CLI rotation failed');
-          return false;
-        }
       }
-    }
 
-    // 3. Fallback: probe socket
-    const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
-    const port = config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
-    return await this.probeSocks5(host, port);
+      // 3. Fallback: probe socket
+      const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+      const port = config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
+      return await this.probeSocks5(host, port);
+    } catch (err) {
+      console.warn('[WARP] Key rotation notice:', err.message);
+      this.setProgress(0, 'error', 'Key rotation notice: ' + err.message);
+      return false;
+    } finally {
+      this.isRotating = false;
+    }
   }
 
   async triggerAutoInstall() {
@@ -640,9 +643,15 @@ BindAddress = ${host}:${port}
           }, () => {
             callback(null, tlsSocket);
           });
-          tlsSocket.on('error', err => callback(err));
+          tlsSocket.on('error', err => {
+            manager.cachedAgent = null;
+            callback(err);
+          });
         })
-        .catch(err => callback(err));
+        .catch(err => {
+          manager.cachedAgent = null;
+          callback(err);
+        });
     };
 
     this.cachedAgent = agent;

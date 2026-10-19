@@ -63,6 +63,8 @@ function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
   const clientVersion = config.get('client_version') || '2.0.32';
   const upstreamKey = config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY;
   const authHeader = upstreamKey ? `Bearer ${upstreamKey}` : 'Bearer public';
+  const reqId = 'msg_' + Date.now().toString(36) + crypto.randomBytes(6).toString('hex');
+  const projectDir = encodeURIComponent(process.cwd());
 
   return {
     'Content-Type': 'application/json',
@@ -72,6 +74,8 @@ function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
     'x-opencode-client': 'cli',
     'x-opencode-session': sessionId,
     'x-opencode-session-id': sessionId,
+    'x-opencode-request-id': reqId,
+    'x-opencode-directory': projectDir,
     'x-session-affinity': sessionId,
     'X-Session-Id': sessionId,
     'x-opencode-project': projectId || 'global',

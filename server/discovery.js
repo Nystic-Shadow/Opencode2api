@@ -6,11 +6,20 @@ const notifications = require('./notifications');
 
 const MODELS_CACHE_FILE = path.join(__dirname, '..', 'data', 'models.json');
 
-// Suffix removal helper: strips -free, _free, or free at the end
+// Strict check: only genuine OpenCode free models have -free or are big-pickle
+function isUpstreamFreeModel(rawId) {
+  if (!rawId) return false;
+  const lower = rawId.toLowerCase();
+  return lower.endsWith('-free') || lower === 'big-pickle';
+}
+
+// Suffix removal helper: ONLY strips -free at the end for models that are actually free
 function cleanModelId(rawId) {
   if (!rawId) return rawId;
-  const cleaned = rawId.replace(/[-_]?free$/i, '');
-  return cleaned || rawId;
+  if (rawId.toLowerCase().endsWith('-free')) {
+    return rawId.slice(0, -5);
+  }
+  return rawId;
 }
 
 class ModelDiscoveryService {
@@ -62,7 +71,7 @@ class ModelDiscoveryService {
     for (const m of this.models) {
       this.cleanedToRaw.set(m.id, m.upstream_id);
       this.rawToCleaned.set(m.upstream_id, m.id);
-      // Also map raw ID to raw ID for backward compatibility
+      // Also map upstream ID to itself
       this.cleanedToRaw.set(m.upstream_id, m.upstream_id);
     }
   }
@@ -149,7 +158,6 @@ class ModelDiscoveryService {
           if (provVal && provVal.models) {
             for (const [mId, mVal] of Object.entries(provVal.models)) {
               metaMap[mId] = mVal;
-              // Also map without provider prefix if any
               const slashIdx = mId.lastIndexOf('/');
               if (slashIdx !== -1) {
                 metaMap[mId.slice(slashIdx + 1)] = mVal;
@@ -164,10 +172,9 @@ class ModelDiscoveryService {
       const newModels = [];
       const freeOnly = config.get('free_only') !== false;
 
-      // Models known to have non-standard/unsupported protocols
-      const BLACKLISTED = new Set(['jev-1.13-free', 'test']);
+      // Models known to have non-standard/unsupported/deprecated protocols
+      const BLACKLISTED = new Set(['jev-1.13-free', 'test', 'jev-1.13', 'claude-opus-5-5-backup']);
 
-      // Deduplicated Map by cleanId, strictly preferring -free variant
       const modelMap = new Map();
 
       for (const raw of rawZenList) {
@@ -178,42 +185,40 @@ class ModelDiscoveryService {
         const isDeprecated = meta.status === 'deprecated';
         if (isDeprecated) continue;
 
-        const isFree = rawId.toLowerCase().includes('free') ||
-                       rawId === 'big-pickle' ||
-                       (meta.cost && meta.cost.input === 0 && meta.cost.output === 0);
+        // A model is Free strictly if it ends with -free or is big-pickle
+        const isFree = isUpstreamFreeModel(rawId);
 
         if (freeOnly && !isFree) {
           continue; // Skip paid models in free-only mode
         }
 
-        // Clean the model ID (remove the -free / free suffix)
-        const cleanId = cleanModelId(rawId);
+        const cleanId = isFree ? cleanModelId(rawId) : rawId;
+        const actualUpstream = rawId; // Exactly match Zen upstream ID!
 
-        // If this cleanId is already mapped, only replace if this rawId is explicitly -free
+        // If this cleanId is already mapped, prioritize the -free variant
         if (modelMap.has(cleanId)) {
           const existing = modelMap.get(cleanId);
-          if (rawId.endsWith('-free') && !existing.upstream_id.endsWith('-free')) {
-            existing.upstream_id = rawId;
+          if (isFree && !existing.is_free) {
+            existing.upstream_id = actualUpstream;
             existing.is_free = true;
           }
           continue;
         }
 
-        const actualUpstream = (rawId.endsWith('-free') || rawId === 'big-pickle') ? rawId : (rawId + '-free');
-
         modelMap.set(cleanId, {
           id: cleanId,
           upstream_id: actualUpstream,
-          name: meta.name || cleanId.toUpperCase(),
-          description: meta.description || 'OpenCode Zen High-Performance Free Coding & Reasoning Model',
+          name: meta.name || cleanId,
+          description: meta.description || (isFree ? 'OpenCode Zen High-Performance Free Model' : 'OpenCode Zen Enterprise Model (Zen Key required)'),
           context_window: meta.limit?.context || (cleanId.includes('1m') || cleanId.includes('vl') ? 1048576 : 200000),
           max_output: meta.limit?.output || 32000,
           modalities: meta.modalities?.input || (cleanId.includes('vl') || cleanId.includes('flash') ? ['text', 'image'] : ['text']),
           supports_vision: (meta.modalities?.input || []).includes('image') || cleanId.includes('vl'),
           supports_reasoning: meta.reasoning !== false,
           supports_tools: meta.tool_call !== false,
-          is_free: true,
-          family: meta.family || 'opencode'
+          is_free: isFree,
+          cost: meta.cost || null,
+          family: meta.family || (cleanId.startsWith('claude') ? 'anthropic' : cleanId.startsWith('gpt') ? 'openai' : 'opencode')
         });
       }
 
@@ -236,11 +241,10 @@ class ModelDiscoveryService {
       this.rebuildMaps();
       this.saveCache();
 
-      console.log(`[Discovery] Successfully discovered ${this.models.length} active Zen model(s) (clean IDs).`);
+      console.log(`[Discovery] Successfully discovered ${this.models.length} active Zen model(s) (${this.models.filter(m => m.is_free).length} free, ${this.models.filter(m => !m.is_free).length} paid).`);
       return this.models;
     } catch (err) {
       console.error('[Discovery] Model discovery failed:', err.message);
-      // Fallback to cache or fallback models if empty
       if (this.models.length === 0) {
         this.fallbackBootstrap();
       }
@@ -275,31 +279,61 @@ class ModelDiscoveryService {
   resolveUpstreamModel(requestedId) {
     if (!requestedId) return this.models[0]?.upstream_id || 'nemotron-3.5-super-vl-free';
 
-    // 1. If requestedId already ends with -free, return directly
+    // 1. Direct match in cleanToRaw map
+    if (this.cleanedToRaw.has(requestedId)) {
+      return this.cleanedToRaw.get(requestedId);
+    }
+
+    // 2. Direct match in models list
+    const found = this.models.find(m => m.id === requestedId || m.upstream_id === requestedId);
+    if (found) {
+      return found.upstream_id;
+    }
+
+    // 3. Try clean form of requestedId in cleanToRaw
+    const cleaned = cleanModelId(requestedId);
+    if (this.cleanedToRaw.has(cleaned)) {
+      return this.cleanedToRaw.get(cleaned);
+    }
+
+    // 4. If requestedId already ends with -free, return directly
     if (requestedId.endsWith('-free')) {
       return requestedId;
     }
 
-    // 2. Direct match in cleanToRaw map
-    let upstream = this.cleanedToRaw.get(requestedId);
-    if (upstream && (upstream.endsWith('-free') || upstream === 'big-pickle')) {
-      return upstream;
-    }
-
-    // 3. Try clean form of requestedId
-    const cleaned = cleanModelId(requestedId);
-    upstream = this.cleanedToRaw.get(cleaned);
-    if (upstream && (upstream.endsWith('-free') || upstream === 'big-pickle')) {
-      return upstream;
-    }
-
-    // 4. If requestedId is big-pickle, it has no suffix upstream
+    // 5. If requestedId is big-pickle, it has no suffix upstream
     if (requestedId === 'big-pickle' || cleaned === 'big-pickle') {
       return 'big-pickle';
     }
 
-    // 5. Default: Append -free so opencode.ai free-tier gateway accepts it
-    return requestedId + '-free';
+    // 6. If it's a known free model base name, map to -free
+    const FREE_BASE_NAMES = new Set([
+      'beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash',
+      'nemotron-3.5-super-vl', 'space-bunny', 'big-pickle', 'longcat-2.5-preview',
+      'nemotron-3.5-lightning', 'nemotron-3-ultra'
+    ]);
+    if (FREE_BASE_NAMES.has(cleaned)) {
+      return cleaned === 'big-pickle' ? 'big-pickle' : (cleaned + '-free');
+    }
+
+    // 7. For ANY other model (e.g. claude-opus-5-5, gpt-5.3-codex-spark, etc.):
+    // Return EXACT requestedId! NEVER append -free!
+    return requestedId;
+  }
+
+  isModelFree(requestedId) {
+    if (!requestedId) return false;
+    const lower = requestedId.toLowerCase();
+    if (lower.endsWith('-free') || lower === 'big-pickle') return true;
+    const cleaned = cleanModelId(requestedId);
+    const FREE_BASE_NAMES = new Set([
+      'beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash',
+      'nemotron-3.5-super-vl', 'space-bunny', 'big-pickle', 'longcat-2.5-preview',
+      'nemotron-3.5-lightning', 'nemotron-3-ultra'
+    ]);
+    if (FREE_BASE_NAMES.has(cleaned)) return true;
+    const found = this.models.find(m => m.id === requestedId || m.upstream_id === requestedId || m.id === cleaned);
+    return found ? Boolean(found.is_free) : false;
   }
 
   getAllModels() {

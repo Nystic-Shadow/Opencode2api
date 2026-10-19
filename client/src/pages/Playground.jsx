@@ -303,8 +303,8 @@ export default function Playground({ models = [], token }) {
               onChange={setSelectedModel}
               options={models.map(m => ({
                 value: m.id,
-                label: m.id,
-                badge: m.supports_vision ? 'Vision' : undefined,
+                label: m.name || m.id,
+                badge: m.is_free ? (m.supports_vision ? 'Free • Vision' : 'Free') : 'Paid',
                 description: m.description,
                 icon: FiCpu
               }))}
@@ -315,6 +315,13 @@ export default function Playground({ models = [], token }) {
 
           {/* Model Capability Badges */}
           <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            {currentModelMeta?.is_free ? (
+              <span className="badge badge-success">Free Tier</span>
+            ) : (
+              <span className="badge" style={{ backgroundColor: 'rgba(234, 179, 8, 0.15)', color: '#eab308', border: '1px solid rgba(234, 179, 8, 0.3)' }}>
+                Paid / Zen Key
+              </span>
+            )}
             {supportsVision ? (
               <span className="badge badge-success" title="Multimodal vision supported">
                 <FiEye size={12} style={{ marginRight: '4px' }} /> Vision Ready

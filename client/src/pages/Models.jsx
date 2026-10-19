@@ -89,12 +89,26 @@ export default function Models({ models = [], lastSynced, onDiscoverModels, isDi
                 </div>
               </div>
 
-              <span className="badge badge-success">Free Tier</span>
+              {m.is_free ? (
+                <span className="badge badge-success">Free Tier</span>
+              ) : (
+                <span className="badge" style={{ backgroundColor: 'rgba(234, 179, 8, 0.15)', color: '#eab308', border: '1px solid rgba(234, 179, 8, 0.3)' }}>
+                  Paid / Zen Key
+                </span>
+              )}
             </div>
 
             <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', lineHeight: 1.4 }}>
-              {m.description || 'OpenCode Zen high-performance free model.'}
+              {m.description || (m.is_free ? 'OpenCode Zen high-performance free model.' : 'OpenCode Zen Enterprise model (Zen key required).')}
             </div>
+
+            {m.cost && (
+              <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)', display: 'flex', gap: '0.5rem' }}>
+                <span>In: ${m.cost.input}/M</span>
+                <span>•</span>
+                <span>Out: ${m.cost.output}/M</span>
+              </div>
+            )}
 
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: 'auto', paddingTop: '0.5rem', borderTop: '1px solid var(--border)' }}>
               <span className="badge badge-muted" title="Context Length">

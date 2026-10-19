@@ -127,9 +127,15 @@ const FALLBACK_CASCADES = {
 
 /**
  * Determine the next healthy fallback model for resilient failover.
+ * Only genuine free models are eligible to cascade across equivalent free models.
+ * Paid models (Claude Opus, GPT, etc.) must NEVER silently failover to an unrelated model!
  */
 function getNextFallbackModel(currentModel, triedModels = new Set()) {
   if (config.get('smart_fallback') === false) return null;
+
+  // Strict: only free models participate in failover cascades
+  const isFree = discovery.isModelFree(currentModel);
+  if (!isFree) return null;
 
   const norm = normalizeModelId(currentModel);
   const cascade = FALLBACK_CASCADES[norm] || FALLBACK_CASCADES[currentModel] || [];
@@ -139,19 +145,7 @@ function getNextFallbackModel(currentModel, triedModels = new Set()) {
     }
   }
 
-  // Capability-based search if cascade is exhausted
-  const allModels = (discovery.getAllModels ? discovery.getAllModels() : discovery.models) || [];
-  const currentMeta = allModels.find(m => m.id === currentModel || m.id === norm);
-  const wantsVision = currentMeta?.supports_vision;
-
-  for (const m of allModels) {
-    const mNorm = normalizeModelId(m.id);
-    if (!triedModels.has(m.id) && !triedModels.has(mNorm)) {
-      if (wantsVision ? m.supports_vision : true) {
-        return m.id;
-      }
-    }
-  }
+  // Never guess or select a random model from allModels!
   return null;
 }
 
@@ -203,6 +197,36 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       reasoningEffort = 'high';
       thinkingConfig = { type: 'enabled', budget_tokens: 65536 };
     }
+  }
+
+  const isFreeOnly = config.get('free_only') !== false;
+  const isRequestedFree = discovery.isModelFree(requestedModel);
+
+  // If gateway is in free-only mode, reject paid models explicitly
+  if (isFreeOnly && !isRequestedFree) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: {
+        message: `Model "${requestedModel}" is not an OpenCode Free Tier model. The gateway is currently configured to "Enforce 100% Free Models Only". To use paid models, disable this setting in Gateway Settings and provide an Upstream Zen Key.`,
+        type: 'invalid_request_error',
+        code: 'model_not_free'
+      }
+    }));
+    return;
+  }
+
+  // If requesting a paid model, verify an Upstream Zen Key is configured
+  const upstreamKey = config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY;
+  if (!isRequestedFree && !upstreamKey) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: {
+        message: `Model "${requestedModel}" is a paid model that requires an Upstream Zen Key. Please enter your OpenCode Zen Key in Gateway Settings to route to this model.`,
+        type: 'authentication_error',
+        code: 'zen_key_required'
+      }
+    }));
+    return;
   }
 
   const baseSanitized = sanitizeClientPayload(clientPayload);
@@ -486,6 +510,31 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       continue;
     }
 
+    // Strict Model Isolation: Paid models (Claude Opus, GPT, etc.) must NEVER failover to a different model!
+    if (!isRequestedFree) {
+      metrics.recordRequest({
+        model: requestedModel,
+        status: attemptResult.statusCode,
+        tokens: {},
+        latencyMs: Date.now() - startTime,
+        stream: isClientStream,
+        keyId: keyObj.id
+      });
+      res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
+      let errPayload = attemptResult.body;
+      try { JSON.parse(errPayload); } catch (e) {
+        errPayload = JSON.stringify({
+          error: {
+            message: typeof errPayload === 'string' && errPayload ? errPayload : `Upstream error for model "${requestedModel}" (${attemptResult.statusCode})`,
+            type: 'upstream_error',
+            code: attemptResult.statusCode
+          }
+        });
+      }
+      res.end(errPayload);
+      return;
+    }
+
     const isUnavailable = attemptResult.statusCode === 429 ||
                           attemptResult.statusCode === 403 ||
                           attemptResult.statusCode === 401 ||
@@ -647,6 +696,36 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   }
 
   const mergedTools = tools.mergeTools(clientTools);
+
+  const isFreeOnly = config.get('free_only') !== false;
+  const isRequestedFree = discovery.isModelFree(requestedModel);
+
+  // If gateway is in free-only mode, reject paid models explicitly
+  if (isFreeOnly && !isRequestedFree) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        message: `Model "${requestedModel}" is not an OpenCode Free Tier model. The gateway is currently configured to "Enforce 100% Free Models Only". To use paid models, disable this setting in Gateway Settings and provide an Upstream Zen Key.`
+      }
+    }));
+    return;
+  }
+
+  // If requesting a paid model, verify an Upstream Zen Key is configured
+  const upstreamKey = config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY;
+  if (!isRequestedFree && !upstreamKey) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'authentication_error',
+        message: `Model "${requestedModel}" is a paid model that requires an Upstream Zen Key. Please enter your OpenCode Zen Key in Gateway Settings to route to this model.`
+      }
+    }));
+    return;
+  }
 
   let currentModel = requestedModel;
   const triedModels = new Set([currentModel]);
@@ -1062,6 +1141,31 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       attempt--;
       await new Promise(r => setTimeout(r, 300));
       continue;
+    }
+
+    // Strict Model Isolation: Paid models (Claude Opus, GPT, etc.) must NEVER failover to a different model!
+    if (!isRequestedFree) {
+      metrics.recordRequest({
+        model: requestedModel,
+        status: attemptResult.statusCode,
+        tokens: {},
+        latencyMs: Date.now() - startTime,
+        stream: isClientStream,
+        keyId: keyObj.id
+      });
+      res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
+      let errPayload = attemptResult.body;
+      try { JSON.parse(errPayload); } catch (e) {
+        errPayload = JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'api_error',
+            message: typeof errPayload === 'string' && errPayload ? errPayload : `Upstream error for model "${requestedModel}" (${attemptResult.statusCode})`
+          }
+        });
+      }
+      res.end(errPayload);
+      return;
     }
 
     const isUnavailable = attemptResult.statusCode === 429 ||

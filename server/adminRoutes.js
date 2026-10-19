@@ -170,6 +170,9 @@ async function handleAdminRoute(req, res, pathname) {
     }
 
     config.update(updates);
+    if (body.free_only !== undefined) {
+      discovery.sync().catch(e => console.warn('[Discovery] Resync on free_only toggle:', e.message));
+    }
     notifications.add('Settings Updated', 'System gateway settings were saved successfully.', 'info');
     return sendJson(res, 200, { success: true });
   }

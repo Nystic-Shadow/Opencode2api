@@ -168,7 +168,14 @@ function sanitizeClientPayload(payload) {
 async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const startTime = Date.now();
   const isClientStream = clientPayload.stream === true;
-  const requestedModel = clientPayload.model || discovery.getDefaultModelId();
+  const rawRequestedModel = clientPayload.model;
+
+  // On-demand model sync: If model is not in local cache, query upstream Zen models
+  if (rawRequestedModel) {
+    await discovery.ensureModel(rawRequestedModel);
+  }
+
+  const requestedModel = rawRequestedModel || discovery.getDefaultModelId();
 
   // Parse custom thinking levels
   let reasoningEffort = clientPayload.reasoning_effort;
@@ -623,7 +630,14 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const startTime = Date.now();
   const isClientStream = clientPayload.stream === true;
-  const requestedModel = clientPayload.model || discovery.getDefaultModelId();
+  const rawRequestedModel = clientPayload.model;
+
+  // On-demand model sync: If model is not in local cache, query upstream Zen models
+  if (rawRequestedModel) {
+    await discovery.ensureModel(rawRequestedModel);
+  }
+
+  const requestedModel = rawRequestedModel || discovery.getDefaultModelId();
 
   // 1. Translate Anthropic system & messages to OpenAI format
   const openAiMessages = [];

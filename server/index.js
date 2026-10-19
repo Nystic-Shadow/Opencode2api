@@ -122,7 +122,11 @@ const server = http.createServer(async (req, res) => {
   // Model details (/v1/models/:model)
   if (pathname.startsWith('/v1/models/') && req.method === 'GET') {
     const modelId = pathname.replace('/v1/models/', '');
-    const model = discovery.getModel(modelId);
+    let model = discovery.getModel(modelId);
+    if (!model) {
+      await discovery.ensureModel(modelId);
+      model = discovery.getModel(modelId);
+    }
     if (!model) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: { message: `Model '${modelId}' not found.` } }));

@@ -33,9 +33,37 @@ class ModelDiscoveryService {
 
     this.loadCache();
     this.startAutoRefresh();
+    // Immediate background sync on boot to index any newly released Zen models right away
+    this.sync().catch(err => console.warn('[Discovery] Initial startup sync notice:', err.message));
+
     config.onChange(() => {
       this.startAutoRefresh();
     });
+  }
+
+  hasModel(requestedId) {
+    if (!requestedId) return false;
+    const lower = requestedId.toLowerCase();
+    const cleaned = cleanModelId(requestedId).toLowerCase();
+    return this.models.some(m =>
+      m.id.toLowerCase() === lower ||
+      m.upstream_id.toLowerCase() === lower ||
+      m.id.toLowerCase() === cleaned ||
+      m.upstream_id.toLowerCase() === cleaned + '-free'
+    );
+  }
+
+  async ensureModel(requestedId) {
+    if (!requestedId) return;
+    if (this.hasModel(requestedId)) return;
+
+    // Model not found in local cache - query upstream OpenCode Zen immediately
+    console.log(`[Discovery] Model "${requestedId}" not in local catalog, checking upstream OpenCode Zen...`);
+    try {
+      await this.sync();
+    } catch (err) {
+      console.warn(`[Discovery] On-demand sync for "${requestedId}" failed:`, err.message);
+    }
   }
 
   loadCache() {
@@ -131,10 +159,11 @@ class ModelDiscoveryService {
    * Perform discovery from upstream endpoints.
    */
   async sync() {
-    if (this.isSyncing) return this.models;
-    this.isSyncing = true;
+    if (this.syncPromise) return this.syncPromise;
 
-    try {
+    this.syncPromise = (async () => {
+      this.isSyncing = true;
+      try {
       console.log('[Discovery] Discovering models from OpenCode Zen...');
       const zenModelsUrl = config.get('upstream_models_url') || 'https://opencode.ai/zen/v1/models';
       const metadataUrl = config.get('upstream_metadata_url') || 'https://models.opencode.ai/api.json';
@@ -250,8 +279,12 @@ class ModelDiscoveryService {
       }
       throw err;
     } finally {
-      this.isSyncing = false;
-    }
+        this.isSyncing = false;
+        this.syncPromise = null;
+      }
+    })();
+
+    return this.syncPromise;
   }
 
   fallbackBootstrap() {
@@ -277,7 +310,10 @@ class ModelDiscoveryService {
    * Resolves requested model ID (clean ID or raw ID or alias) to upstream ID.
    */
   resolveUpstreamModel(requestedId) {
-    if (!requestedId) return this.models[0]?.upstream_id || 'nemotron-3.5-super-vl-free';
+    if (!requestedId) {
+      const def = this.models.find(m => m.is_free) || this.models[0];
+      return def?.upstream_id || 'big-pickle';
+    }
 
     // 1. Direct match in cleanToRaw map
     if (this.cleanedToRaw.has(requestedId)) {
@@ -308,12 +344,22 @@ class ModelDiscoveryService {
 
     // 6. Check if appending '-free' matches any currently discovered upstream model
     const freeCandidate = cleaned + '-free';
-    const freeModelMatch = this.models.find(m => m.upstream_id === freeCandidate);
+    const freeModelMatch = this.models.find(m => m.upstream_id.toLowerCase() === freeCandidate.toLowerCase());
     if (freeModelMatch) {
       return freeModelMatch.upstream_id;
     }
 
-    // 7. For ANY other model (e.g. claude-opus-5-5, gpt-5.3-codex-spark, etc.):
+    // 7. Case-insensitive matching in models list
+    const lowerClean = cleaned.toLowerCase();
+    const caseMatch = this.models.find(m => 
+      m.id.toLowerCase() === lowerClean || 
+      m.upstream_id.toLowerCase() === requestedId.toLowerCase()
+    );
+    if (caseMatch) {
+      return caseMatch.upstream_id;
+    }
+
+    // 8. For ANY other model (e.g. claude-opus-5-5, gpt-5.3-codex-spark, etc.):
     // Return EXACT requestedId! NEVER append -free!
     return requestedId;
   }
@@ -323,10 +369,19 @@ class ModelDiscoveryService {
     const lower = requestedId.toLowerCase();
     if (lower.endsWith('-free') || lower === 'big-pickle') return true;
     const cleaned = cleanModelId(requestedId);
-    if (this.models.some(m => m.upstream_id === cleaned + '-free' && m.is_free)) {
+    const lowerClean = cleaned.toLowerCase();
+
+    // Check upstream_id candidate
+    if (this.models.some(m => m.upstream_id.toLowerCase() === lowerClean + '-free' && m.is_free)) {
       return true;
     }
-    const found = this.models.find(m => m.id === requestedId || m.upstream_id === requestedId || m.id === cleaned);
+    // Check direct / case-insensitive match
+    const found = this.models.find(m => 
+      m.id.toLowerCase() === lowerClean || 
+      m.upstream_id.toLowerCase() === lower || 
+      m.id === requestedId || 
+      m.upstream_id === requestedId
+    );
     return found ? Boolean(found.is_free) : false;
   }
 

@@ -99,6 +99,13 @@ export default function Playground({ models = [], token }) {
     setAttachedImage(null);
   };
 
+  const handleModelChange = (newModelId) => {
+    setSelectedModel(newModelId);
+    if (messages.length > 0) {
+      handleClear();
+    }
+  };
+
   const handleSend = async (overridePrompt = null) => {
     const textToSend = overridePrompt || input.trim();
     if (!textToSend && !attachedImage) return;
@@ -303,7 +310,7 @@ export default function Playground({ models = [], token }) {
             <span style={{ fontSize: '0.8rem', fontWeight: '600', color: 'var(--muted-foreground)' }}>Model:</span>
             <CustomSelect
               value={selectedModel}
-              onChange={setSelectedModel}
+              onChange={handleModelChange}
               options={models.map(m => ({
                 value: m.id,
                 label: m.name || m.id,

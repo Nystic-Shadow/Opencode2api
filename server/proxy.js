@@ -30,8 +30,8 @@ const routeHealth = {
   directLastReason: '',
 
   markDirectDegraded(reason = 'upstream error') {
-    // Keep degraded for 3 minutes so subsequent requests immediately route through WARP without delay
-    this.directDegradedUntil = Date.now() + (3 * 60 * 1000);
+    // Keep degraded for 1 hour so subsequent requests immediately route through WARP without delay
+    this.directDegradedUntil = Date.now() + (60 * 60 * 1000);
     this.directConsecutiveFailures++;
     this.directLastReason = String(reason);
     console.warn(`[RouteManager] Direct route degraded (${reason}). Auto-promoting Cloudflare WARP as primary egress...`);
@@ -301,6 +301,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           let errBody = '';
           upstreamRes.on('data', chunk => errBody += chunk.toString());
           upstreamRes.on('end', () => {
+            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${useWarp ? 'WARP' : 'Direct'}): ${errBody}`);
             resolve({
               success: false,
               statusCode: upstreamRes.statusCode,
@@ -787,6 +788,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           let errBody = '';
           upstreamRes.on('data', chunk => errBody += chunk.toString());
           upstreamRes.on('end', () => {
+            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${useWarp ? 'WARP' : 'Direct'}): ${errBody}`);
             resolve({
               success: false,
               statusCode: upstreamRes.statusCode,

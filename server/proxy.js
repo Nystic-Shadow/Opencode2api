@@ -359,6 +359,10 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         res.setHeader('x-opencode2api-fallback', `${requestedModel} -> ${resolvedModel}`);
       }
       res.setHeader('x-opencode2api-resolved-model', resolvedModel);
+      res.setHeader('x-opencode2api-upstream-model', upstreamModel);
+      if (upstreamRes.headers['x-zen-model']) {
+        res.setHeader('x-zen-model', upstreamRes.headers['x-zen-model']);
+      }
 
       if (isClientStream) {
         // 1. Streaming response mode (Real-time zero latency)
@@ -844,6 +848,10 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         res.setHeader('x-opencode2api-fallback', `${requestedModel} -> ${resolvedModel}`);
       }
       res.setHeader('x-opencode2api-resolved-model', resolvedModel);
+      res.setHeader('x-opencode2api-upstream-model', upstreamModel);
+      if (upstreamRes.headers['x-zen-model']) {
+        res.setHeader('x-zen-model', upstreamRes.headers['x-zen-model']);
+      }
 
       if (isClientStream) {
         // Stream Anthropic SSE with zero buffering & extended thinking / tool call support

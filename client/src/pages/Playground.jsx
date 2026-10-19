@@ -26,7 +26,7 @@ export default function Playground({ models = [], token }) {
   const [input, setInput] = useState('');
   const [attachedImage, setAttachedImage] = useState(null); // { base64, mimeType, name }
   const [isStreaming, setIsStreaming] = useState(false);
-  const [systemPrompt, setSystemPrompt] = useState('You are an expert, direct AI assistant.');
+  const [systemPrompt, setSystemPrompt] = useState('');
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
   const [thinkingLevel, setThinkingLevel] = useState('auto'); // auto, off, low, medium, high, max
   const [temperature, setTemperature] = useState(0.6);
@@ -239,12 +239,15 @@ export default function Playground({ models = [], token }) {
       }
 
       const totalLatency = Date.now() - startTime;
+      if (accumulatedReasoning && !accumulatedContent) {
+        setOpenThoughts(prev => ({ ...prev, [assistantIndex]: true }));
+      }
       setMessages(prev => {
         const copy = [...prev];
         if (copy[assistantIndex]) {
           copy[assistantIndex] = {
             ...copy[assistantIndex],
-            content: accumulatedContent || '(No content generated)',
+            content: accumulatedContent || (accumulatedReasoning ? '' : '(No content generated)'),
             reasoning: accumulatedReasoning,
             isGenerating: false,
             latencyMs: totalLatency

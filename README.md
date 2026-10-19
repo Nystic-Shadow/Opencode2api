@@ -8,6 +8,7 @@
 
 > **Turn Free OpenCode Zen Models into 100% Zero-Drop, Ultra-Low-Latency OpenAI & Anthropic Endpoints.**
 
+[![Release Version](https://img.shields.io/badge/Release-v1.5.0-blue.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Nystic-Shadow/Opencode2api/releases/tag/v1.5)
 [![Gateway Status](https://img.shields.io/badge/Gateway_Status-🟢_LIVE-2fbc5b.svg?style=for-the-badge&logo=statuspage&logoColor=white)]()
 [![Gateway Pass Rate](https://img.shields.io/badge/Pass_Rate-100%25_Zero--Drop-2fbc5b.svg?style=for-the-badge&logo=checkmarx&logoColor=white)]()
 [![Zero External Dependencies](https://img.shields.io/badge/Core_Deps-0_External-007acc.svg?style=for-the-badge&logo=node.js&logoColor=white)](server/)

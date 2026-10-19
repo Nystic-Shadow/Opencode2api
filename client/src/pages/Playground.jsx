@@ -21,7 +21,7 @@ import MarkdownRenderer from '../components/MarkdownRenderer';
 import CustomSelect from '../components/CustomSelect';
 
 export default function Playground({ models = [], token }) {
-  const [selectedModel, setSelectedModel] = useState(models[0]?.id || 'nemotron-3.5-super-vl');
+  const [selectedModel, setSelectedModel] = useState(models[0]?.id || '');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [attachedImage, setAttachedImage] = useState(null); // { base64, mimeType, name }

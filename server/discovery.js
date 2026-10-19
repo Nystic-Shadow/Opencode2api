@@ -306,14 +306,11 @@ class ModelDiscoveryService {
       return 'big-pickle';
     }
 
-    // 6. If it's a known free model base name, map to -free
-    const FREE_BASE_NAMES = new Set([
-      'beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash',
-      'nemotron-3.5-super-vl', 'space-bunny', 'big-pickle', 'longcat-2.5-preview',
-      'nemotron-3.5-lightning', 'nemotron-3-ultra'
-    ]);
-    if (FREE_BASE_NAMES.has(cleaned)) {
-      return cleaned === 'big-pickle' ? 'big-pickle' : (cleaned + '-free');
+    // 6. Check if appending '-free' matches any currently discovered upstream model
+    const freeCandidate = cleaned + '-free';
+    const freeModelMatch = this.models.find(m => m.upstream_id === freeCandidate);
+    if (freeModelMatch) {
+      return freeModelMatch.upstream_id;
     }
 
     // 7. For ANY other model (e.g. claude-opus-5-5, gpt-5.3-codex-spark, etc.):
@@ -326,12 +323,9 @@ class ModelDiscoveryService {
     const lower = requestedId.toLowerCase();
     if (lower.endsWith('-free') || lower === 'big-pickle') return true;
     const cleaned = cleanModelId(requestedId);
-    const FREE_BASE_NAMES = new Set([
-      'beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash',
-      'nemotron-3.5-super-vl', 'space-bunny', 'big-pickle', 'longcat-2.5-preview',
-      'nemotron-3.5-lightning', 'nemotron-3-ultra'
-    ]);
-    if (FREE_BASE_NAMES.has(cleaned)) return true;
+    if (this.models.some(m => m.upstream_id === cleaned + '-free' && m.is_free)) {
+      return true;
+    }
     const found = this.models.find(m => m.id === requestedId || m.upstream_id === requestedId || m.id === cleaned);
     return found ? Boolean(found.is_free) : false;
   }
@@ -347,6 +341,11 @@ class ModelDiscoveryService {
   getModel(id) {
     const cleaned = cleanModelId(id);
     return this.models.find(m => m.id === cleaned || m.upstream_id === id);
+  }
+
+  getDefaultModelId() {
+    const free = this.models.find(m => m.is_free);
+    return free ? free.id : (this.models[0]?.id || 'big-pickle');
   }
 }
 

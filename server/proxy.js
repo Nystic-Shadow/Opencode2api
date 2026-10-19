@@ -108,23 +108,6 @@ function normalizeModelId(id) {
   return id.replace(/[-_]?free$/i, '');
 }
 
-// Resilient fallback cascades by model family & capability
-const FALLBACK_CASCADES = {
-  // Multimodal Vision models
-  'mimo-v2.6-flash': ['nemotron-3.5-super-vl', 'longcat-2.5-preview', 'beam', 'deepseek-v4.1-flash'],
-  'nemotron-3.5-super-vl': ['mimo-v2.6-flash', 'longcat-2.5-preview', 'beam', 'deepseek-v4.1-flash'],
-  'longcat-2.5-preview': ['nemotron-3.5-super-vl', 'mimo-v2.6-flash', 'beam', 'deepseek-v4.1-flash'],
-
-  // High performance text / reasoning models
-  'glm-5.3-flash': ['beam', 'deepseek-v4.1-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle', 'nemotron-3-ultra'],
-  'deepseek-v4.1-flash': ['beam', 'glm-5.3-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle', 'nemotron-3-ultra'],
-  'beam': ['deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash', 'space-bunny', 'big-pickle', 'nemotron-3-ultra'],
-  'nemotron-3.5-lightning': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'space-bunny', 'nemotron-3-ultra'],
-  'nemotron-3-ultra': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'space-bunny', 'nemotron-3.5-lightning'],
-  'big-pickle': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'space-bunny'],
-  'space-bunny': ['beam', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'mimo-v2.6-flash']
-};
-
 /**
  * Determine the next healthy fallback model for resilient failover.
  * Only genuine free models are eligible to cascade across equivalent free models.
@@ -137,15 +120,27 @@ function getNextFallbackModel(currentModel, triedModels = new Set()) {
   const isFree = discovery.isModelFree(currentModel);
   if (!isFree) return null;
 
-  const norm = normalizeModelId(currentModel);
-  const cascade = FALLBACK_CASCADES[norm] || FALLBACK_CASCADES[currentModel] || [];
-  for (const candidate of cascade) {
-    if (!triedModels.has(candidate) && !triedModels.has(candidate + '-free')) {
-      return candidate;
+  const currentObj = discovery.getModel(currentModel);
+  const isVision = currentObj?.supports_vision;
+
+  const allFree = discovery.getAllModels().filter(m => m.is_free);
+
+  // 1. Try other discovered free models with matching vision capability first
+  if (isVision) {
+    for (const m of allFree) {
+      if (m.id === currentModel || m.upstream_id === currentModel) continue;
+      if (triedModels.has(m.id) || triedModels.has(m.upstream_id)) continue;
+      if (m.supports_vision) return m.id;
     }
   }
 
-  // Never guess or select a random model from allModels!
+  // 2. Try any other untried discovered free model
+  for (const m of allFree) {
+    if (m.id === currentModel || m.upstream_id === currentModel) continue;
+    if (triedModels.has(m.id) || triedModels.has(m.upstream_id)) continue;
+    return m.id;
+  }
+
   return null;
 }
 
@@ -173,7 +168,7 @@ function sanitizeClientPayload(payload) {
 async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const startTime = Date.now();
   const isClientStream = clientPayload.stream === true;
-  const requestedModel = clientPayload.model || 'nemotron-3.5-super-vl';
+  const requestedModel = clientPayload.model || discovery.getDefaultModelId();
 
   // Parse custom thinking levels
   let reasoningEffort = clientPayload.reasoning_effort;
@@ -628,7 +623,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const startTime = Date.now();
   const isClientStream = clientPayload.stream === true;
-  const requestedModel = clientPayload.model || 'nemotron-3.5-super-vl';
+  const requestedModel = clientPayload.model || discovery.getDefaultModelId();
 
   // 1. Translate Anthropic system & messages to OpenAI format
   const openAiMessages = [];

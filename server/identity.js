@@ -52,8 +52,9 @@ function generateCanonicalSessionId(seed = null) {
 /**
  * Generate 40-character hex project ID.
  */
-function generateProjectId(project = 'default-project') {
-  return crypto.createHash('sha256').update('opencode-project\x00' + project).digest().subarray(0, 20).toString('hex');
+function generateProjectId(project = null) {
+  const name = project || ('proj_' + crypto.randomBytes(8).toString('hex'));
+  return crypto.createHash('sha256').update('opencode-project\x00' + name).digest().subarray(0, 20).toString('hex');
 }
 
 /**
@@ -64,7 +65,7 @@ function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
   const upstreamKey = config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY;
   const authHeader = upstreamKey ? `Bearer ${upstreamKey}` : 'Bearer public';
   const reqId = 'msg_' + Date.now().toString(36) + crypto.randomBytes(6).toString('hex');
-  const projectDir = encodeURIComponent(process.cwd());
+  const projectDir = encodeURIComponent('/workspace/' + (projectId ? projectId.slice(0, 8) : 'main'));
 
   return {
     'Content-Type': 'application/json',

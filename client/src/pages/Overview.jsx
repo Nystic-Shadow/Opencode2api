@@ -12,6 +12,7 @@ import {
   FiTrendingUp
 } from '../components/Icons';
 import Chart from '../components/Chart';
+import { formatLatencySec, getLatencyTheme } from '../utils';
 
 function formatUptime(seconds = 0) {
   const d = Math.floor(seconds / (3600 * 24));
@@ -93,10 +94,10 @@ export default function Overview({ stats, onRefresh }) {
     },
     {
       title: 'Average Latency',
-      value: `${s.averageLatency || 0}ms`,
-      unit: 'response time',
+      value: formatLatencySec(s.averageLatency || 0),
+      unit: getLatencyTheme(s.averageLatency || 0).label,
       icon: FiClock,
-      color: 'var(--chart-2)',
+      color: getLatencyTheme(s.averageLatency || 0).color,
       desc: 'Mean execution time per inference'
     },
     {
@@ -319,7 +320,7 @@ export default function Overview({ stats, onRefresh }) {
                 color: activeChartMetric === 'latency' ? 'var(--card-foreground)' : 'var(--muted-foreground)'
               }}
             >
-              Latency (ms)
+              Latency (s)
             </button>
             <button
               onClick={() => setActiveChartMetric('successRate')}
@@ -342,7 +343,7 @@ export default function Overview({ stats, onRefresh }) {
         <Chart
           data={s.history}
           metric={activeChartMetric}
-          label={activeChartMetric === 'rpm' ? 'RPM' : activeChartMetric === 'tpm' ? 'TPM' : activeChartMetric === 'latency' ? 'ms' : '%'}
+          label={activeChartMetric === 'rpm' ? 'RPM' : activeChartMetric === 'tpm' ? 'TPM' : activeChartMetric === 'latency' ? 's' : '%'}
         />
       </div>
 
@@ -384,7 +385,34 @@ export default function Overview({ stats, onRefresh }) {
                         {req.status}
                       </span>
                     </td>
-                    <td style={{ padding: '0.6rem 0.75rem' }}>{req.latency}ms</td>
+                    <td style={{ padding: '0.6rem 0.75rem' }}>
+                      {(() => {
+                        const theme = getLatencyTheme(req.latency);
+                        return (
+                          <span style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.35rem',
+                            padding: '0.2rem 0.55rem',
+                            borderRadius: 'calc(var(--radius) - 2px)',
+                            fontSize: '0.75rem',
+                            fontWeight: '700',
+                            fontFamily: 'var(--font-mono)',
+                            backgroundColor: theme.bg,
+                            color: theme.color,
+                            border: `1px solid ${theme.border}`
+                          }}>
+                            <span style={{
+                              width: '6px',
+                              height: '6px',
+                              borderRadius: '50%',
+                              backgroundColor: theme.color
+                            }} />
+                            {formatLatencySec(req.latency)}
+                          </span>
+                        );
+                      })()}
+                    </td>
                     <td style={{ padding: '0.6rem 0.75rem', fontFamily: 'var(--font-mono)' }}>
                       {req.tokens} ({req.prompt_tokens || 0}+{req.completion_tokens || 0}+{req.reasoning_tokens || 0})
                     </td>

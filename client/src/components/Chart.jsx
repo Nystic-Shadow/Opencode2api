@@ -11,7 +11,10 @@ export default function Chart({ data = [], metric = 'rpm', label = 'Requests Per
     );
   }
 
-  const values = data.map(d => (d[metric] !== undefined ? d[metric] : 0));
+  const values = data.map(d => {
+    const raw = d[metric] !== undefined ? d[metric] : 0;
+    return metric === 'latency' ? Number((raw / 1000).toFixed(1)) : raw;
+  });
   const maxVal = Math.max(...values, 5);
   const minVal = 0;
 
@@ -112,7 +115,7 @@ export default function Chart({ data = [], metric = 'rpm', label = 'Requests Per
         }}>
           <div style={{ color: 'var(--muted-foreground)' }}>{points[hoverIndex].timestamp}</div>
           <div style={{ fontWeight: '700', color: 'var(--primary)' }}>
-            {points[hoverIndex].val} {label}
+            {metric === 'latency' ? `${points[hoverIndex].val}s` : `${points[hoverIndex].val} ${label}`}
           </div>
         </div>
       )}

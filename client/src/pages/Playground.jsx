@@ -19,6 +19,7 @@ import {
 
 import MarkdownRenderer from '../components/MarkdownRenderer';
 import CustomSelect from '../components/CustomSelect';
+import { formatLatencySec, getLatencyTheme } from '../utils';
 
 export default function Playground({ models = [], token }) {
   const [selectedModel, setSelectedModel] = useState(models[0]?.id || '');
@@ -539,7 +540,21 @@ export default function Playground({ models = [], token }) {
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border)', fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                     <span className="font-mono">{msg.model || selectedModel}</span>
-                    {msg.latencyMs && <span>{msg.latencyMs}ms</span>}
+                    {msg.latencyMs && (() => {
+                      const theme = getLatencyTheme(msg.latencyMs);
+                      return (
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.25rem',
+                          color: theme.color,
+                          fontWeight: '600'
+                        }}>
+                          <span style={{ width: '5px', height: '5px', borderRadius: '50%', backgroundColor: theme.color }} />
+                          {formatLatencySec(msg.latencyMs)}
+                        </span>
+                      );
+                    })()}
                     {msg.content && <span>~{Math.ceil(msg.content.length / 4)} tokens</span>}
                   </div>
                   <button

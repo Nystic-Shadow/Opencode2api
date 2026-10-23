@@ -61,7 +61,7 @@ function generateProjectId(project = null) {
  * Build authentic upstream request headers.
  */
 function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
-  const clientVersion = config.get('client_version') || '2.0.32';
+  const clientVersion = config.get('client_version') || '1.19.4';
   const upstreamKey = config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY;
   const authHeader = upstreamKey ? `Bearer ${upstreamKey}` : 'Bearer public';
   const reqId = 'msg_' + Date.now().toString(36) + crypto.randomBytes(6).toString('hex');
@@ -71,7 +71,7 @@ function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/event-stream',
     'Authorization': authHeader,
-    'User-Agent': `opencode/latest/${clientVersion}/cli`,
+    'User-Agent': `opencode/${clientVersion}`,
     'x-opencode-client': 'cli',
     'x-opencode-session': sessionId,
     'x-opencode-session-id': sessionId,

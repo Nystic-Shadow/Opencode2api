@@ -43,7 +43,7 @@ const DEFAULT_CONFIG = {
   port: parseInt(process.env.PORT, 10) || 8080,
   admin_username: process.env.DASHBOARD_USER || 'admin',
   admin_password: process.env.DASHBOARD_PASS || 'admin123',
-  client_version: '2.0.32',
+  client_version: '1.19.4',
   discovery_interval_seconds: 600,
   auto_update_cli: true,
   free_only: true,

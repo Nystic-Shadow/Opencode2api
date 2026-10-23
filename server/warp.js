@@ -288,6 +288,25 @@ class CloudflareWarpManager {
     return ep;
   }
 
+  async replaceBadAccount(idx) {
+    console.warn(`[WARP Pool] Account ${idx + 1} failed edge connectivity. Purging and registering a fresh account...`);
+    try {
+      const freshAcc = await this.registerCloudflareAccount();
+      freshAcc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
+      if (this.accountPool && this.accountPool.length > idx) {
+        this.accountPool[idx] = freshAcc;
+      } else {
+        this.accountPool.push(freshAcc);
+      }
+      this.saveAccountPool();
+      console.log(`[WARP Pool] Fresh replacement account ${idx + 1} ready on ${freshAcc.endpoint}`);
+      return freshAcc;
+    } catch (err) {
+      console.warn(`[WARP Pool] Could not register replacement account ${idx + 1}:`, err.message);
+      return null;
+    }
+  }
+
   loadCachedAccount() {
     try {
       if (fs.existsSync(ACCOUNT_FILE)) {
@@ -496,11 +515,11 @@ BindAddress = ${host}:${port}
     // 2. Poll for genuine Cloudflare Edge egress verification (trace)
     this.setProgress(90, 'verifying_tunnel', `Verifying edge egress connectivity on ${host}:${port} (${endpointHost})...`);
     let trace = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       if (procExited) break;
-      trace = await this.probeEgressTrace(port);
+      trace = await this.probeEgressTrace(port, 2500);
       if (trace && trace.ip) break;
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 400));
     }
 
     if (trace && trace.ip) {
@@ -684,38 +703,47 @@ BindAddress = ${host}:${port}
     }
   }
 
-  async probeEgressTrace(port) {
+  async probeEgressTrace(port, timeoutMs = 2500) {
     const targetHost = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const targetPort = port || this.getActivePort();
 
     return new Promise((resolve) => {
       let resolved = false;
-      const agent = this.getWarpAgent(targetPort, targetHost);
-      const req = https.request({
-        hostname: 'cloudflare.com',
-        path: '/cdn-cgi/trace',
-        method: 'GET',
-        agent,
-        timeout: 3000
-      }, res => {
-        let body = '';
-        res.on('data', chunk => body += chunk);
-        res.on('end', () => {
-          if (resolved) return;
-          resolved = true;
-          const matchIp = body.match(/ip=([^\r\n]+)/);
-          const matchColo = body.match(/colo=([^\r\n]+)/);
-          const matchWarp = body.match(/warp=([^\r\n]+)/);
-          resolve({
-            ip: matchIp ? matchIp[1] : null,
-            colo: matchColo ? matchColo[1] : null,
-            warp: matchWarp ? matchWarp[1] : null
+      const done = (val) => {
+        if (resolved) return;
+        resolved = true;
+        resolve(val);
+      };
+
+      this.createSocks5Connection('cloudflare.com', 443, targetHost, targetPort, timeoutMs)
+        .then((rawSocket) => {
+          const tlsSocket = tls.connect({
+            socket: rawSocket,
+            servername: 'cloudflare.com'
+          }, () => {
+            const reqStr = 'GET /cdn-cgi/trace HTTP/1.1\r\nHost: cloudflare.com\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n';
+            tlsSocket.write(reqStr);
           });
-        });
-      });
-      req.on('error', () => { if (!resolved) { resolved = true; resolve(null); } });
-      req.on('timeout', () => { req.destroy(); if (!resolved) { resolved = true; resolve(null); } });
-      req.end();
+
+          let body = '';
+          tlsSocket.on('data', chunk => body += chunk.toString());
+          tlsSocket.on('end', () => {
+            const matchIp = body.match(/ip=([^\r\n]+)/);
+            const matchColo = body.match(/colo=([^\r\n]+)/);
+            const matchWarp = body.match(/warp=([^\r\n]+)/);
+            done({
+              ip: matchIp ? matchIp[1] : null,
+              colo: matchColo ? matchColo[1] : null,
+              warp: matchWarp ? matchWarp[1] : null
+            });
+          });
+          tlsSocket.on('error', () => done(null));
+          tlsSocket.setTimeout(timeoutMs, () => {
+            tlsSocket.destroy();
+            done(null);
+          });
+        })
+        .catch(() => done(null));
     });
   }
 
@@ -856,6 +884,19 @@ BindAddress = ${host}:${port}
           }
 
           if (!started) {
+            console.warn(`[WARP] All candidate endpoints failed for account offset ${portOffset}. Purging bad account and refreshing...`);
+            const replacement = await this.replaceBadAccount(portOffset);
+            if (replacement) {
+              try {
+                await this.startWireproxy(replacement, nextPort);
+                started = true;
+              } catch (reErr) {
+                lastErr = reErr;
+              }
+            }
+          }
+
+          if (!started) {
             throw lastErr || new Error(`Failed to establish working WireProxy tunnel on port ${nextPort}`);
           }
 
@@ -937,7 +978,7 @@ BindAddress = ${host}:${port}
    * Pure native SOCKS5 socket creator (RFC 1928, Zero dependencies).
    * Robust handshake with strict timeout cleanup to prevent socket destruction during inference.
    */
-  createSocks5Connection(targetHost, targetPort, proxyHost, proxyPort) {
+  createSocks5Connection(targetHost, targetPort, proxyHost, proxyPort, timeoutMs = 12000) {
     const self = this;
     const pHost = proxyHost || config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const pPort = proxyPort || this.getActivePort();
@@ -1000,17 +1041,22 @@ BindAddress = ${host}:${port}
       socket.on('error', (err) => {
         if (!resolved) {
           cleanupHandshake();
+          socket.destroy();
           resolved = true;
           reject(err);
         }
       });
 
-      socket.setTimeout(12000, () => {
+      socket.setTimeout(timeoutMs, () => {
         if (!resolved) {
           cleanupHandshake();
           socket.destroy();
           resolved = true;
-          reject(new Error('SOCKS5 connection to Cloudflare WARP timed out during handshake'));
+          if (pPort === self.getActivePort()) {
+            self.socketAlive = false;
+            self.statusCache = null;
+          }
+          reject(new Error(`SOCKS5 connection to Cloudflare WARP timed out during handshake (${timeoutMs}ms)`));
         }
       });
     });

@@ -14,13 +14,11 @@ const WIREPROXY_CONF = path.join(DATA_DIR, 'wireproxy.conf');
 
 const WARP_ENDPOINTS = [
   'engage.cloudflareclient.com:2408',
-  '162.159.193.1:2408',
-  '162.159.195.1:500',
   '162.159.192.1:4500',
+  '162.159.195.1:500',
+  '162.159.192.1:2408',
   'engage.cloudflareclient.com:500',
-  '162.159.193.1:500',
-  '162.159.195.1:2408',
-  '162.159.192.1:2408'
+  '162.159.195.1:2408'
 ];
 
 class CloudflareWarpManager {

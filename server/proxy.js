@@ -50,10 +50,12 @@ const routeHealth = {
   markWarpDegraded(reason = 'warp error') {
     this.warpConsecutiveFailures++;
     this.warpLastReason = String(reason);
-    // If 2 or more consecutive WARP failures, temporarily degrade WARP for 45 seconds to let direct route serve traffic
-    if (this.warpConsecutiveFailures >= 2) {
-      this.warpDegradedUntil = Date.now() + 45000;
-      console.warn(`[RouteManager] Cloudflare WARP route degraded (${reason}). Auto-failing over to direct route for 45s...`);
+    const warpMode = config.get('warp_mode') || 'auto';
+    if (warpMode === 'always') return;
+    // Only failover to direct route if direct route is NOT currently degraded and we have 3+ failures
+    if (!this.isDirectDegraded() && this.warpConsecutiveFailures >= 3) {
+      this.warpDegradedUntil = Date.now() + 15000;
+      console.warn(`[RouteManager] Cloudflare WARP route degraded (${reason}). Auto-failing over to direct route for 15s...`);
     }
   },
 
@@ -63,17 +65,17 @@ const routeHealth = {
   },
 
   isWarpDegraded() {
+    const warpMode = config.get('warp_mode') || 'auto';
+    if (warpMode === 'always') return false;
     return Date.now() < this.warpDegradedUntil;
   },
 
   shouldUseWarp(attempt = 1) {
     const warpMode = config.get('warp_mode') || 'auto';
     if (warpMode === 'disabled' || warpMode === 'never') return false;
+    if (warpMode === 'always') return warp.isReady();
     if (this.isWarpDegraded()) return false;
     if (!warp.isReady()) return false;
-    if (warpMode === 'always') return true;
-
-    // In 'auto' mode: prefer WARP when healthy & ready
     return true;
   }
 };
@@ -318,6 +320,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const requestTimeout = config.get('request_timeout_ms') || 60000;
   let requestWarpFailed = false;
   let useWarp = routeHealth.shouldUseWarp(1);
+  let consecutiveRateLimits = 0;
+  let warpRotatedInThisRequest = false;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
@@ -607,25 +611,35 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     if (isWarpFailure) {
       console.warn(`[Proxy] WARP connection notice (${attemptResult.body}), rotating to clean tunnel slot...`);
       routeHealth.markWarpDegraded(attemptResult.body);
-      const rotated = await warp.rotateKeys('connection_failure');
-      if (rotated) {
-        useWarp = true;
-        requestWarpFailed = false;
-      } else {
-        useWarp = false;
-        requestWarpFailed = true;
+      if (!warpRotatedInThisRequest) {
+        const rotated = await warp.rotateKeys('connection_failure');
+        warpRotatedInThisRequest = true;
+        if (rotated) {
+          useWarp = true;
+          requestWarpFailed = false;
+        } else {
+          useWarp = false;
+          requestWarpFailed = true;
+        }
       }
     } else if (isRateLimited || isForbidden) {
-      if (useWarp) {
-        // WARP egress IP hit free-tier rate limit or was blocked by OpenCode!
-        // Auto-rotate WARP keys using zero-downtime hot-swap to get a fresh Cloudflare egress IP!
-        console.warn(`[WARP] Upstream ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}) on model "${currentModel}" via WARP. Auto-rotating tunnel session keys to fresh egress IP...`);
+      consecutiveRateLimits++;
+      // Only rotate WARP tunnel if 2 consecutive models fail with 429 on this tunnel (or smart fallback disabled)
+      // AND we haven't already rotated in this request
+      const shouldRotateWarp = useWarp && (consecutiveRateLimits >= 2 || config.get('smart_fallback') === false) && !warpRotatedInThisRequest;
+
+      if (shouldRotateWarp) {
+        console.warn(`[WARP] Consecutive rate limits detected (${consecutiveRateLimits}) on port ${warp.getActivePort()}. Auto-rotating tunnel session keys to fresh egress IP...`);
         const rotated = await warp.rotateKeys('auto_rate_limit');
+        warpRotatedInThisRequest = true;
+        consecutiveRateLimits = 0;
         if (rotated) {
           console.log(`[WARP] Fresh Cloudflare egress IP active on port ${warp.getActivePort()}. Retrying request seamlessly...`);
           useWarp = true;
           requestWarpFailed = false;
         }
+      } else if (useWarp) {
+        console.log(`[Proxy] Model "${currentModel}" returned ${statusCode}. Preserving tunnel, attempting fallback on current slot...`);
       } else {
         // Direct route hit 429 or 403!
         console.warn(`[Proxy] Direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Auto-promoting Cloudflare WARP as primary egress...`);
@@ -859,6 +873,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const requestTimeout = config.get('request_timeout_ms') || 60000;
   let requestWarpFailed = false;
   let useWarp = routeHealth.shouldUseWarp(1);
+  let consecutiveRateLimits = 0;
+  let warpRotatedInThisRequest = false;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
@@ -1286,25 +1302,35 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     if (isWarpFailure) {
       console.warn(`[Proxy] Anthropic WARP connection notice (${attemptResult.body}), rotating to clean tunnel slot...`);
       routeHealth.markWarpDegraded(attemptResult.body);
-      const rotated = await warp.rotateKeys('connection_failure');
-      if (rotated) {
-        useWarp = true;
-        requestWarpFailed = false;
-      } else {
-        useWarp = false;
-        requestWarpFailed = true;
+      if (!warpRotatedInThisRequest) {
+        const rotated = await warp.rotateKeys('connection_failure');
+        warpRotatedInThisRequest = true;
+        if (rotated) {
+          useWarp = true;
+          requestWarpFailed = false;
+        } else {
+          useWarp = false;
+          requestWarpFailed = true;
+        }
       }
     } else if (isRateLimited || isForbidden) {
-      if (useWarp) {
-        // WARP egress IP hit free-tier rate limit or was blocked by OpenCode!
-        // Auto-rotate WARP keys using zero-downtime hot-swap to get a fresh Cloudflare egress IP!
-        console.warn(`[WARP] Anthropic Upstream ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}) on model "${currentModel}" via WARP. Auto-rotating tunnel session keys to fresh egress IP...`);
+      consecutiveRateLimits++;
+      // Only rotate WARP tunnel if 2 consecutive models fail with 429 on this tunnel (or smart fallback disabled)
+      // AND we haven't already rotated in this request
+      const shouldRotateWarp = useWarp && (consecutiveRateLimits >= 2 || config.get('smart_fallback') === false) && !warpRotatedInThisRequest;
+
+      if (shouldRotateWarp) {
+        console.warn(`[WARP] Anthropic Consecutive rate limits detected (${consecutiveRateLimits}) on port ${warp.getActivePort()}. Auto-rotating tunnel session keys to fresh egress IP...`);
         const rotated = await warp.rotateKeys('auto_rate_limit');
+        warpRotatedInThisRequest = true;
+        consecutiveRateLimits = 0;
         if (rotated) {
           console.log(`[WARP] Fresh Cloudflare egress IP active on port ${warp.getActivePort()}. Retrying Anthropic request seamlessly...`);
           useWarp = true;
           requestWarpFailed = false;
         }
+      } else if (useWarp) {
+        console.log(`[Proxy] Anthropic Model "${currentModel}" returned ${statusCode}. Preserving tunnel, attempting fallback on current slot...`);
       } else {
         // Direct route hit 429 or 403!
         console.warn(`[Proxy] Anthropic direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Auto-promoting Cloudflare WARP as primary egress...`);

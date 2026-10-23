@@ -319,14 +319,14 @@ class CloudflareWarpManager {
     try {
       const freshAcc = await this.registerCloudflareAccount();
       freshAcc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
-      freshAcc.ipv4Only = (idx % 2 === 1);
+      freshAcc.ipv4Only = false;
       if (this.accountPool && this.accountPool.length > idx) {
         this.accountPool[idx] = freshAcc;
       } else {
         this.accountPool.push(freshAcc);
       }
       this.saveAccountPool();
-      console.log(`[WARP Pool] Fresh replacement account ${idx + 1} ready on ${freshAcc.endpoint} (${freshAcc.ipv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})`);
+      console.log(`[WARP Pool] Fresh replacement account ${idx + 1} ready on ${freshAcc.endpoint} (Dual-Stack IPv6)`);
       return freshAcc;
     } catch (err) {
       console.warn(`[WARP Pool] Could not register replacement account ${idx + 1}:`, err.message);
@@ -362,7 +362,7 @@ class CloudflareWarpManager {
             .filter(a => a && a.privateKey && a.peerPublicKey)
             .map((a, idx) => {
               a.endpoint = this.sanitizeEndpoint(a.endpoint);
-              if (a.ipv4Only === undefined) a.ipv4Only = (idx % 2 === 1);
+              a.ipv4Only = false;
               return a;
             });
           this.saveAccountPool();
@@ -426,10 +426,10 @@ class CloudflareWarpManager {
           console.log(`[WARP Pool] Pre-registering account ${idx + 1}/8 for zero-downtime pool...`);
           const acc = await this.registerCloudflareAccount();
           acc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
-          acc.ipv4Only = (idx % 2 === 1);
+          acc.ipv4Only = false;
           this.accountPool.push(acc);
           this.saveAccountPool();
-          console.log(`[WARP Pool] Account ${idx + 1}/8 pre-warmed on endpoint ${acc.endpoint} (${acc.ipv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})`);
+          console.log(`[WARP Pool] Account ${idx + 1}/8 pre-warmed on endpoint ${acc.endpoint} (Dual-Stack IPv6)`);
         } catch (err) {
           console.warn('[WARP Pool] Pre-warm notice in background pool builder:', err.message);
           break; // Stop if rate limited, will retry on next cycle
@@ -497,7 +497,7 @@ BindAddress = ${host}:${port}
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
-    this.portProcesses.set(port, { proc, startedAt: Date.now() });
+    this.portProcesses.set(port, { proc, startedAt: Date.now(), account });
 
     proc.stdout.on('data', d => {
       const msg = d.toString().trim();
@@ -871,12 +871,19 @@ BindAddress = ${host}:${port}
    * Rotates Cloudflare WARP session keys to acquire a brand new edge egress IP via zero-downtime hot-swap
    */
   markAccountBurned(port) {
-    const pool = this.accountPool || [];
-    const offset = (port - this.basePort) % (pool.length || 1);
-    if (pool[offset]) {
-      // 5-minute cooldown window for rate-limited account
-      pool[offset]._cooldownUntil = Date.now() + (5 * 60 * 1000);
-      console.log(`[WARP Pool] Slot ${offset + 1} (port ${port}) set to 5-minute rate-limit cooldown.`);
+    const procInfo = this.portProcesses.get(port);
+    const account = procInfo?.account;
+    if (account) {
+      // 45-second fast cooldown window for rate-limited account (OpenCode sliding window resets quickly)
+      account._cooldownUntil = Date.now() + (45 * 1000);
+      console.log(`[WARP Pool] Account (${account.accountId?.slice(0, 8)}...) on port ${port} set to 45s rate-limit cooldown.`);
+    } else {
+      const pool = this.accountPool || [];
+      const offset = (port - this.basePort) % (pool.length || 1);
+      if (pool[offset]) {
+        pool[offset]._cooldownUntil = Date.now() + (45 * 1000);
+        console.log(`[WARP Pool] Slot ${offset + 1} (port ${port}) set to 45s rate-limit cooldown.`);
+      }
     }
   }
 
@@ -929,11 +936,21 @@ BindAddress = ${host}:${port}
 
           let account = pool[chosenOffset] || pool[0];
 
-          // If all accounts are on cooldown, replenish chosen slot ONLY if Cloudflare registration is not in cooldown
-          if (!healthyFound && (!this.regCooldownUntil || Date.now() > this.regCooldownUntil)) {
-            console.log(`[WARP Pool] All accounts on cooldown. Slot ${chosenOffset + 1} (port ${targetPort}) attempting Cloudflare account refresh...`);
-            const fresh = await this.replaceBadAccount(chosenOffset);
-            if (fresh) account = fresh;
+          // If all accounts are on cooldown, pick the slot closest to cooldown expiration
+          if (!healthyFound) {
+            let lowestIdx = 0;
+            let lowestCd = Infinity;
+            for (let i = 0; i < pool.length; i++) {
+              const cd = pool[i]._cooldownUntil || 0;
+              if (cd < lowestCd) {
+                lowestCd = cd;
+                lowestIdx = i;
+              }
+            }
+            chosenOffset = lowestIdx;
+            account = pool[chosenOffset];
+            const waitSec = Math.max(0, Math.ceil((lowestCd - Date.now()) / 1000));
+            console.log(`[WARP Pool] Cycling pool: selecting slot ${chosenOffset + 1} (${waitSec}s cooldown remaining).`);
           }
 
           const candidateEndpoints = [
@@ -981,11 +998,8 @@ BindAddress = ${host}:${port}
           const oldPort = currentPort;
           this.activePort = targetPort;
 
-          // CRITICAL: destroy active sockets in old cached agent so no stale/rate-limited connections are reused!
-          if (this.cachedAgent) {
-            try { this.cachedAgent.destroy(); } catch (e) {}
-            this.cachedAgent = null;
-          }
+          // Swap cached agent to null so new requests use targetPort without destroying in-flight requests on oldPort
+          this.cachedAgent = null;
           this.cachedKey = '';
           this.statusCache = null;
 

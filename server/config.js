@@ -98,6 +98,12 @@ class ConfigManager {
 
       this.config = { ...DEFAULT_CONFIG, ...fileConfig };
 
+      // Auto-sanitize legacy non-existent 2.x versions to official verified release
+      if (this.config.client_version && (this.config.client_version.startsWith('2.') || this.config.client_version === '2.0.32')) {
+        this.config.client_version = '1.19.4';
+        this.save();
+      }
+
       // Explicit environment / .env variables ALWAYS take strict precedence over cached disk values:
       if (process.env.DASHBOARD_USER && process.env.DASHBOARD_USER.trim()) {
         this.config.admin_username = process.env.DASHBOARD_USER.trim();

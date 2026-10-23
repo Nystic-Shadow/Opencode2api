@@ -403,11 +403,28 @@ class CloudflareWarpManager {
         const raw = fs.readFileSync(ACCOUNT_FILE, 'utf-8');
         const acc = JSON.parse(raw);
         if (!acc.privateKey || !acc.peerPublicKey) return null;
+        const regTime = new Date(acc.registeredAt || 0).getTime();
+        // Discard cached account if older than 30 minutes
+        if (Date.now() - regTime > (30 * 60 * 1000)) return null;
         acc.endpoint = this.sanitizeEndpoint(acc.endpoint);
         return acc;
       }
     } catch (e) {}
     return null;
+  }
+
+  async purgeAndRegeneratePool() {
+    console.log('[WARP] Purging all cached WARP credentials and regenerating fresh identity pool...');
+    try { if (fs.existsSync(ACCOUNT_FILE)) fs.unlinkSync(ACCOUNT_FILE); } catch (e) {}
+    try { if (fs.existsSync(POOL_FILE)) fs.unlinkSync(POOL_FILE); } catch (e) {}
+    for (let p = this.basePort; p < this.basePort + 4; p++) {
+      const conf = path.join(DATA_DIR, `wireproxy_${p}.conf`);
+      try { if (fs.existsSync(conf)) fs.unlinkSync(conf); } catch (e) {}
+      await this.forceKillPort(p);
+    }
+    this.accountPool = [];
+    this.statusCache = null;
+    return await this.autoBootstrap(true);
   }
 
   async ensureAccountPool() {
@@ -422,13 +439,13 @@ class CloudflareWarpManager {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed.accounts) && parsed.accounts.length > 0) {
           const now = Date.now();
-          const MAX_AGE_MS = 2 * 60 * 60 * 1000; // 2 hours max age
+          const MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes max age: automatically prune stale accounts
           const freshAccounts = parsed.accounts
             .filter(a => {
               if (!a || !a.privateKey || !a.peerPublicKey) return false;
               const regTime = new Date(a.registeredAt || 0).getTime();
-              if (now - regTime > MAX_AGE_MS) return false; // Auto-prune accounts older than 2h
-              if ((a._burnCount || 0) >= 2) return false; // Auto-prune accounts burned 2+ times
+              if (now - regTime > MAX_AGE_MS) return false; // Auto-prune accounts older than 30m
+              if ((a._burnCount || 0) >= 1) return false; // Auto-prune accounts burned even once on reload
               return true;
             })
             .map((a, idx) => {

@@ -360,6 +360,15 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           upstreamRes.on('data', chunk => errBody += chunk.toString());
           upstreamRes.on('end', () => {
             console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${useWarp ? 'WARP' : 'Direct'}): ${errBody}`);
+            if (upstreamRes.statusCode === 429 || upstreamRes.statusCode === 403) {
+              if (useWarp && typeof warp.clearAgent === 'function') {
+                warp.clearAgent(currentWarpPort);
+              }
+              try { upstreamReq.destroy(); } catch (e) {}
+              if (upstreamRes.socket) {
+                try { upstreamRes.socket.destroy(); } catch (e) {}
+              }
+            }
             resolve({
               success: false,
               statusCode: upstreamRes.statusCode,
@@ -919,6 +928,15 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           upstreamRes.on('data', chunk => errBody += chunk.toString());
           upstreamRes.on('end', () => {
             console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${useWarp ? 'WARP' : 'Direct'}): ${errBody}`);
+            if (upstreamRes.statusCode === 429 || upstreamRes.statusCode === 403) {
+              if (useWarp && typeof warp.clearAgent === 'function') {
+                warp.clearAgent(currentWarpPort);
+              }
+              try { upstreamReq.destroy(); } catch (e) {}
+              if (upstreamRes.socket) {
+                try { upstreamRes.socket.destroy(); } catch (e) {}
+              }
+            }
             resolve({
               success: false,
               statusCode: upstreamRes.statusCode,

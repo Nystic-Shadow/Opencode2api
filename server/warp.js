@@ -144,7 +144,18 @@ class CloudflareWarpManager {
     return portPool[(idx + 1) % portPool.length];
   }
 
+  clearAgent(port) {
+    const targetHost = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+    const cacheKey = `${targetHost}:${port}`;
+    if (this.cachedAgents && this.cachedAgents.has(cacheKey)) {
+      const agent = this.cachedAgents.get(cacheKey);
+      try { agent.destroy(); } catch (e) {}
+      this.cachedAgents.delete(cacheKey);
+    }
+  }
+
   async forceKillPort(port) {
+    this.clearAgent(port);
     if (this.drainingTimers.has(port)) {
       clearTimeout(this.drainingTimers.get(port));
       this.drainingTimers.delete(port);
@@ -955,6 +966,7 @@ BindAddress = ${host}:${port}
    * Rotates Cloudflare WARP session keys to acquire a brand new edge egress IP via zero-downtime hot-swap
    */
   markAccountBurned(port) {
+    this.clearAgent(port);
     const procInfo = this.portProcesses.get(port);
     const account = procInfo?.account;
     if (account) {

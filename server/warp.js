@@ -379,7 +379,7 @@ class CloudflareWarpManager {
     try {
       const freshAcc = await this.registerCloudflareAccount();
       freshAcc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
-      freshAcc.ipv4Only = (idx % 2 === 1);
+      freshAcc.ipv4Only = false; // Always dual-stack IPv6 to ensure independent /64 prefix
       freshAcc._burnCount = 0;
       freshAcc._cooldownUntil = 0;
       if (this.accountPool && this.accountPool.length > idx) {
@@ -450,7 +450,7 @@ class CloudflareWarpManager {
             })
             .map((a, idx) => {
               a.endpoint = this.sanitizeEndpoint(WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length]);
-              a.ipv4Only = (idx % 2 === 1);
+              a.ipv4Only = false; // Always dual-stack IPv6 to ensure independent /64 prefix
               return a;
             });
           this.accountPool = freshAccounts;
@@ -515,7 +515,7 @@ class CloudflareWarpManager {
           console.log(`[WARP Pool] Pre-registering account ${idx + 1}/8 for zero-downtime pool...`);
           const acc = await this.registerCloudflareAccount();
           acc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
-          acc.ipv4Only = (idx % 2 === 1);
+          acc.ipv4Only = false; // Always dual-stack IPv6 to ensure independent /64 prefix
           this.accountPool.push(acc);
           this.saveAccountPool();
           const modeLabel = acc.ipv4Only ? 'IPv4-Only' : `Dual-Stack IPv6: ${acc.addressV6}`;
@@ -992,12 +992,12 @@ BindAddress = ${host}:${port}
       account._burnCount = (account._burnCount || 0) + 1;
       console.log(`[WARP Pool] Account (${account.accountId?.slice(0, 8)}...) on port ${port} set to 45s cooldown (burnCount: ${account._burnCount}).`);
 
-      // If an account gets burned 2 times, replace it with a fresh account in the background
-      if ((account._burnCount || 0) >= 2) {
+      // If an account gets burned, immediately replace it with a fresh account in the background
+      if ((account._burnCount || 0) >= 1) {
         const pool = this.accountPool || [];
         const idx = pool.findIndex(a => a.accountId === account.accountId);
         if (idx !== -1) {
-          console.log(`[WARP Pool] Slot ${idx + 1} reached burn threshold (2). Auto-retiring and generating fresh account...`);
+          console.log(`[WARP Pool] Slot ${idx + 1} burned. Auto-retiring and generating fresh account...`);
           this.replaceBadAccount(idx).then((freshAcc) => {
             if (freshAcc && this.portProcesses.has(port)) {
               this.startWireproxy(freshAcc, port)

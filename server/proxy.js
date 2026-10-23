@@ -323,6 +323,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   let useWarp = routeHealth.shouldUseWarp(1);
   let currentWarpPort = warp.getBestPort();
   const triedWarpPorts = new Set();
+  let warpRotatedInThisRequest = false;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
@@ -700,7 +701,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       const isRouteError = isRateLimited || isForbidden || isWarpFailure;
       // On IP rate limits (429/403), keep the requested model intact across all available egress lanes!
       // Only failover to another model if all egress routes have been exhausted OR if it is a model-specific failure (500/503/404)
-      const shouldTryModelFallback = !isRouteError || (!useWarp && triedWarpPorts.size >= 2);
+      const shouldTryModelFallback = !isRouteError || (!useWarp && triedWarpPorts.size >= 4);
       const fallback = shouldTryModelFallback ? getNextFallbackModel(currentModel, triedModels, hasImages) : null;
       if (fallback) {
         console.log(`[Proxy] Model ${currentModel} exhausted on routes. Smart failover to ${fallback} (Attempt ${attempt}/${maxRetries + 1})...`);
@@ -891,6 +892,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   let useWarp = routeHealth.shouldUseWarp(1);
   let currentWarpPort = warp.getBestPort();
   const triedWarpPorts = new Set();
+  let warpRotatedInThisRequest = false;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
@@ -1406,7 +1408,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       const isRouteError = isRateLimited || isForbidden || isWarpFailure;
       // On IP rate limits (429/403), keep the requested model intact across all available egress lanes!
       // Only failover to another model if all egress routes have been exhausted OR if it is a model-specific failure (500/503/404)
-      const shouldTryModelFallback = !isRouteError || (!useWarp && triedWarpPorts.size >= 2);
+      const shouldTryModelFallback = !isRouteError || (!useWarp && triedWarpPorts.size >= 4);
       const fallback = shouldTryModelFallback ? getNextFallbackModel(currentModel, triedModels, hasImages) : null;
       if (fallback) {
         console.log(`[Proxy] Anthropic Model ${currentModel} exhausted on routes. Smart failover to ${fallback}...`);

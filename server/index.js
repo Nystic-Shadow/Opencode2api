@@ -11,6 +11,15 @@ const proxy = require('./proxy');
 const warp = require('./warp');
 const adminRoutes = require('./adminRoutes');
 
+// Global exception protection to guarantee gateway 100% zero-crash uptime
+process.on('uncaughtException', (err) => {
+  console.error('[Process] Uncaught Exception:', err?.message || err);
+  if (err?.stack) console.error(err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Process] Unhandled Rejection:', reason?.message || reason);
+});
+
 const PORT = config.get('port') || 8080;
 const DIST_DIR = path.join(__dirname, '..', 'dist');
 

@@ -11,14 +11,12 @@ const metrics = require('./metrics');
 const warp = require('./warp');
 
 // High-performance keepAlive connection agent: keeps TLS sockets hot, eliminates handshake lag
-// Explicitly enforce IPv4 (family: 4) to avoid Cloudflare IPv6 /64 CIDR rate limits on opencode.ai
 const upstreamAgent = new https.Agent({
   keepAlive: true,
   maxSockets: 128,
   maxFreeSockets: 32,
   timeout: 60000,
-  keepAliveMsecs: 30000,
-  family: 4
+  keepAliveMsecs: 30000
 });
 
 let proxyIndex = 0;
@@ -99,8 +97,7 @@ function getUpstreamAgent(attempt = 1, useWarp = false) {
     try {
       const proxyUrl = new URL(proxyUrlStr);
       const agent = new https.Agent({
-        keepAlive: true,
-        family: 4
+        keepAlive: true
       });
       agent.createConnection = function(options, callback) {
         const targetHost = options.host || options.hostname || 'opencode.ai';
@@ -151,39 +148,78 @@ function normalizeModelId(id) {
   return id.replace(/[-_]?free$/i, '');
 }
 
+function payloadHasImages(payload) {
+  if (!payload || !Array.isArray(payload.messages)) return false;
+  for (const msg of payload.messages) {
+    if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part && (part.type === 'image_url' || part.image_url || part.type === 'image')) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function anthropicPayloadHasImages(payload) {
+  if (!payload || !Array.isArray(payload.messages)) return false;
+  for (const msg of payload.messages) {
+    if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part && (part.type === 'image' || part.source?.type === 'base64')) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Determine the next healthy fallback model for resilient failover.
- * Disabled by default to guarantee 100% strict model routing unless explicitly enabled in Settings.
+ * Enabled by default to eliminate capacity limit drops on throttled models.
  */
-function getNextFallbackModel(currentModel, triedModels = new Set()) {
+function getNextFallbackModel(currentModel, triedModels = new Set(), hasImages = false) {
   if (config.get('smart_fallback') !== true) return null;
 
-  // Strict: only free models participate in failover cascades
+  // Strict: only free models participate in failover cascades (never downgrade paid models)
   const isFree = discovery.isModelFree(currentModel);
   if (!isFree) return null;
 
-  const currentObj = discovery.getModel(currentModel);
-  const isVision = currentObj?.supports_vision;
-
   const allFree = discovery.getAllModels().filter(m => m.is_free);
 
-  // 1. Try other discovered free models with matching vision capability first
-  if (isVision) {
-    for (const m of allFree) {
-      if (m.id === currentModel || m.upstream_id === currentModel) continue;
-      if (triedModels.has(m.id) || triedModels.has(m.upstream_id)) continue;
-      if (m.supports_vision) return m.id;
-    }
-  }
+  // Preferred priority ranking of high-reliability free models
+  const priorityOrder = [
+    'nemotron-3.5-lightning',
+    'beam',
+    'minimax-m3.1-flash',
+    'mimo-v2.6-flash',
+    'deepseek-v4.1-flash',
+    'glm-5.3-flash',
+    'flint-40b',
+    'nemotron-3.5-super-vl',
+    'big-pickle'
+  ];
 
-  // 2. Try any other untried discovered free model
-  for (const m of allFree) {
-    if (m.id === currentModel || m.upstream_id === currentModel) continue;
-    if (triedModels.has(m.id) || triedModels.has(m.upstream_id)) continue;
-    return m.id;
-  }
+  const untried = allFree.filter(m => {
+    if (m.id === currentModel || m.upstream_id === currentModel) return false;
+    if (triedModels.has(m.id) || triedModels.has(m.upstream_id)) return false;
+    if (hasImages && !m.supports_vision) return false;
+    return true;
+  });
 
-  return null;
+  if (untried.length === 0) return null;
+
+  untried.sort((a, b) => {
+    let aIdx = priorityOrder.indexOf(a.id);
+    let bIdx = priorityOrder.indexOf(b.id);
+    if (aIdx === -1) aIdx = 999;
+    if (bIdx === -1) bIdx = 999;
+    return aIdx - bIdx;
+  });
+
+  return untried[0].id;
 }
 
 /**
@@ -277,6 +313,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const mergedTools = tools.mergeTools(clientPayload.tools);
 
   let currentModel = requestedModel;
+  const hasImages = payloadHasImages(clientPayload);
   const triedModels = new Set([currentModel]);
   const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 2;
   const requestTimeout = config.get('request_timeout_ms') || 60000;
@@ -311,7 +348,6 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         method: 'POST',
         headers: upstreamHeaders,
         agent: getUpstreamAgent(attempt, useWarp),
-        family: 4,
         timeout: requestTimeout
       }, (upstreamRes) => {
         // If upstream error (non-200), buffer body to inspect retryability
@@ -628,7 +664,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     }
 
     if (attempt <= maxRetries) {
-      const fallback = getNextFallbackModel(currentModel, triedModels);
+      const fallback = getNextFallbackModel(currentModel, triedModels, hasImages);
       if (fallback) {
         console.log(`[Proxy] Model ${currentModel} returned ${attemptResult.statusCode}. Smart failover to ${fallback} (Attempt ${attempt}/${maxRetries + 1})...`);
         currentModel = fallback;
@@ -799,6 +835,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   }
 
   let currentModel = requestedModel;
+  const hasImages = anthropicPayloadHasImages(clientPayload);
   const triedModels = new Set([currentModel]);
   const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 2;
   const requestTimeout = config.get('request_timeout_ms') || 60000;
@@ -834,7 +871,6 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         method: 'POST',
         headers: upstreamHeaders,
         agent: getUpstreamAgent(attempt, useWarp),
-        family: 4,
         timeout: requestTimeout
       }, (upstreamRes) => {
         if (upstreamRes.statusCode !== 200) {
@@ -1288,7 +1324,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     }
 
     if (attempt <= maxRetries) {
-      const fallback = getNextFallbackModel(currentModel, triedModels);
+      const fallback = getNextFallbackModel(currentModel, triedModels, hasImages);
       if (fallback) {
         console.log(`[Proxy] Anthropic Model ${currentModel} returned ${attemptResult.statusCode}. Smart failover to ${fallback}...`);
         currentModel = fallback;

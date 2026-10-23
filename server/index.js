@@ -200,28 +200,6 @@ async function boot() {
     ]);
     if (warpReady) {
       console.log(`[Boot] Cloudflare WARP successfully connected on port ${config.get('warp_port') || 40000} (warp=on)`);
-      // Fast non-blocking egress health probe: test if host IP is a blocked VPS datacenter IP
-      if (config.get('warp_mode') === 'auto') {
-        const probeReq = https.request({
-          hostname: 'opencode.ai',
-          path: '/inference/openai/v1/chat/completions',
-          method: 'HEAD',
-          family: 4,
-          timeout: 4000
-        }, (res) => {
-          if (res.statusCode === 403) {
-            proxy.routeHealth.markDirectDegraded('Host VPS datacenter IP blocked by OpenCode (403)');
-          }
-        });
-        probeReq.on('error', () => {
-          proxy.routeHealth.markDirectDegraded('Host direct route unreachable');
-        });
-        probeReq.on('timeout', () => {
-          probeReq.destroy();
-          proxy.routeHealth.markDirectDegraded('Host direct route timed out');
-        });
-        probeReq.end();
-      }
     } else {
       console.warn(`[Boot] WARP bootstrap in progress or timed out. Proceeding in background...`);
     }

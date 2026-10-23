@@ -49,7 +49,7 @@ const DEFAULT_CONFIG = {
   free_only: true,
   global_rpm_limit: 0, // 0 = unlimited
   global_tpm_limit: 0, // 0 = unlimited
-  smart_fallback: false, // Strict model routing by default (zero silent cross-model substitutions)
+  smart_fallback: process.env.SMART_FALLBACK !== 'false', // Default: true for zero-drop high resilience (auto failovers across free models if one hits capacity)
   max_retries: 3, // Auto-retry attempts on transient upstream drops
   request_timeout_ms: 60000,
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
@@ -119,6 +119,9 @@ class ConfigManager {
       }
       if (process.env.WARP_PORT) {
         this.config.warp_port = parseInt(process.env.WARP_PORT, 10);
+      }
+      if (process.env.SMART_FALLBACK !== undefined) {
+        this.config.smart_fallback = process.env.SMART_FALLBACK !== 'false';
       }
 
       this.save();

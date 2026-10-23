@@ -420,9 +420,12 @@ class CloudflareWarpManager {
 
     this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port}...`);
 
-    // WireProxy Egress: Enforce IPv4 Anycast strictly to prevent shared Cloudflare IPv6 /64 prefix rate limits on opencode.ai
+    // WireProxy Egress: Enable dual-stack IPv4 and unique dedicated IPv6 /128 address.
+    // Cloudflare allocates a unique IPv6 address per WARP account, giving each tunnel instance
+    // a separate, non-colliding IPv6 egress identity on Cloudflare-hosted targets like opencode.ai.
     const addresses = [];
     if (account.addressV4) addresses.push(`${account.addressV4}/32`);
+    if (account.addressV6) addresses.push(`${account.addressV6}/128`);
     if (addresses.length === 0) addresses.push('172.16.0.2/32');
 
     const endpointHost = this.sanitizeEndpoint(account.endpoint) || 'engage.cloudflareclient.com:2408';
@@ -430,7 +433,7 @@ class CloudflareWarpManager {
     const confContent = `[Interface]
 PrivateKey = ${account.privateKey}
 Address = ${addresses.join(', ')}
-DNS = 1.1.1.1, 8.8.8.8
+DNS = 1.1.1.1, 2606:4700:4700::1111, 8.8.8.8
 
 [Peer]
 PublicKey = ${account.peerPublicKey}

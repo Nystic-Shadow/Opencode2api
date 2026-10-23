@@ -165,6 +165,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         warp_host: warpHost.trim() || '127.0.0.1',
         warp_auto_switch: warpAutoSwitch,
         warp_rotate_on_unauth: warpRotateOnUnauth,
+        warp_rotate_on_rate_limit: warpRotateOnUnauth,
         warp_port: parseInt(warpPort, 10) || 40000,
         global_rpm_limit: parseInt(globalRpm, 10),
         global_tpm_limit: parseInt(globalTpm, 10)
@@ -447,9 +448,9 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
             <div>
-              <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Rotate WARP Keys on Every Unauth</div>
+              <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Auto-Rotate WARP Keys on Rate Limit (429) & Unauth</div>
               <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-                Re-negotiates Cloudflare tunnel keys on unauth drops (disabled by default to prevent socket drops during live traffic)
+                Seamlessly acquires fresh Cloudflare Anycast edge IP via zero-downtime hot-swap whenever rate-limited (429) or blocked (403)
               </div>
             </div>
             <CustomToggle

@@ -57,7 +57,8 @@ const DEFAULT_CONFIG = {
   warp_mode: process.env.WARP_MODE || 'auto', // 'auto' | 'always' | 'disabled'
   warp_host: process.env.WARP_HOST || '127.0.0.1',
   warp_auto_switch: process.env.WARP_AUTO_SWITCH !== 'false',
-  warp_rotate_on_unauth: process.env.WARP_ROTATE_ON_UNAUTH === 'true', // false by default: never kill WireProxy during live traffic
+  warp_rotate_on_unauth: process.env.WARP_ROTATE_ON_UNAUTH !== 'false', // true by default: auto-rotates WireGuard keys on rate limits/429
+  warp_rotate_on_rate_limit: process.env.WARP_ROTATE_ON_RATE_LIMIT !== 'false',
   warp_port: parseInt(process.env.WARP_PORT, 10) || 40000,
   upstream_models_url: 'https://opencode.ai/zen/v1/models',
   upstream_metadata_url: 'https://models.opencode.ai/api.json',

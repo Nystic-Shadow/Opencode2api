@@ -30,16 +30,18 @@ const routeHealth = {
   directLastReason: '',
 
   markDirectDegraded(reason = 'upstream error') {
-    // Keep degraded for 1 hour so subsequent requests immediately route through WARP without delay
-    this.directDegradedUntil = Date.now() + (60 * 60 * 1000);
+    // Keep degraded for 24 hours so subsequent requests immediately route through WARP without delay
+    this.directDegradedUntil = Date.now() + (24 * 60 * 60 * 1000);
     this.directConsecutiveFailures++;
     this.directLastReason = String(reason);
     console.warn(`[RouteManager] Direct route degraded (${reason}). Auto-promoting Cloudflare WARP as primary egress...`);
   },
 
   markDirectHealthy() {
-    this.directDegradedUntil = 0;
-    this.directConsecutiveFailures = 0;
+    if (this.directConsecutiveFailures <= 1) {
+      this.directDegradedUntil = 0;
+      this.directConsecutiveFailures = 0;
+    }
   },
 
   isDirectDegraded() {
@@ -53,13 +55,9 @@ const routeHealth = {
     if (warpMode === 'always') return true;
 
     // In 'auto' mode:
-    // If direct route is currently degraded (e.g. cloud VPS IP blocked with 403),
-    // or if this is a retry attempt (attempt > 1):
-    if (this.isDirectDegraded() || attempt > 1) {
-      return true;
-    }
-
-    return false;
+    // When Cloudflare WARP is ready & answering, prefer it as high-capacity residential egress!
+    // Also if direct route is degraded, or attempt > 1, use WARP.
+    return true;
   }
 };
 
@@ -68,7 +66,7 @@ const routeHealth = {
  */
 function getUpstreamAgent(attempt = 1, useWarp = false) {
   if (useWarp && warp.isReady()) {
-    return warp.getWarpAgent(config.get('warp_port'), config.get('warp_host'));
+    return warp.getWarpAgent(warp.getActivePort(), config.get('warp_host'));
   }
 
   const envProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -530,29 +528,54 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     }
 
     // Upstream failed this attempt — inspect if we can retry or failover
+    const statusCode = attemptResult.statusCode;
+    const bodyStr = typeof attemptResult.body === 'string' ? attemptResult.body : JSON.stringify(attemptResult.body || '');
+    const isRateLimited = statusCode === 429 ||
+      bodyStr.includes('FreeUsageLimitError') ||
+      bodyStr.includes('FreeTierError') ||
+      bodyStr.includes('capacity limit') ||
+      bodyStr.includes('rate limit') ||
+      bodyStr.includes('Rate limit');
+    const isForbidden = statusCode === 403;
+
     const isWarpFailure = useWarp && (
-      attemptResult.statusCode === 502 ||
-      attemptResult.statusCode === 504 ||
-      (typeof attemptResult.body === 'string' && (
-        attemptResult.body.includes('ECONNREFUSED') ||
-        attemptResult.body.includes('timeout') ||
-        attemptResult.body.includes('ETIMEDOUT') ||
-        attemptResult.body.includes('ECONNRESET') ||
-        attemptResult.body.includes('SOCKS5')
-      ))
+      statusCode === 502 ||
+      statusCode === 504 ||
+      bodyStr.includes('ECONNREFUSED') ||
+      bodyStr.includes('timeout') ||
+      bodyStr.includes('ETIMEDOUT') ||
+      bodyStr.includes('ECONNRESET') ||
+      bodyStr.includes('SOCKS5')
     );
 
-    // If WARP proxy failed or socket dropped, immediately fallback to direct route
+    // If WARP proxy failed with network/socket error, fallback to direct route
     if (isWarpFailure) {
-      console.warn(`[Proxy] WARP proxy error (${attemptResult.body}), falling back to direct route...`);
+      console.warn(`[Proxy] WARP connection error (${attemptResult.body}), falling back to direct route for this attempt...`);
       useWarp = false;
       routeHealth.warpConsecutiveFailures++;
+    } else if (isRateLimited || isForbidden) {
+      if (useWarp) {
+        // WARP egress IP hit free-tier rate limit or was blocked by OpenCode!
+        // Auto-rotate WARP keys using zero-downtime hot-swap to get a fresh Cloudflare egress IP!
+        console.warn(`[WARP] Upstream ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}) on model "${currentModel}" via WARP. Auto-rotating tunnel session keys to fresh egress IP...`);
+        const rotated = await warp.rotateKeys('auto_rate_limit');
+        if (rotated) {
+          console.log(`[WARP] Fresh Cloudflare egress IP active on port ${warp.getActivePort()}. Retrying request seamlessly...`);
+        }
+      } else {
+        // Direct route hit 429 or 403!
+        console.warn(`[Proxy] Direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Auto-promoting Cloudflare WARP as primary egress...`);
+        routeHealth.markDirectDegraded(statusCode);
+        if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
+          useWarp = true;
+        } else if (config.get('warp_mode') !== 'disabled') {
+          warp.autoBootstrap().catch(() => {});
+        }
+      }
     } else if (!useWarp) {
-      // Direct route failed (e.g. 403 Forbidden on VPS, 429, timeout, network error)
-      // Auto-promote WARP as primary egress for all subsequent requests!
-      routeHealth.markDirectDegraded(attemptResult.statusCode || attemptResult.body);
+      // Direct route failed with other error
+      routeHealth.markDirectDegraded(statusCode || attemptResult.body);
       if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
-        console.log(`[WARP] Direct route error (${attemptResult.statusCode || attemptResult.body}). Auto-switching route to Cloudflare WARP proxy for retry...`);
         useWarp = true;
       }
     }
@@ -589,7 +612,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         currentModel = fallback;
         triedModels.add(fallback);
       } else {
-        const routeLabel = useWarp ? 'Cloudflare WARP' : 'direct route';
+        const routeLabel = useWarp ? `Cloudflare WARP (port ${warp.getActivePort()})` : 'direct route';
         console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
       }
 
@@ -612,6 +635,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         (errPayload.includes('FreeTierError') || errPayload.includes('FreeUsageLimitError') || errPayload.includes('capacity limit') || errPayload.includes('rate limit') || errPayload.includes('Rate limit'));
 
       if (isFreeTierErr) {
+        if (warp.isAvailable()) {
+          warp.rotateKeys('exhausted_failover').catch(() => {});
+        }
         errPayload = JSON.stringify({
           error: {
             message: "OpenCode Free Tier capacity limit reached for this IP window. Rate limits automatically reset shortly. You can also configure an upstream Zen key or proxy in Settings to continue without interruption.",
@@ -1159,29 +1185,54 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     }
 
     // Upstream error on Anthropic request
+    const statusCode = attemptResult.statusCode;
+    const bodyStr = typeof attemptResult.body === 'string' ? attemptResult.body : JSON.stringify(attemptResult.body || '');
+    const isRateLimited = statusCode === 429 ||
+      bodyStr.includes('FreeUsageLimitError') ||
+      bodyStr.includes('FreeTierError') ||
+      bodyStr.includes('capacity limit') ||
+      bodyStr.includes('rate limit') ||
+      bodyStr.includes('Rate limit');
+    const isForbidden = statusCode === 403;
+
     const isWarpFailure = useWarp && (
-      attemptResult.statusCode === 502 ||
-      attemptResult.statusCode === 504 ||
-      (typeof attemptResult.body === 'string' && (
-        attemptResult.body.includes('ECONNREFUSED') ||
-        attemptResult.body.includes('timeout') ||
-        attemptResult.body.includes('ETIMEDOUT') ||
-        attemptResult.body.includes('ECONNRESET') ||
-        attemptResult.body.includes('SOCKS5')
-      ))
+      statusCode === 502 ||
+      statusCode === 504 ||
+      bodyStr.includes('ECONNREFUSED') ||
+      bodyStr.includes('timeout') ||
+      bodyStr.includes('ETIMEDOUT') ||
+      bodyStr.includes('ECONNRESET') ||
+      bodyStr.includes('SOCKS5')
     );
 
-    // If WARP proxy failed or socket dropped, immediately fallback to direct route
+    // If WARP proxy failed with network/socket error, fallback to direct route
     if (isWarpFailure) {
-      console.warn(`[Proxy] Anthropic WARP proxy error (${attemptResult.body}), falling back to direct route...`);
+      console.warn(`[Proxy] Anthropic WARP connection error (${attemptResult.body}), falling back to direct route for this attempt...`);
       useWarp = false;
       routeHealth.warpConsecutiveFailures++;
+    } else if (isRateLimited || isForbidden) {
+      if (useWarp) {
+        // WARP egress IP hit free-tier rate limit or was blocked by OpenCode!
+        // Auto-rotate WARP keys using zero-downtime hot-swap to get a fresh Cloudflare egress IP!
+        console.warn(`[WARP] Anthropic Upstream ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}) on model "${currentModel}" via WARP. Auto-rotating tunnel session keys to fresh egress IP...`);
+        const rotated = await warp.rotateKeys('auto_rate_limit');
+        if (rotated) {
+          console.log(`[WARP] Fresh Cloudflare egress IP active on port ${warp.getActivePort()}. Retrying Anthropic request seamlessly...`);
+        }
+      } else {
+        // Direct route hit 429 or 403!
+        console.warn(`[Proxy] Anthropic direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Auto-promoting Cloudflare WARP as primary egress...`);
+        routeHealth.markDirectDegraded(statusCode);
+        if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
+          useWarp = true;
+        } else if (config.get('warp_mode') !== 'disabled') {
+          warp.autoBootstrap().catch(() => {});
+        }
+      }
     } else if (!useWarp) {
-      // Direct route failed (e.g. 403 Forbidden on VPS, 429, timeout, network error)
-      // Auto-promote WARP as primary egress for all subsequent requests!
-      routeHealth.markDirectDegraded(attemptResult.statusCode || attemptResult.body);
+      // Direct route failed with other error
+      routeHealth.markDirectDegraded(statusCode || attemptResult.body);
       if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
-        console.log(`[WARP] Anthropic direct route error (${attemptResult.statusCode || attemptResult.body}). Auto-switching route to Cloudflare WARP proxy for retry...`);
         useWarp = true;
       }
     }
@@ -1218,7 +1269,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         currentModel = fallback;
         triedModels.add(fallback);
       } else {
-        const routeLabel = useWarp ? 'Cloudflare WARP' : 'direct route';
+        const routeLabel = useWarp ? `Cloudflare WARP (port ${warp.getActivePort()})` : 'direct route';
         console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on Anthropic model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
       }
       const backoffMs = Math.min(300 * Math.pow(1.5, attempt - 1) + Math.random() * 200, 2000);
@@ -1238,6 +1289,9 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         (errPayload.includes('FreeTierError') || errPayload.includes('FreeUsageLimitError') || errPayload.includes('capacity limit') || errPayload.includes('rate limit') || errPayload.includes('Rate limit'));
 
       if (isFreeTierErr) {
+        if (warp.isAvailable()) {
+          warp.rotateKeys('exhausted_failover').catch(() => {});
+        }
         errPayload = JSON.stringify({
           type: 'error',
           error: {

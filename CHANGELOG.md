@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [1.5.1] - 2026-10-23 — Autonomous Zero-Downtime WARP Hot-Swap & Rate Limit Healing
+
+### 🚀 Major Highlights
+
+- **Autonomous Zero-Downtime Dual-Port Hot-Swap**: Upgraded the Userspace WireProxy engine to alternate seamlessly between primary (`40000`) and secondary (`40001`) SOCKS5 loopback ports. When a tunnel rotation is triggered, the new WireGuard session and Cloudflare Anycast edge IP are spawned and verified on the alternate port *before* switching traffic. In-flight streaming requests on the old port are granted a 30-second graceful drain window, eliminating dropped streams and `ECONNREFUSED` connection cuts.
+- **Autonomous Auto-Rotation on 429 / FreeUsageLimitError**: Fixed a critical issue where the gateway retried on the same exhausted IP upon hitting upstream rate limits (`FreeUsageLimitError` / HTTP 429). The gateway now detects upstream rate limits in real time across both OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`) endpoints, instantly acquiring a fresh Cloudflare egress IP and seamlessly retrying within the same inference request.
+- **Concurrent Rotation Deduplication**: Multiple concurrent agent requests (e.g. Hermes Agent, Cursor, Cline) hitting rate limits simultaneously are deduplicated into a single in-flight rotation promise. All waiting requests automatically resume on the newly established tunnel without duplicate registrations or port conflicts.
+- **Optimized Debounce Cooldown (8s)**: Reduced the key rotation cooldown from 120s down to 8s with atomic state management. Prevents flapping while ensuring rapid recovery for high-throughput coding agent loops.
+- **WARP-First Egress in Auto Mode**: In `auto` mode, the gateway automatically prefers Cloudflare WARP whenever connected and verified live, avoiding datacenter VPS IP blocks (HTTP 403 / 429) from the very first request. Direct VPS degradation now retains a 24-hour stability shield.
+- **Settings UI Enhancement**: Added explicit controls and notifications for `Auto-Rotate WARP Keys on Rate Limit (429) & Unauth` in the control plane dashboard.
+
+---
+
 ## [1.5.0] - 2026-10-19 — Production Release
 
 ### 🚀 Major Highlights

@@ -160,6 +160,7 @@ async function handleAdminRoute(req, res, pathname) {
     if (body.warp_host !== undefined) updates.warp_host = (body.warp_host || '127.0.0.1').trim();
     if (body.warp_auto_switch !== undefined) updates.warp_auto_switch = !!body.warp_auto_switch;
     if (body.warp_rotate_on_unauth !== undefined) updates.warp_rotate_on_unauth = !!body.warp_rotate_on_unauth;
+    if (body.warp_rotate_on_rate_limit !== undefined) updates.warp_rotate_on_rate_limit = !!body.warp_rotate_on_rate_limit;
     if (body.warp_port !== undefined) updates.warp_port = parseInt(body.warp_port, 10) || 40000;
     if (body.proxies !== undefined) {
       if (Array.isArray(body.proxies)) {

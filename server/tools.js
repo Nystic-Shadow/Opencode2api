@@ -103,11 +103,11 @@ const CORE_TOOLS = [
  */
 function mergeTools(clientTools) {
   const userTools = Array.isArray(clientTools) ? clientTools : [];
-  const merged = [...CORE_TOOLS];
-  for (const ut of userTools) {
-    const utName = ut.function?.name || ut.name;
-    if (!merged.some(ct => ct.function.name === utName)) {
-      merged.push(ut);
+  const merged = [...userTools];
+  for (const ct of CORE_TOOLS) {
+    const ctName = ct.function.name;
+    if (!merged.some(ut => (ut.function?.name || ut.name) === ctName)) {
+      merged.push(ct);
     }
   }
   return merged;

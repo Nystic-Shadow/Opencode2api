@@ -774,15 +774,26 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             }
           });
         } else if (block.type === 'tool_result') {
+          let toolContent = '';
+          if (typeof block.content === 'string') {
+            toolContent = block.content;
+          } else if (Array.isArray(block.content)) {
+            toolContent = block.content.map(c => (typeof c === 'string' ? c : c.text || JSON.stringify(c))).join('\n');
+          } else {
+            toolContent = JSON.stringify(block.content || '');
+          }
           openAiMessages.push({
             role: 'tool',
             tool_call_id: block.tool_use_id,
-            content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content || '')
+            content: toolContent
           });
         }
       }
       if (parts.length > 0 || toolCalls.length > 0) {
-        const item = { role: msg.role, content: parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts };
+        const item = {
+          role: msg.role,
+          content: parts.length === 0 ? null : (parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts)
+        };
         if (toolCalls.length > 0) item.tool_calls = toolCalls;
         openAiMessages.push(item);
       }

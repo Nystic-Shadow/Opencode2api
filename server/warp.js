@@ -17,11 +17,12 @@ class CloudflareWarpManager {
     this.cliPath = this.detectCliPath();
     this.basePort = config.get('warp_port') || parseInt(process.env.WARP_PORT, 10) || 40000;
     this.activePort = this.basePort;
-    this.wireproxyProcess = null;
-    this.drainingProcess = null;
-    this.drainingTimeout = null;
+    // Map of port -> { proc, startedAt }
+    this.portProcesses = new Map();
+    // Map of port -> drainTimeout
+    this.drainingTimers = new Map();
     this.lastRotationTime = 0;
-    this.rotationCooldownMs = 8000; // 8-second debounce between rapid rotations
+    this.rotationCooldownMs = 5000; // 5-second debounce between rapid rotations
     this.isRotating = false;
     this.activeRotationPromise = null;
     this.cachedAgent = null;
@@ -42,6 +43,62 @@ class CloudflareWarpManager {
 
   getActivePort() {
     return this.activePort || this.basePort || 40000;
+  }
+
+  getNextPort(currentPort) {
+    const portPool = [
+      this.basePort,
+      this.basePort + 1,
+      this.basePort + 2,
+      this.basePort + 3
+    ];
+    const idx = portPool.indexOf(currentPort);
+    if (idx === -1) return this.basePort;
+    return portPool[(idx + 1) % portPool.length];
+  }
+
+  async forceKillPort(port) {
+    if (this.drainingTimers.has(port)) {
+      clearTimeout(this.drainingTimers.get(port));
+      this.drainingTimers.delete(port);
+    }
+
+    const procInfo = this.portProcesses.get(port);
+    if (procInfo && procInfo.proc) {
+      try {
+        procInfo.proc.removeAllListeners('exit');
+        procInfo.proc.kill('SIGKILL');
+      } catch (e) {}
+      this.portProcesses.delete(port);
+    }
+
+    // Wait and verify socket is truly closed so no EADDRINUSE happens
+    let attempts = 0;
+    while (attempts < 5) {
+      const isAlive = await this.probeSocks5('127.0.0.1', port);
+      if (!isAlive) break;
+      if (procInfo?.proc?.pid) {
+        try { process.kill(procInfo.proc.pid, 'SIGKILL'); } catch (e) {}
+      }
+      await new Promise(r => setTimeout(r, 150));
+      attempts++;
+    }
+  }
+
+  scheduleDraining(port) {
+    if (this.drainingTimers.has(port)) {
+      clearTimeout(this.drainingTimers.get(port));
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        await this.forceKillPort(port);
+        console.log(`[WARP] Previous WireProxy process on port ${port} drained and closed.`);
+      } catch (e) {}
+      this.drainingTimers.delete(port);
+    }, 12000);
+
+    this.drainingTimers.set(port, timer);
   }
 
   setProgress(percent, stage, message) {
@@ -192,8 +249,7 @@ class CloudflareWarpManager {
       if (fs.existsSync(ACCOUNT_FILE)) {
         const raw = fs.readFileSync(ACCOUNT_FILE, 'utf-8');
         const acc = JSON.parse(raw);
-        // If cached account doesn't have IPv6 address, upgrade it with fresh registration
-        if (!acc.addressV6) return null;
+        if (!acc.privateKey || !acc.peerPublicKey) return null;
         return acc;
       }
     } catch (e) {}
@@ -212,11 +268,14 @@ class CloudflareWarpManager {
     const port = targetPort || this.getActivePort();
     const confPath = path.join(DATA_DIR, `wireproxy_${port}.conf`);
 
+    // Ensure port is completely free and clean before spawning!
+    await this.forceKillPort(port);
+
     this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port}...`);
 
+    // WireProxy Egress: Enforce IPv4 Anycast strictly to prevent shared Cloudflare IPv6 /64 prefix rate limits on opencode.ai
     const addresses = [];
     if (account.addressV4) addresses.push(`${account.addressV4}/32`);
-    if (account.addressV6) addresses.push(`${account.addressV6}/128`);
     if (addresses.length === 0) addresses.push('172.16.0.2/32');
 
     const endpointHost = account.endpoint || 'engage.cloudflareclient.com:2408';
@@ -224,7 +283,7 @@ class CloudflareWarpManager {
     const confContent = `[Interface]
 PrivateKey = ${account.privateKey}
 Address = ${addresses.join(', ')}
-DNS = 1.1.1.1, 2606:4700:4700::1111
+DNS = 1.1.1.1
 
 [Peer]
 PublicKey = ${account.peerPublicKey}
@@ -240,10 +299,17 @@ BindAddress = ${host}:${port}
 
     this.setProgress(75, 'launching_tunnel', `Starting userspace WireProxy SOCKS5 daemon on ${host}:${port}...`);
     console.log(`[WARP] Starting userspace WireProxy SOCKS5 daemon on ${host}:${port}...`);
+
+    let procExited = false;
+    let procExitCode = null;
+    let procExitSignal = null;
+
     const proc = spawn(this.wireproxyPath, ['-c', confPath], {
       detached: false,
       stdio: ['ignore', 'pipe', 'pipe']
     });
+
+    this.portProcesses.set(port, { proc, startedAt: Date.now() });
 
     proc.stdout.on('data', d => {
       const msg = d.toString().trim();
@@ -258,28 +324,44 @@ BindAddress = ${host}:${port}
     });
 
     proc.on('exit', (code, sig) => {
+      procExited = true;
+      procExitCode = code;
+      procExitSignal = sig;
       console.warn(`[WireProxy:${port}] Process exited (code: ${code}, signal: ${sig})`);
-      if (this.wireproxyProcess === proc) {
-        this.wireproxyProcess = null;
+      const current = this.portProcesses.get(port);
+      if (current && current.proc === proc) {
+        this.portProcesses.delete(port);
+      }
+      if (port === this.getActivePort()) {
+        this.socketAlive = false;
         this.statusCache = null;
       }
     });
 
     this.setProgress(85, 'verifying_socket', `Probing SOCKS5 handshake on ${host}:${port}...`);
+
     // Poll until SOCKS5 socket answers handshake (up to 8 seconds)
     const startTime = Date.now();
     while (Date.now() - startTime < 8000) {
-      await new Promise(r => setTimeout(r, 300));
+      if (procExited) {
+        throw new Error(`WireProxy process for port ${port} exited prematurely with code ${procExitCode} (signal: ${procExitSignal})`);
+      }
+      await new Promise(r => setTimeout(r, 200));
+      if (procExited) {
+        throw new Error(`WireProxy process for port ${port} exited prematurely with code ${procExitCode} (signal: ${procExitSignal})`);
+      }
       const alive = await this.probeSocks5(host, port);
       if (alive) {
         console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${host}:${port} (warp=on)`);
         this.setProgress(100, 'connected', `Cloudflare WARP Egress Active on ${host}:${port} (warp=on)`);
+        this.socketAlive = true;
         this.statusCache = null;
         return proc;
       }
     }
 
     try { proc.kill('SIGTERM'); } catch (e) {}
+    this.portProcesses.delete(port);
     throw new Error(`WireProxy launched on ${host}:${port} but SOCKS5 port failed to answer within 8s`);
   }
 
@@ -355,7 +437,7 @@ BindAddress = ${host}:${port}
         if (!account || forceRestart) {
           account = await this.registerCloudflareAccount();
         }
-        this.wireproxyProcess = await this.startWireproxy(account, this.basePort);
+        await this.startWireproxy(account, this.basePort);
         this.activePort = this.basePort;
         this.setProgress(100, 'connected', `Cloudflare WARP Connected on ${host}:${this.basePort} (warp=on)`);
         return true;
@@ -514,10 +596,13 @@ BindAddress = ${host}:${port}
       return await this.activeRotationPromise;
     }
 
-    // 2. Debounce cooldown check (8-second window)
-    if (now - this.lastRotationTime < this.rotationCooldownMs) {
-      const waitRemaining = Math.round((this.rotationCooldownMs - (now - this.lastRotationTime)) / 1000);
-      console.log(`[WARP] Key rotation in cooldown (${waitRemaining}s remaining). Active tunnel on port ${this.getActivePort()} is ready.`);
+    // 2. Debounce window:
+    // If rate-limited, allow rotation after at least 3 seconds so we don't spam Cloudflare API,
+    // but don't trap the user in an 8-second dead state.
+    const minDebounce = (reason === 'auto_rate_limit' || reason === 'manual') ? 3000 : this.rotationCooldownMs;
+    if (now - this.lastRotationTime < minDebounce) {
+      const waitRemaining = Math.round((minDebounce - (now - this.lastRotationTime)) / 1000);
+      console.log(`[WARP] Key rotation in debounce window (${waitRemaining}s remaining). Active tunnel on port ${this.getActivePort()} is ready.`);
       return true;
     }
 
@@ -525,37 +610,27 @@ BindAddress = ${host}:${port}
     this.activeRotationPromise = (async () => {
       this.setProgress(20, 'rotating', `Rotating Cloudflare WARP tunnel session keys (${reason})...`);
       try {
-        // Option 1: Running Userspace WireProxy (Dual-Port Zero-Downtime Hot-Swap)
+        // Option 1: Running Userspace WireProxy (Multi-Port Zero-Downtime Hot-Swap)
         if (this.wireproxyPath) {
           console.log(`[WARP] Initiating zero-downtime hot-swap rotation (${reason})...`);
           const currentPort = this.getActivePort();
-          const nextPort = currentPort === this.basePort ? (this.basePort + 1) : this.basePort;
+          const nextPort = this.getNextPort(currentPort);
 
           this.setProgress(40, 'registering', 'Negotiating fresh Curve25519 session with Cloudflare API...');
           const newAccount = await this.registerCloudflareAccount();
 
           this.setProgress(70, 'hot_swapping', `Launching secondary WireProxy tunnel on port ${nextPort}...`);
-          const newProc = await this.startWireproxy(newAccount, nextPort);
+          await this.startWireproxy(newAccount, nextPort);
 
           // Hot-swap active port instantaneously without dropping in-flight traffic
-          const oldProc = this.wireproxyProcess;
+          const oldPort = currentPort;
           this.activePort = nextPort;
-          this.wireproxyProcess = newProc;
           this.cachedAgent = null;
           this.cachedKey = '';
           this.statusCache = null;
 
-          // Gracefully drain old wireproxy process after 30 seconds
-          if (oldProc) {
-            if (this.drainingTimeout) clearTimeout(this.drainingTimeout);
-            this.drainingTimeout = setTimeout(() => {
-              try {
-                oldProc.kill('SIGTERM');
-                console.log(`[WARP] Previous WireProxy process on port ${currentPort} drained successfully.`);
-              } catch (e) {}
-              this.drainingTimeout = null;
-            }, 30000);
-          }
+          // Gracefully drain old wireproxy process after 12 seconds
+          this.scheduleDraining(oldPort);
 
           this.lastRotationTime = Date.now();
           this.setProgress(100, 'connected', `Cloudflare WARP hot-swapped to port ${nextPort} with fresh edge session (warp=on)`);

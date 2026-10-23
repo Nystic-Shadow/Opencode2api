@@ -44,6 +44,7 @@ class CloudflareWarpManager {
     this.cronTimer = null;
     this.regCooldownUntil = 0;
     this.lastRegTime = 0;
+    this.poolAccountIndex = 0;
     this.progress = {
       percent: 0,
       stage: 'idle',
@@ -904,9 +905,8 @@ BindAddress = ${host}:${port}
         // Option 1: Running Userspace WireProxy (Pre-Warmed Multi-Port Zero-Downtime Hot-Swap)
         if (this.wireproxyPath) {
           const currentPort = this.getActivePort();
-          const nextPort = this.getNextPort(currentPort);
+          const targetPort = this.getNextPort(currentPort);
           const pool = await this.ensureAccountPool();
-          const currentOffset = (currentPort - this.basePort) % pool.length;
 
           // If rate limit triggered rotation: immediately mark current account on cooldown
           if (reason === 'auto_rate_limit' || reason === 'exhausted_failover') {
@@ -914,10 +914,10 @@ BindAddress = ${host}:${port}
           }
 
           // Pick the best available slot: search for an account not on cooldown
-          let chosenOffset = (currentOffset + 1) % pool.length;
+          let chosenOffset = (this.poolAccountIndex || 0) % pool.length;
           let healthyFound = false;
           for (let i = 0; i < pool.length; i++) {
-            const checkOffset = (currentOffset + 1 + i) % pool.length;
+            const checkOffset = ((this.poolAccountIndex || 0) + i) % pool.length;
             const checkAcc = pool[checkOffset];
             if (!checkAcc._cooldownUntil || Date.now() > checkAcc._cooldownUntil) {
               chosenOffset = checkOffset;
@@ -925,8 +925,8 @@ BindAddress = ${host}:${port}
               break;
             }
           }
+          this.poolAccountIndex = (chosenOffset + 1) % pool.length;
 
-          const targetPort = this.basePort + (chosenOffset % 4);
           let account = pool[chosenOffset] || pool[0];
 
           // If all accounts are on cooldown, replenish chosen slot ONLY if Cloudflare registration is not in cooldown
@@ -989,12 +989,14 @@ BindAddress = ${host}:${port}
           this.cachedKey = '';
           this.statusCache = null;
 
-          // Gracefully drain old wireproxy process after 12 seconds
-          this.scheduleDraining(oldPort);
+          // Gracefully drain old wireproxy process after 12 seconds only if truly distinct from active targetPort
+          if (oldPort !== targetPort) {
+            this.scheduleDraining(oldPort);
+          }
 
           this.lastRotationTime = Date.now();
-          this.setProgress(100, 'connected', `Cloudflare WARP hot-swapped to port ${nextPort} with fresh edge session (warp=on)`);
-          console.log(`[WARP] Zero-downtime hot-swap complete! Traffic routed to port ${nextPort} (${account.endpoint}, warp=on)`);
+          this.setProgress(100, 'connected', `Cloudflare WARP hot-swapped to port ${targetPort} with fresh edge session (warp=on)`);
+          console.log(`[WARP] Zero-downtime hot-swap complete! Traffic routed to port ${targetPort} (${account.endpoint}, warp=on)`);
           return true;
         }
 

@@ -626,11 +626,11 @@ BindAddress = ${host}:${port}
     // 2. Poll for genuine Cloudflare Edge egress verification (trace)
     this.setProgress(90, 'verifying_tunnel', `Verifying edge egress connectivity on ${host}:${port} (${endpointHost})...`);
     let trace = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       if (procExited) break;
-      trace = await this.probeEgressTrace(port, 2500);
+      trace = await this.probeEgressTrace(port, 4500);
       if (trace && trace.ip) break;
-      await new Promise(r => setTimeout(r, 400));
+      await new Promise(r => setTimeout(r, 600));
     }
 
     if (trace && trace.ip) {
@@ -828,7 +828,7 @@ BindAddress = ${host}:${port}
     }
   }
 
-  async probeEgressTrace(port, timeoutMs = 2500) {
+  async probeEgressTrace(port, timeoutMs = 5000) {
     const targetHost = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const targetPort = port || this.getActivePort();
 

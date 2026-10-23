@@ -83,9 +83,10 @@ const routeHealth = {
 /**
  * Returns either a Cloudflare WARP SOCKS5 agent, proxy tunnel agent, or direct keepAlive agent.
  */
-function getUpstreamAgent(attempt = 1, useWarp = false) {
+function getUpstreamAgent(attempt = 1, useWarp = false, targetPort = null) {
   if (useWarp && warp.isReady()) {
-    return warp.getWarpAgent(warp.getActivePort(), config.get('warp_host'));
+    const port = targetPort || warp.getBestPort();
+    return warp.getWarpAgent(port, config.get('warp_host'));
   }
 
   const envProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -322,6 +323,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   let useWarp = routeHealth.shouldUseWarp(1);
   let consecutiveRateLimits = 0;
   let warpRotatedInThisRequest = false;
+  let currentWarpPort = warp.getBestPort();
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
@@ -350,7 +352,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         path: '/inference/openai/v1/chat/completions',
         method: 'POST',
         headers: upstreamHeaders,
-        agent: getUpstreamAgent(attempt, useWarp),
+        agent: getUpstreamAgent(attempt, useWarp, currentWarpPort),
         timeout: requestTimeout
       }, (upstreamRes) => {
         // If upstream error (non-200), buffer body to inspect retryability
@@ -629,15 +631,14 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       const shouldRotateWarp = useWarp && (consecutiveRateLimits >= 2 || config.get('smart_fallback') === false) && !warpRotatedInThisRequest;
 
       if (shouldRotateWarp) {
-        console.warn(`[WARP] Consecutive rate limits detected (${consecutiveRateLimits}) on port ${warp.getActivePort()}. Auto-rotating tunnel session keys to fresh egress IP...`);
-        const rotated = await warp.rotateKeys('auto_rate_limit');
+        console.warn(`[WARP] Consecutive rate limits detected (${consecutiveRateLimits}) on port ${currentWarpPort}. Marking cooldown (45s) and hopping to next live slot...`);
+        warp.markAccountBurned(currentWarpPort);
+        currentWarpPort = warp.getBestPort();
         warpRotatedInThisRequest = true;
         consecutiveRateLimits = 0;
-        if (rotated) {
-          console.log(`[WARP] Fresh Cloudflare egress IP active on port ${warp.getActivePort()}. Retrying request seamlessly...`);
-          useWarp = true;
-          requestWarpFailed = false;
-        }
+        console.log(`[WARP] Next healthy tunnel slot active on port ${currentWarpPort}. Retrying request seamlessly...`);
+        useWarp = true;
+        requestWarpFailed = false;
       } else if (useWarp) {
         console.log(`[Proxy] Model "${currentModel}" returned ${statusCode}. Preserving tunnel, attempting fallback on current slot...`);
       } else {
@@ -875,6 +876,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   let useWarp = routeHealth.shouldUseWarp(1);
   let consecutiveRateLimits = 0;
   let warpRotatedInThisRequest = false;
+  let currentWarpPort = warp.getBestPort();
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
@@ -904,7 +906,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         path: '/inference/openai/v1/chat/completions',
         method: 'POST',
         headers: upstreamHeaders,
-        agent: getUpstreamAgent(attempt, useWarp),
+        agent: getUpstreamAgent(attempt, useWarp, currentWarpPort),
         timeout: requestTimeout
       }, (upstreamRes) => {
         if (upstreamRes.statusCode !== 200) {
@@ -1320,15 +1322,14 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       const shouldRotateWarp = useWarp && (consecutiveRateLimits >= 2 || config.get('smart_fallback') === false) && !warpRotatedInThisRequest;
 
       if (shouldRotateWarp) {
-        console.warn(`[WARP] Anthropic Consecutive rate limits detected (${consecutiveRateLimits}) on port ${warp.getActivePort()}. Auto-rotating tunnel session keys to fresh egress IP...`);
-        const rotated = await warp.rotateKeys('auto_rate_limit');
+        console.warn(`[WARP] Anthropic Consecutive rate limits detected (${consecutiveRateLimits}) on port ${currentWarpPort}. Marking cooldown (45s) and hopping to next live slot...`);
+        warp.markAccountBurned(currentWarpPort);
+        currentWarpPort = warp.getBestPort();
         warpRotatedInThisRequest = true;
         consecutiveRateLimits = 0;
-        if (rotated) {
-          console.log(`[WARP] Fresh Cloudflare egress IP active on port ${warp.getActivePort()}. Retrying Anthropic request seamlessly...`);
-          useWarp = true;
-          requestWarpFailed = false;
-        }
+        console.log(`[WARP] Fresh Cloudflare egress IP active on port ${currentWarpPort}. Retrying Anthropic request seamlessly...`);
+        useWarp = true;
+        requestWarpFailed = false;
       } else if (useWarp) {
         console.log(`[Proxy] Anthropic Model "${currentModel}" returned ${statusCode}. Preserving tunnel, attempting fallback on current slot...`);
       } else {

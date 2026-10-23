@@ -35,6 +35,8 @@ class CloudflareWarpManager {
     this.activeRotationPromise = null;
     this.cachedAgent = null;
     this.cachedKey = '';
+    this.cachedAgents = new Map();
+    this.roundRobinIndex = 0;
     this.statusCache = null;
     this.socketAlive = false;
     this.lastStatusCheck = 0;
@@ -81,6 +83,37 @@ class CloudflareWarpManager {
 
   getActivePort() {
     return this.activePort || this.basePort || 40000;
+  }
+
+  getBestPort() {
+    const ports = [this.basePort, this.basePort + 1, this.basePort + 2, this.basePort + 3];
+    const livePorts = ports.filter(p => this.portProcesses.has(p));
+    if (livePorts.length === 0) return this.getActivePort();
+
+    const now = Date.now();
+    // 1. Find live ports not on cooldown
+    const healthy = livePorts.filter(p => {
+      const acc = this.portProcesses.get(p)?.account;
+      return !acc?._cooldownUntil || now > acc._cooldownUntil;
+    });
+
+    if (healthy.length > 0) {
+      this.roundRobinIndex = ((this.roundRobinIndex || 0) + 1) % healthy.length;
+      return healthy[this.roundRobinIndex];
+    }
+
+    // 2. All live ports are on cooldown: pick the one closest to expiry
+    let lowestPort = livePorts[0];
+    let lowestCd = Infinity;
+    for (const p of livePorts) {
+      const acc = this.portProcesses.get(p)?.account;
+      const cd = acc?._cooldownUntil || 0;
+      if (cd < lowestCd) {
+        lowestCd = cd;
+        lowestPort = p;
+      }
+    }
+    return lowestPort;
   }
 
   getNextPort(currentPort) {
@@ -430,6 +463,14 @@ class CloudflareWarpManager {
           this.accountPool.push(acc);
           this.saveAccountPool();
           console.log(`[WARP Pool] Account ${idx + 1}/8 pre-warmed on endpoint ${acc.endpoint} (Dual-Stack IPv6)`);
+
+          // If this account maps to one of our 4 ports (40000..40003) and that port is not yet running, boot it now!
+          const slotPort = this.basePort + idx;
+          if (idx < 4 && !this.portProcesses.has(slotPort)) {
+            this.startWireproxy(acc, slotPort)
+              .then(() => console.log(`[WARP Pool] Pre-warmed tunnel is LIVE on port ${slotPort} (IPv6: ${acc.addressV6 ? 'enabled' : 'none'})`))
+              .catch(err => console.warn(`[WARP Pool] Port ${slotPort} startup notice:`, err.message));
+          }
         } catch (err) {
           console.warn('[WARP Pool] Pre-warm notice in background pool builder:', err.message);
           break; // Stop if rate limited, will retry on next cycle
@@ -674,6 +715,19 @@ BindAddress = ${host}:${port}
 
         this.activePort = this.basePort;
         this.startAutoRotateCron();
+
+        // Boot any additional pre-warmed slots (40001..40003) for instant multi-tunnel load balancing
+        const ports = [this.basePort + 1, this.basePort + 2, this.basePort + 3];
+        for (let i = 0; i < ports.length; i++) {
+          const slotPort = ports[i];
+          const slotAcc = pool[i + 1];
+          if (slotAcc && !this.portProcesses.has(slotPort)) {
+            this.startWireproxy(slotAcc, slotPort)
+              .then(() => console.log(`[WARP Pool] Pre-warmed tunnel is LIVE on port ${slotPort} (IPv6: ${slotAcc.addressV6 ? 'enabled' : 'none'})`))
+              .catch(err => console.warn(`[WARP Pool] Port ${slotPort} startup notice:`, err.message));
+          }
+        }
+
         this.setProgress(100, 'connected', `Cloudflare WARP Connected on ${host}:${this.basePort} (warp=on)`);
         return true;
       }
@@ -1165,21 +1219,22 @@ BindAddress = ${host}:${port}
    */
   getWarpAgent(port, host) {
     const targetHost = host || config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
-    const targetPort = port || this.getActivePort();
+    const targetPort = port || this.getBestPort();
     const cacheKey = `${targetHost}:${targetPort}`;
 
-    if (this.cachedAgent && this.cachedKey === cacheKey) {
-      return this.cachedAgent;
+    if (!this.cachedAgents) this.cachedAgents = new Map();
+
+    if (this.cachedAgents.has(cacheKey)) {
+      return this.cachedAgents.get(cacheKey);
     }
 
     const manager = this;
-    this.cachedKey = cacheKey;
     const agent = new https.Agent({
       keepAlive: true,
       maxSockets: 64,
       maxFreeSockets: 16,
       timeout: 60000,
-      keepAliveMsecs: 10000
+      keepAliveMsecs: 15000
     });
 
     agent.createConnection = function(options, callback) {
@@ -1197,22 +1252,20 @@ BindAddress = ${host}:${port}
             callback(null, tlsSocket);
           });
           tlsSocket.on('error', err => {
-            manager.cachedAgent = null;
             if (!connected) {
               callback(err);
             }
           });
         })
         .catch(err => {
-          manager.cachedAgent = null;
           if (!connected) {
             callback(err);
           }
         });
     };
 
-    this.cachedAgent = agent;
-    return this.cachedAgent;
+    this.cachedAgents.set(cacheKey, agent);
+    return agent;
   }
 }
 

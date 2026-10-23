@@ -14,11 +14,11 @@ const WIREPROXY_CONF = path.join(DATA_DIR, 'wireproxy.conf');
 
 const WARP_ENDPOINTS = [
   'engage.cloudflareclient.com:2408',
-  '162.159.192.1:4500',
-  '162.159.195.1:500',
   '162.159.192.1:2408',
+  '162.159.195.1:500',
   'engage.cloudflareclient.com:500',
-  '162.159.195.1:2408'
+  '162.159.195.1:2408',
+  '162.159.192.1:500'
 ];
 
 class CloudflareWarpManager {
@@ -353,8 +353,8 @@ class CloudflareWarpManager {
   sanitizeEndpoint(ep) {
     if (!ep || typeof ep !== 'string') return 'engage.cloudflareclient.com:2408';
     const trimmed = ep.trim();
-    if (trimmed.startsWith('162.159.193.1')) {
-      return '162.159.192.1:4500';
+    if (trimmed.startsWith('162.159.193.1') || trimmed.includes(':4500')) {
+      return '162.159.192.1:2408';
     }
     return trimmed;
   }

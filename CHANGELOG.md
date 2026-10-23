@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.5.2] - 2026-10-24 — Quad-Spectrum Hybrid Egress & Multi-Subnet Tunnel Diversity
+
+### 🚀 Major Highlights
+
+- **Quad-Spectrum Hybrid Egress (Dual-Stack IPv6 + Pure IPv4-Only Alternation)**:
+  - Slots `40000` and `40002` operate on **Dual-Stack IPv6** with dedicated `/128` addresses.
+  - Slots `40001` and `40003` operate in **Pure IPv4-Only** mode (`0.0.0.0/0` with IPv4-only DNS), forcing WireProxy to route through Cloudflare's IPv4 egress pool (`104.28.x.x` / `8.x.x.x`).
+  - This ensures that if Cloudflare's IPv6 range in Singapore (`2a09:bac...`) hits OpenCode's sliding capacity limit window, the gateway immediately fails over to an IPv4 egress IP, completely bypassing the IPv6 subnet rate limit.
+- **Multi-Subnet Ingress Endpoint Diversity**:
+  - Expanded WireGuard endpoints across diverse Cloudflare ingress subnets (`162.159.192.x`, `162.159.193.x`, `162.159.195.x`), avoiding single Anycast cluster congestion.
+- **Dynamic Multi-Slot Rotation in Retry Loop**:
+  - Removed single-rotation blockers in both OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`) endpoints.
+  - On any 429 (`FreeUsageLimitError`), the gateway immediately marks the slot on cooldown and hops across all 4 available pool ports sequentially, falling back to direct host egress if all slots are momentarily exhausted.
+- **Accelerated Burn Replacement (2x Threshold)**:
+  - Accounts are retired and hot-swapped after 2 rate limit events (down from 3), keeping the pool continuously refreshed with clean network identities.
+
+---
+
 ## [2.5.1] - 2026-10-24 — Automatic Account Retirement & Stale Pool Purging
 
 ### 🚀 Major Highlights

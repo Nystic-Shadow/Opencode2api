@@ -14,9 +14,13 @@ const WIREPROXY_CONF = path.join(DATA_DIR, 'wireproxy.conf');
 
 const WARP_ENDPOINTS = [
   'engage.cloudflareclient.com:2408',
-  '162.159.192.1:2408',
+  '162.159.193.1:2408',
+  '162.159.195.1:500',
+  '162.159.192.1:4500',
   'engage.cloudflareclient.com:500',
-  '162.159.192.1:4500'
+  '162.159.193.1:500',
+  '162.159.195.1:2408',
+  '162.159.192.1:2408'
 ];
 
 class CloudflareWarpManager {
@@ -85,13 +89,25 @@ class CloudflareWarpManager {
     return this.activePort || this.basePort || 40000;
   }
 
-  getBestPort() {
+  getBestPort(excludePorts = []) {
     const ports = [this.basePort, this.basePort + 1, this.basePort + 2, this.basePort + 3];
     const livePorts = ports.filter(p => this.portProcesses.has(p));
     if (livePorts.length === 0) return this.getActivePort();
 
     const now = Date.now();
-    // 1. Find live ports not on cooldown
+    // 1. Live ports not on cooldown and not in exclude list
+    const healthyUnexcluded = livePorts.filter(p => {
+      if (Array.isArray(excludePorts) && excludePorts.includes(p)) return false;
+      const acc = this.portProcesses.get(p)?.account;
+      return !acc?._cooldownUntil || now > acc._cooldownUntil;
+    });
+
+    if (healthyUnexcluded.length > 0) {
+      this.roundRobinIndex = ((this.roundRobinIndex || 0) + 1) % healthyUnexcluded.length;
+      return healthyUnexcluded[this.roundRobinIndex];
+    }
+
+    // 2. Any healthy live port not on cooldown
     const healthy = livePorts.filter(p => {
       const acc = this.portProcesses.get(p)?.account;
       return !acc?._cooldownUntil || now > acc._cooldownUntil;
@@ -102,10 +118,12 @@ class CloudflareWarpManager {
       return healthy[this.roundRobinIndex];
     }
 
-    // 2. All live ports are on cooldown: pick the one closest to expiry
-    let lowestPort = livePorts[0];
+    // 3. Fallback: least recently cooled down port not in exclude list
+    const candidates = Array.isArray(excludePorts) ? livePorts.filter(p => !excludePorts.includes(p)) : [];
+    const pool = candidates.length > 0 ? candidates : livePorts;
+    let lowestPort = pool[0];
     let lowestCd = Infinity;
-    for (const p of livePorts) {
+    for (const p of pool) {
       const acc = this.portProcesses.get(p)?.account;
       const cd = acc?._cooldownUntil || 0;
       if (cd < lowestCd) {
@@ -336,11 +354,7 @@ class CloudflareWarpManager {
 
   sanitizeEndpoint(ep) {
     if (!ep || typeof ep !== 'string') return 'engage.cloudflareclient.com:2408';
-    // Clean up any known invalid / non-responsive endpoints
-    if (ep.includes('188.114.') || ep.includes('162.159.193.')) {
-      return 'engage.cloudflareclient.com:2408';
-    }
-    return ep;
+    return ep.trim();
   }
 
   async replaceBadAccount(idx) {
@@ -348,11 +362,11 @@ class CloudflareWarpManager {
       console.log(`[WARP Pool] Skipping replacement for account ${idx + 1}: Cloudflare registration in cooldown.`);
       return null;
     }
-    console.warn(`[WARP Pool] Account ${idx + 1} failed edge connectivity. Purging and registering a fresh account...`);
+    console.warn(`[WARP Pool] Account ${idx + 1} marked exhausted/burned. Purging and registering a fresh replacement...`);
     try {
       const freshAcc = await this.registerCloudflareAccount();
       freshAcc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
-      freshAcc.ipv4Only = false;
+      freshAcc.ipv4Only = (idx % 2 === 1);
       freshAcc._burnCount = 0;
       freshAcc._cooldownUntil = 0;
       if (this.accountPool && this.accountPool.length > idx) {
@@ -361,7 +375,8 @@ class CloudflareWarpManager {
         this.accountPool.push(freshAcc);
       }
       this.saveAccountPool();
-      console.log(`[WARP Pool] Fresh replacement account ${idx + 1} ready on ${freshAcc.endpoint} (Dual-Stack IPv6: ${freshAcc.addressV6})`);
+      const modeLabel = freshAcc.ipv4Only ? 'IPv4-Only' : `Dual-Stack IPv6: ${freshAcc.addressV6}`;
+      console.log(`[WARP Pool] Fresh replacement account ${idx + 1} ready on ${freshAcc.endpoint} (${modeLabel})`);
       return freshAcc;
     } catch (err) {
       console.warn(`[WARP Pool] Could not register replacement account ${idx + 1}:`, err.message);
@@ -400,12 +415,12 @@ class CloudflareWarpManager {
               if (!a || !a.privateKey || !a.peerPublicKey) return false;
               const regTime = new Date(a.registeredAt || 0).getTime();
               if (now - regTime > MAX_AGE_MS) return false; // Auto-prune accounts older than 2h
-              if ((a._burnCount || 0) >= 3) return false; // Auto-prune accounts burned 3+ times
+              if ((a._burnCount || 0) >= 2) return false; // Auto-prune accounts burned 2+ times
               return true;
             })
-            .map((a) => {
-              a.endpoint = this.sanitizeEndpoint(a.endpoint);
-              a.ipv4Only = false;
+            .map((a, idx) => {
+              a.endpoint = this.sanitizeEndpoint(a.endpoint || WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length]);
+              a.ipv4Only = (idx % 2 === 1);
               return a;
             });
           this.accountPool = freshAccounts;
@@ -470,16 +485,17 @@ class CloudflareWarpManager {
           console.log(`[WARP Pool] Pre-registering account ${idx + 1}/8 for zero-downtime pool...`);
           const acc = await this.registerCloudflareAccount();
           acc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
-          acc.ipv4Only = false;
+          acc.ipv4Only = (idx % 2 === 1);
           this.accountPool.push(acc);
           this.saveAccountPool();
-          console.log(`[WARP Pool] Account ${idx + 1}/8 pre-warmed on endpoint ${acc.endpoint} (Dual-Stack IPv6)`);
+          const modeLabel = acc.ipv4Only ? 'IPv4-Only' : `Dual-Stack IPv6: ${acc.addressV6}`;
+          console.log(`[WARP Pool] Account ${idx + 1}/8 pre-warmed on endpoint ${acc.endpoint} (${modeLabel})`);
 
           // If this account maps to one of our 4 ports (40000..40003) and that port is not yet running, boot it now!
           const slotPort = this.basePort + idx;
           if (idx < 4 && !this.portProcesses.has(slotPort)) {
             this.startWireproxy(acc, slotPort)
-              .then(() => console.log(`[WARP Pool] Pre-warmed tunnel is LIVE on port ${slotPort} (IPv6: ${acc.addressV6 ? 'enabled' : 'none'})`))
+              .then(() => console.log(`[WARP Pool] Pre-warmed tunnel is LIVE on port ${slotPort} (${acc.ipv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})`))
               .catch(err => console.warn(`[WARP Pool] Port ${slotPort} startup notice:`, err.message));
           }
         } catch (err) {
@@ -507,27 +523,28 @@ class CloudflareWarpManager {
     // Ensure port is completely free and clean before spawning!
     await this.forceKillPort(port);
 
-    this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port}...`);
+    const isIpv4Only = Boolean(account.ipv4Only);
+    this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port} (${isIpv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})...`);
 
-    // WireProxy Egress: Enable dual-stack IPv4 and unique dedicated IPv6 /128 address.
-    // Cloudflare allocates a unique IPv6 address per WARP account, giving each tunnel instance
-    // a separate, non-colliding IPv6 egress identity on Cloudflare-hosted targets like opencode.ai.
+    // WireProxy Egress: Enable dual-stack IPv4/IPv6 OR pure IPv4-only egress to bypass IPv6 subnet exhaustion.
     const addresses = [];
     if (account.addressV4) addresses.push(`${account.addressV4}/32`);
-    if (account.addressV6 && !account.ipv4Only) addresses.push(`${account.addressV6}/128`);
+    if (account.addressV6 && !isIpv4Only) addresses.push(`${account.addressV6}/128`);
     if (addresses.length === 0) addresses.push('172.16.0.2/32');
 
     const endpointHost = this.sanitizeEndpoint(account.endpoint) || 'engage.cloudflareclient.com:2408';
+    const dnsServers = isIpv4Only ? '1.1.1.1, 8.8.8.8' : '1.1.1.1, 2606:4700:4700::1111, 8.8.8.8';
+    const allowedIps = isIpv4Only ? '0.0.0.0/0' : '0.0.0.0/0, ::/0';
 
     const confContent = `[Interface]
 PrivateKey = ${account.privateKey}
 Address = ${addresses.join(', ')}
-DNS = 1.1.1.1, 2606:4700:4700::1111, 8.8.8.8
+DNS = ${dnsServers}
 
 [Peer]
 PublicKey = ${account.peerPublicKey}
 Endpoint = ${endpointHost}
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = ${allowedIps}
 KeepAlive = 25
 
 [Socks5]
@@ -944,16 +961,16 @@ BindAddress = ${host}:${port}
       account._burnCount = (account._burnCount || 0) + 1;
       console.log(`[WARP Pool] Account (${account.accountId?.slice(0, 8)}...) on port ${port} set to 45s cooldown (burnCount: ${account._burnCount}).`);
 
-      // If an account gets burned 3 times, replace it with a fresh account in the background
-      if (account._burnCount >= 3) {
+      // If an account gets burned 2 times, replace it with a fresh account in the background
+      if ((account._burnCount || 0) >= 2) {
         const pool = this.accountPool || [];
         const idx = pool.findIndex(a => a.accountId === account.accountId);
         if (idx !== -1) {
-          console.log(`[WARP Pool] Slot ${idx + 1} reached burn threshold. Auto-retiring and generating fresh account...`);
+          console.log(`[WARP Pool] Slot ${idx + 1} reached burn threshold (2). Auto-retiring and generating fresh account...`);
           this.replaceBadAccount(idx).then((freshAcc) => {
             if (freshAcc && this.portProcesses.has(port)) {
               this.startWireproxy(freshAcc, port)
-                .then(() => console.log(`[WARP Pool] Port ${port} re-armed with fresh account ${freshAcc.accountId.slice(0, 8)}!`))
+                .then(() => console.log(`[WARP Pool] Port ${port} re-armed with fresh account ${freshAcc.accountId.slice(0, 8)} (${freshAcc.ipv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})!`))
                 .catch(err => console.warn(`[WARP Pool] Port ${port} re-arm notice:`, err.message));
             }
           }).catch(() => {});

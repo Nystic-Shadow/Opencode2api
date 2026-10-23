@@ -321,9 +321,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const requestTimeout = config.get('request_timeout_ms') || 60000;
   let requestWarpFailed = false;
   let useWarp = routeHealth.shouldUseWarp(1);
-  let consecutiveRateLimits = 0;
-  let warpRotatedInThisRequest = false;
   let currentWarpPort = warp.getBestPort();
+  const triedWarpPorts = new Set();
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
@@ -625,29 +624,31 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         }
       }
     } else if (isRateLimited || isForbidden) {
-      consecutiveRateLimits++;
-      // Only rotate WARP tunnel if 2 consecutive models fail with 429 on this tunnel (or smart fallback disabled)
-      // AND we haven't already rotated in this request
-      const shouldRotateWarp = useWarp && (consecutiveRateLimits >= 2 || config.get('smart_fallback') === false) && !warpRotatedInThisRequest;
-
-      if (shouldRotateWarp) {
-        console.warn(`[WARP] Consecutive rate limits detected (${consecutiveRateLimits}) on port ${currentWarpPort}. Marking cooldown (45s) and hopping to next live slot...`);
+      if (useWarp) {
+        console.warn(`[WARP] Rate limit detected on port ${currentWarpPort}. Marking slot burned (45s cooldown)...`);
         warp.markAccountBurned(currentWarpPort);
-        currentWarpPort = warp.getBestPort();
-        warpRotatedInThisRequest = true;
-        consecutiveRateLimits = 0;
-        console.log(`[WARP] Next healthy tunnel slot active on port ${currentWarpPort}. Retrying request seamlessly...`);
-        useWarp = true;
-        requestWarpFailed = false;
-      } else if (useWarp) {
-        console.log(`[Proxy] Model "${currentModel}" returned ${statusCode}. Preserving tunnel, attempting fallback on current slot...`);
+        triedWarpPorts.add(currentWarpPort);
+
+        // Seamlessly hop to next live port that hasn't been tried yet in this request
+        const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
+        if (nextPort !== currentWarpPort && !triedWarpPorts.has(nextPort)) {
+          currentWarpPort = nextPort;
+          console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
+        } else if (triedWarpPorts.size >= 4) {
+          // All 4 WARP ports burned in this request! Attempt direct route fallback
+          console.warn('[WARP Pool] All 4 WARP tunnel slots in pool hit capacity. Attempting direct host egress lane...');
+          useWarp = false;
+        } else {
+          currentWarpPort = nextPort;
+          console.log(`[WARP] Cycling to port ${currentWarpPort}...`);
+        }
       } else {
-        // Direct route hit 429 or 403!
-        console.warn(`[Proxy] Direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Auto-promoting Cloudflare WARP as primary egress...`);
+        // Direct route hit rate limit, check if any WARP port is available
+        console.warn(`[Proxy] Direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Checking WARP tunnel pool...`);
         routeHealth.markDirectDegraded(statusCode);
         if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
           useWarp = true;
-          requestWarpFailed = false;
+          currentWarpPort = warp.getBestPort();
         } else if (config.get('warp_mode') !== 'disabled') {
           warp.autoBootstrap().catch(() => {});
         }
@@ -874,9 +875,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const requestTimeout = config.get('request_timeout_ms') || 60000;
   let requestWarpFailed = false;
   let useWarp = routeHealth.shouldUseWarp(1);
-  let consecutiveRateLimits = 0;
-  let warpRotatedInThisRequest = false;
   let currentWarpPort = warp.getBestPort();
+  const triedWarpPorts = new Set();
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
@@ -1316,29 +1316,31 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         }
       }
     } else if (isRateLimited || isForbidden) {
-      consecutiveRateLimits++;
-      // Only rotate WARP tunnel if 2 consecutive models fail with 429 on this tunnel (or smart fallback disabled)
-      // AND we haven't already rotated in this request
-      const shouldRotateWarp = useWarp && (consecutiveRateLimits >= 2 || config.get('smart_fallback') === false) && !warpRotatedInThisRequest;
-
-      if (shouldRotateWarp) {
-        console.warn(`[WARP] Anthropic Consecutive rate limits detected (${consecutiveRateLimits}) on port ${currentWarpPort}. Marking cooldown (45s) and hopping to next live slot...`);
+      if (useWarp) {
+        console.warn(`[WARP] Anthropic rate limit detected on port ${currentWarpPort}. Marking slot burned (45s cooldown)...`);
         warp.markAccountBurned(currentWarpPort);
-        currentWarpPort = warp.getBestPort();
-        warpRotatedInThisRequest = true;
-        consecutiveRateLimits = 0;
-        console.log(`[WARP] Fresh Cloudflare egress IP active on port ${currentWarpPort}. Retrying Anthropic request seamlessly...`);
-        useWarp = true;
-        requestWarpFailed = false;
-      } else if (useWarp) {
-        console.log(`[Proxy] Anthropic Model "${currentModel}" returned ${statusCode}. Preserving tunnel, attempting fallback on current slot...`);
+        triedWarpPorts.add(currentWarpPort);
+
+        // Seamlessly hop to next live port that hasn't been tried yet in this request
+        const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
+        if (nextPort !== currentWarpPort && !triedWarpPorts.has(nextPort)) {
+          currentWarpPort = nextPort;
+          console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
+        } else if (triedWarpPorts.size >= 4) {
+          // All 4 WARP ports burned in this request! Attempt direct route fallback
+          console.warn('[WARP Pool] All 4 WARP tunnel slots in pool hit capacity. Attempting direct host egress lane for Anthropic request...');
+          useWarp = false;
+        } else {
+          currentWarpPort = nextPort;
+          console.log(`[WARP] Cycling to port ${currentWarpPort}...`);
+        }
       } else {
-        // Direct route hit 429 or 403!
-        console.warn(`[Proxy] Anthropic direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Auto-promoting Cloudflare WARP as primary egress...`);
+        // Direct route hit rate limit, check if any WARP port is available
+        console.warn(`[Proxy] Anthropic direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Checking WARP tunnel pool...`);
         routeHealth.markDirectDegraded(statusCode);
         if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
           useWarp = true;
-          requestWarpFailed = false;
+          currentWarpPort = warp.getBestPort();
         } else if (config.get('warp_mode') !== 'disabled') {
           warp.autoBootstrap().catch(() => {});
         }

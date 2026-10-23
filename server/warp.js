@@ -206,6 +206,15 @@ class CloudflareWarpManager {
    * Generates Curve25519 keypair and registers a free Cloudflare WARP account via official REST API
    */
   async registerCloudflareAccount() {
+    // Throttle registrations to at most once per 6 seconds to prevent Cloudflare Error 1015
+    const now = Date.now();
+    if (this.lastRegTime && (now - this.lastRegTime < 6000)) {
+      const waitMs = 6000 - (now - this.lastRegTime);
+      console.log(`[WARP] Throttling Cloudflare registration to prevent 1015 rate limit (waiting ${Math.round(waitMs / 1000)}s)...`);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+    this.lastRegTime = Date.now();
+
     console.log('[WARP] Generating fresh X25519 keypair & registering with Cloudflare WARP API...');
     this.setProgress(30, 'generating_keys', 'Generating Curve25519 (X25519) cryptographic keypair...');
     const { privateKey, publicKey } = crypto.generateKeyPairSync('x25519');
@@ -836,10 +845,9 @@ BindAddress = ${host}:${port}
     const pool = this.accountPool || [];
     const offset = (port - this.basePort) % (pool.length || 1);
     if (pool[offset]) {
-      pool[offset]._burned = true;
-      pool[offset]._burnedAt = Date.now();
-      console.log(`[WARP Pool] Slot ${offset + 1} (port ${port}) marked burned. Replacing in background...`);
-      this.replaceBadAccount(offset).catch(e => console.warn('[WARP Pool] Background replace error:', e.message));
+      // 10-minute cooldown window for rate-limited account
+      pool[offset]._cooldownUntil = Date.now() + (10 * 60 * 1000);
+      console.log(`[WARP Pool] Slot ${offset + 1} (port ${port}) set to 10-minute rate-limit cooldown.`);
     }
   }
 
@@ -871,19 +879,32 @@ BindAddress = ${host}:${port}
           const nextPort = this.getNextPort(currentPort);
           const pool = await this.ensureAccountPool();
           const currentOffset = (currentPort - this.basePort) % pool.length;
-          const nextOffset = (nextPort - this.basePort) % pool.length;
 
-          // If rate limit triggered rotation: immediately mark current account burned and replace it
+          // If rate limit triggered rotation: immediately mark current account on cooldown
           if (reason === 'auto_rate_limit' || reason === 'exhausted_failover') {
             this.markAccountBurned(currentPort);
           }
 
-          let account = pool[nextOffset] || pool[0];
+          // Pick the best available slot: search for an account not on cooldown
+          let chosenOffset = (currentOffset + 1) % pool.length;
+          let healthyFound = false;
+          for (let i = 0; i < pool.length; i++) {
+            const checkOffset = (currentOffset + 1 + i) % pool.length;
+            const checkAcc = pool[checkOffset];
+            if (!checkAcc._cooldownUntil || Date.now() > checkAcc._cooldownUntil) {
+              chosenOffset = checkOffset;
+              healthyFound = true;
+              break;
+            }
+          }
 
-          // If target account is burned or if we are auto_rate_limit, ensure next account is freshly registered!
-          if (reason === 'auto_rate_limit' || reason === 'exhausted_failover' || account._burned) {
-            console.log(`[WARP Pool] Target slot ${nextOffset + 1} (port ${nextPort}) is burned or rate-limited. Registering fresh account synchronously...`);
-            const fresh = await this.replaceBadAccount(nextOffset);
+          const targetPort = this.basePort + (chosenOffset % 4);
+          let account = pool[chosenOffset] || pool[0];
+
+          // If all accounts are on cooldown, replenish chosen slot with a fresh Cloudflare account
+          if (!healthyFound || reason === 'auto_rate_limit') {
+            console.log(`[WARP Pool] Slot ${chosenOffset + 1} (port ${targetPort}) refreshing Cloudflare account...`);
+            const fresh = await this.replaceBadAccount(chosenOffset);
             if (fresh) account = fresh;
           }
 
@@ -898,25 +919,25 @@ BindAddress = ${host}:${port}
           let lastErr = null;
           for (const ep of candidateEndpoints) {
             account.endpoint = ep;
-            console.log(`[WARP] Initiating zero-downtime hot-swap rotation (${reason}) to port ${nextPort} (${ep})...`);
-            this.setProgress(50, 'hot_swapping', `Launching pre-warmed WireProxy tunnel on port ${nextPort} (${ep})...`);
+            console.log(`[WARP] Initiating zero-downtime hot-swap rotation (${reason}) to port ${targetPort} (${ep})...`);
+            this.setProgress(50, 'hot_swapping', `Launching pre-warmed WireProxy tunnel on port ${targetPort} (${ep})...`);
             try {
-              await this.startWireproxy(account, nextPort);
+              await this.startWireproxy(account, targetPort);
               started = true;
               break;
             } catch (err) {
               lastErr = err;
-              console.warn(`[WARP] Rotation candidate endpoint ${ep} on port ${nextPort} failed:`, err.message);
+              console.warn(`[WARP] Rotation candidate endpoint ${ep} on port ${targetPort} failed:`, err.message);
               await new Promise(r => setTimeout(r, 400));
             }
           }
 
           if (!started) {
-            console.warn(`[WARP] All candidate endpoints failed for account offset ${nextOffset}. Purging bad account and refreshing...`);
-            const replacement = await this.replaceBadAccount(nextOffset);
+            console.warn(`[WARP] All candidate endpoints failed for account offset ${chosenOffset}. Purging bad account and refreshing...`);
+            const replacement = await this.replaceBadAccount(chosenOffset);
             if (replacement) {
               try {
-                await this.startWireproxy(replacement, nextPort);
+                await this.startWireproxy(replacement, targetPort);
                 started = true;
               } catch (reErr) {
                 lastErr = reErr;
@@ -925,12 +946,12 @@ BindAddress = ${host}:${port}
           }
 
           if (!started) {
-            throw lastErr || new Error(`Failed to establish working WireProxy tunnel on port ${nextPort}`);
+            throw lastErr || new Error(`Failed to establish working WireProxy tunnel on port ${targetPort}`);
           }
 
           // Hot-swap active port instantaneously without dropping in-flight traffic
           const oldPort = currentPort;
-          this.activePort = nextPort;
+          this.activePort = targetPort;
 
           // CRITICAL: destroy active sockets in old cached agent so no stale/rate-limited connections are reused!
           if (this.cachedAgent) {

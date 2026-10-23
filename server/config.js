@@ -50,7 +50,7 @@ const DEFAULT_CONFIG = {
   global_rpm_limit: 0, // 0 = unlimited
   global_tpm_limit: 0, // 0 = unlimited
   smart_fallback: process.env.SMART_FALLBACK !== 'false', // Default: true for zero-drop high resilience (auto failovers across free models if one hits capacity)
-  max_retries: 3, // Auto-retry attempts on transient upstream drops
+  max_retries: parseInt(process.env.MAX_RETRIES, 10) || 5, // Auto-retry attempts on transient upstream drops (up to 6 attempts across models and fresh IPs)
   request_timeout_ms: 60000,
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
   proxies: process.env.PROXIES ? process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean) : [],
@@ -59,7 +59,7 @@ const DEFAULT_CONFIG = {
   warp_auto_switch: process.env.WARP_AUTO_SWITCH !== 'false',
   warp_rotate_on_unauth: process.env.WARP_ROTATE_ON_UNAUTH !== 'false', // true by default: auto-rotates WireGuard keys on rate limits/429
   warp_rotate_on_rate_limit: process.env.WARP_ROTATE_ON_RATE_LIMIT !== 'false',
-  warp_auto_rotate_minutes: parseInt(process.env.WARP_AUTO_ROTATE_MINUTES, 10) || 10, // 0 = disabled, default: every 10 minutes
+  warp_auto_rotate_minutes: parseInt(process.env.WARP_AUTO_ROTATE_MINUTES, 10) || 5, // 0 = disabled, default: every 5 minutes
   warp_port: parseInt(process.env.WARP_PORT, 10) || 40000,
   upstream_models_url: 'https://opencode.ai/zen/v1/models',
   upstream_metadata_url: 'https://models.opencode.ai/api.json',

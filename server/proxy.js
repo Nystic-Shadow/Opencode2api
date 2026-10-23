@@ -189,17 +189,16 @@ function getNextFallbackModel(currentModel, triedModels = new Set(), hasImages =
 
   const allFree = discovery.getAllModels().filter(m => m.is_free);
 
-  // Preferred priority ranking of high-reliability free models
+  // Preferred priority ranking of high-reliability free models (1M context powerhouses first)
   const priorityOrder = [
-    'nemotron-3.5-lightning',
     'beam',
-    'minimax-m3.1-flash',
-    'mimo-v2.6-flash',
+    'nemotron-3.5-lightning',
     'deepseek-v4.1-flash',
     'glm-5.3-flash',
-    'flint-40b',
     'nemotron-3.5-super-vl',
-    'big-pickle'
+    'mimo-v2.6-flash',
+    'big-pickle',
+    'flint-40b'
   ];
 
   const untried = allFree.filter(m => {
@@ -315,7 +314,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   let currentModel = requestedModel;
   const hasImages = payloadHasImages(clientPayload);
   const triedModels = new Set([currentModel]);
-  const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 2;
+  const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 5;
   const requestTimeout = config.get('request_timeout_ms') || 60000;
   let requestWarpFailed = false;
   let useWarp = routeHealth.shouldUseWarp(1);
@@ -848,7 +847,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   let currentModel = requestedModel;
   const hasImages = anthropicPayloadHasImages(clientPayload);
   const triedModels = new Set([currentModel]);
-  const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 2;
+  const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 5;
   const requestTimeout = config.get('request_timeout_ms') || 60000;
   let requestWarpFailed = false;
   let useWarp = routeHealth.shouldUseWarp(1);

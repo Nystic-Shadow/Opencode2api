@@ -832,6 +832,17 @@ BindAddress = ${host}:${port}
   /**
    * Rotates Cloudflare WARP session keys to acquire a brand new edge egress IP via zero-downtime hot-swap
    */
+  markAccountBurned(port) {
+    const pool = this.accountPool || [];
+    const offset = (port - this.basePort) % (pool.length || 1);
+    if (pool[offset]) {
+      pool[offset]._burned = true;
+      pool[offset]._burnedAt = Date.now();
+      console.log(`[WARP Pool] Slot ${offset + 1} (port ${port}) marked burned. Replacing in background...`);
+      this.replaceBadAccount(offset).catch(e => console.warn('[WARP Pool] Background replace error:', e.message));
+    }
+  }
+
   async rotateKeys(reason = 'manual') {
     const now = Date.now();
 
@@ -842,10 +853,10 @@ BindAddress = ${host}:${port}
     }
 
     // 2. Debounce window:
-    // If rate-limited or recovering, allow rotation after at least 1.0 second, but don't trap the user in long cooldowns.
-    const minDebounce = (reason === 'auto_rate_limit' || reason === 'manual' || reason === 'scheduled_cron' || reason === 'connection_failure') ? 1000 : this.rotationCooldownMs;
+    // Rate-limit rotations jump immediately (minDebounce: 200ms) to unblock traffic instantly!
+    const minDebounce = (reason === 'auto_rate_limit' || reason === 'connection_failure') ? 200 : (reason === 'manual' || reason === 'scheduled_cron' ? 1000 : this.rotationCooldownMs);
     if (now - this.lastRotationTime < minDebounce) {
-      const waitRemaining = Math.round((minDebounce - (now - this.lastRotationTime)) / 1000);
+      const waitRemaining = Math.max(1, Math.round((minDebounce - (now - this.lastRotationTime)) / 1000));
       console.log(`[WARP] Key rotation in debounce window (${waitRemaining}s remaining). Active tunnel on port ${this.getActivePort()} is ready.`);
       return true;
     }
@@ -859,8 +870,22 @@ BindAddress = ${host}:${port}
           const currentPort = this.getActivePort();
           const nextPort = this.getNextPort(currentPort);
           const pool = await this.ensureAccountPool();
-          const portOffset = (nextPort - this.basePort) % pool.length;
-          const account = pool[portOffset] || pool[0];
+          const currentOffset = (currentPort - this.basePort) % pool.length;
+          const nextOffset = (nextPort - this.basePort) % pool.length;
+
+          // If rate limit triggered rotation: immediately mark current account burned and replace it
+          if (reason === 'auto_rate_limit' || reason === 'exhausted_failover') {
+            this.markAccountBurned(currentPort);
+          }
+
+          let account = pool[nextOffset] || pool[0];
+
+          // If target account is burned or if we are auto_rate_limit, ensure next account is freshly registered!
+          if (reason === 'auto_rate_limit' || reason === 'exhausted_failover' || account._burned) {
+            console.log(`[WARP Pool] Target slot ${nextOffset + 1} (port ${nextPort}) is burned or rate-limited. Registering fresh account synchronously...`);
+            const fresh = await this.replaceBadAccount(nextOffset);
+            if (fresh) account = fresh;
+          }
 
           const candidateEndpoints = [
             this.sanitizeEndpoint(account.endpoint),
@@ -887,8 +912,8 @@ BindAddress = ${host}:${port}
           }
 
           if (!started) {
-            console.warn(`[WARP] All candidate endpoints failed for account offset ${portOffset}. Purging bad account and refreshing...`);
-            const replacement = await this.replaceBadAccount(portOffset);
+            console.warn(`[WARP] All candidate endpoints failed for account offset ${nextOffset}. Purging bad account and refreshing...`);
+            const replacement = await this.replaceBadAccount(nextOffset);
             if (replacement) {
               try {
                 await this.startWireproxy(replacement, nextPort);
@@ -906,7 +931,12 @@ BindAddress = ${host}:${port}
           // Hot-swap active port instantaneously without dropping in-flight traffic
           const oldPort = currentPort;
           this.activePort = nextPort;
-          this.cachedAgent = null;
+
+          // CRITICAL: destroy active sockets in old cached agent so no stale/rate-limited connections are reused!
+          if (this.cachedAgent) {
+            try { this.cachedAgent.destroy(); } catch (e) {}
+            this.cachedAgent = null;
+          }
           this.cachedKey = '';
           this.statusCache = null;
 

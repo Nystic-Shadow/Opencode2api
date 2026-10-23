@@ -352,7 +352,11 @@ class CloudflareWarpManager {
 
   sanitizeEndpoint(ep) {
     if (!ep || typeof ep !== 'string') return 'engage.cloudflareclient.com:2408';
-    return ep.trim();
+    const trimmed = ep.trim();
+    if (trimmed.startsWith('162.159.193.1')) {
+      return '162.159.192.1:4500';
+    }
+    return trimmed;
   }
 
   async replaceBadAccount(idx) {
@@ -417,7 +421,7 @@ class CloudflareWarpManager {
               return true;
             })
             .map((a, idx) => {
-              a.endpoint = this.sanitizeEndpoint(a.endpoint || WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length]);
+              a.endpoint = this.sanitizeEndpoint(WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length]);
               a.ipv4Only = (idx % 2 === 1);
               return a;
             });

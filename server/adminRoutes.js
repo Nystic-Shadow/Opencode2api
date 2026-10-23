@@ -161,6 +161,7 @@ async function handleAdminRoute(req, res, pathname) {
     if (body.warp_auto_switch !== undefined) updates.warp_auto_switch = !!body.warp_auto_switch;
     if (body.warp_rotate_on_unauth !== undefined) updates.warp_rotate_on_unauth = !!body.warp_rotate_on_unauth;
     if (body.warp_rotate_on_rate_limit !== undefined) updates.warp_rotate_on_rate_limit = !!body.warp_rotate_on_rate_limit;
+    if (body.warp_auto_rotate_minutes !== undefined) updates.warp_auto_rotate_minutes = parseInt(body.warp_auto_rotate_minutes, 10) || 0;
     if (body.warp_port !== undefined) updates.warp_port = parseInt(body.warp_port, 10) || 40000;
     if (body.proxies !== undefined) {
       if (Array.isArray(body.proxies)) {
@@ -171,6 +172,9 @@ async function handleAdminRoute(req, res, pathname) {
     }
 
     config.update(updates);
+    if (body.warp_auto_rotate_minutes !== undefined) {
+      warp.startAutoRotateCron();
+    }
     if (body.free_only !== undefined) {
       discovery.sync().catch(e => console.warn('[Discovery] Resync on free_only toggle:', e.message));
     }

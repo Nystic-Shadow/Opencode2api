@@ -17,6 +17,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [warpHost, setWarpHost] = useState(settings.warp_host || '127.0.0.1');
   const [warpAutoSwitch, setWarpAutoSwitch] = useState(settings.warp_auto_switch !== false);
   const [warpRotateOnUnauth, setWarpRotateOnUnauth] = useState(settings.warp_rotate_on_unauth !== false);
+  const [warpAutoRotateMinutes, setWarpAutoRotateMinutes] = useState(settings.warp_auto_rotate_minutes !== undefined ? settings.warp_auto_rotate_minutes : 10);
   const [warpPort, setWarpPort] = useState(settings.warp_port || 40000);
   const [warpStatus, setWarpStatus] = useState(null);
   const [isRotatingWarp, setIsRotatingWarp] = useState(false);
@@ -166,6 +167,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         warp_auto_switch: warpAutoSwitch,
         warp_rotate_on_unauth: warpRotateOnUnauth,
         warp_rotate_on_rate_limit: warpRotateOnUnauth,
+        warp_auto_rotate_minutes: parseInt(warpAutoRotateMinutes, 10) || 0,
         warp_port: parseInt(warpPort, 10) || 40000,
         global_rpm_limit: parseInt(globalRpm, 10),
         global_tpm_limit: parseInt(globalTpm, 10)
@@ -459,6 +461,50 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               checked={warpRotateOnUnauth}
               onChange={setWarpRotateOnUnauth}
             />
+          </div>
+
+          <div style={{ paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+              <div>
+                <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Scheduled Background Auto-Rotate (Cron Interval)</div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
+                  Periodically hot-swaps to a fresh Cloudflare Anycast tunnel in the background even when idle (0 = disabled, default: 10m)
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <input
+                  type="number"
+                  min="0"
+                  max="1440"
+                  className="input-field"
+                  style={{ width: '75px', textAlign: 'center', fontWeight: '700' }}
+                  value={warpAutoRotateMinutes}
+                  onChange={e => setWarpAutoRotateMinutes(parseInt(e.target.value, 10) || 0)}
+                />
+                <span style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)' }}>min</span>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+              {[0, 5, 10, 15, 30, 60].map(m => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setWarpAutoRotateMinutes(m)}
+                  style={{
+                    padding: '0.2rem 0.55rem',
+                    fontSize: '0.72rem',
+                    borderRadius: 'var(--radius)',
+                    border: '1px solid var(--border)',
+                    cursor: 'pointer',
+                    fontWeight: warpAutoRotateMinutes === m ? '700' : '500',
+                    backgroundColor: warpAutoRotateMinutes === m ? 'var(--primary)' : 'var(--muted)',
+                    color: warpAutoRotateMinutes === m ? 'var(--primary-foreground)' : 'var(--foreground)'
+                  }}
+                >
+                  {m === 0 ? 'Off' : `${m}m`}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div style={{ paddingTop: '0.6rem', borderTop: '1px solid var(--border)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>

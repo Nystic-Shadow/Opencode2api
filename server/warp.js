@@ -9,7 +9,15 @@ const config = require('./config');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const ACCOUNT_FILE = path.join(DATA_DIR, 'warp_account.json');
+const POOL_FILE = path.join(DATA_DIR, 'warp_pool.json');
 const WIREPROXY_CONF = path.join(DATA_DIR, 'wireproxy.conf');
+
+const WARP_ENDPOINTS = [
+  '162.159.192.1:2408',
+  '188.114.96.1:2408',
+  '162.159.193.1:2408',
+  '188.114.97.1:2408'
+];
 
 class CloudflareWarpManager {
   constructor() {
@@ -22,7 +30,7 @@ class CloudflareWarpManager {
     // Map of port -> drainTimeout
     this.drainingTimers = new Map();
     this.lastRotationTime = 0;
-    this.rotationCooldownMs = 5000; // 5-second debounce between rapid rotations
+    this.rotationCooldownMs = 1500;
     this.isRotating = false;
     this.activeRotationPromise = null;
     this.cachedAgent = null;
@@ -31,6 +39,9 @@ class CloudflareWarpManager {
     this.socketAlive = false;
     this.lastStatusCheck = 0;
     this.isBootstrapping = false;
+    this.accountPool = [];
+    this.isPoolInitializing = false;
+    this.cronTimer = null;
     this.progress = {
       percent: 0,
       stage: 'idle',
@@ -39,6 +50,30 @@ class CloudflareWarpManager {
 
     // Fast initial background probe so socketAlive state is immediately populated
     this.probeSocks5().catch(() => {});
+    this.startAutoRotateCron();
+  }
+
+  startAutoRotateCron() {
+    if (this.cronTimer) {
+      clearInterval(this.cronTimer);
+      this.cronTimer = null;
+    }
+    const minutes = config.get('warp_auto_rotate_minutes');
+    const intervalMinutes = typeof minutes === 'number' ? minutes : 10;
+    if (intervalMinutes <= 0) {
+      console.log('[WARP Cron] Periodic background rotation is disabled (warp_auto_rotate_minutes = 0).');
+      return;
+    }
+
+    console.log(`[WARP Cron] Background auto-rotation active: rotating tunnel every ${intervalMinutes} minute(s).`);
+    this.cronTimer = setInterval(async () => {
+      console.log(`[WARP Cron] Scheduled periodic tunnel rotation triggered (${intervalMinutes}m interval)...`);
+      try {
+        await this.rotateKeys('scheduled_cron');
+      } catch (err) {
+        console.warn('[WARP Cron] Periodic rotation notice:', err.message);
+      }
+    }, intervalMinutes * 60 * 1000);
   }
 
   getActivePort() {
@@ -256,6 +291,83 @@ class CloudflareWarpManager {
     return null;
   }
 
+  async ensureAccountPool() {
+    if (this.accountPool && this.accountPool.length >= 4) {
+      return this.accountPool;
+    }
+
+    // 1. Try reading existing pool from data/warp_pool.json
+    try {
+      if (fs.existsSync(POOL_FILE)) {
+        const raw = fs.readFileSync(POOL_FILE, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed.accounts) && parsed.accounts.length > 0) {
+          this.accountPool = parsed.accounts.filter(a => a && a.privateKey && a.peerPublicKey);
+          if (this.accountPool.length >= 4) return this.accountPool;
+        }
+      }
+    } catch (e) {}
+
+    // 2. Check legacy ACCOUNT_FILE
+    const cached = this.loadCachedAccount();
+    if (cached && !this.accountPool.some(a => a.accountId === cached.accountId)) {
+      cached.endpoint = WARP_ENDPOINTS[0];
+      this.accountPool.push(cached);
+    }
+
+    // 3. If we have at least 1 account, return immediately and fill pool in background
+    if (this.accountPool.length > 0) {
+      this.populatePoolInBackground();
+      return this.accountPool;
+    }
+
+    // 4. Otherwise register first account synchronously
+    const firstAcc = await this.registerCloudflareAccount();
+    firstAcc.endpoint = WARP_ENDPOINTS[0];
+    this.accountPool.push(firstAcc);
+    this.saveAccountPool();
+    this.populatePoolInBackground();
+    return this.accountPool;
+  }
+
+  saveAccountPool() {
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(POOL_FILE, JSON.stringify({
+        updatedAt: new Date().toISOString(),
+        accounts: this.accountPool
+      }, null, 2));
+    } catch (e) {
+      console.warn('[WARP Pool] Warning saving account pool:', e.message);
+    }
+  }
+
+  async populatePoolInBackground() {
+    if (this.isPoolInitializing) return;
+    this.isPoolInitializing = true;
+
+    try {
+      while (this.accountPool.length < 4) {
+        // Enforce safe 4-second delay so Cloudflare API error 1015 never occurs
+        await new Promise(r => setTimeout(r, 4000));
+        try {
+          const idx = this.accountPool.length;
+          console.log(`[WARP Pool] Pre-registering account ${idx + 1}/4 for zero-downtime pool...`);
+          const acc = await this.registerCloudflareAccount();
+          acc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
+          this.accountPool.push(acc);
+          this.saveAccountPool();
+          console.log(`[WARP Pool] Account ${idx + 1}/4 pre-warmed on endpoint ${acc.endpoint}`);
+        } catch (err) {
+          console.warn('[WARP Pool] Pre-warm notice in background pool builder:', err.message);
+          break; // Stop if rate limited, will retry on next cycle
+        }
+      }
+    } finally {
+      this.isPoolInitializing = false;
+    }
+  }
+
   /**
    * Starts WireProxy userspace SOCKS5 engine
    */
@@ -432,13 +544,13 @@ BindAddress = ${host}:${port}
       // 2. Prioritize userspace WireProxy (runs without root/capabilities in Docker)
       if (this.wireproxyPath) {
         console.log('[WARP] Auto-bootstrapping userspace Cloudflare WARP engine...');
-        this.setProgress(30, 'preparing_keys', 'Verifying Curve25519 tunnel credentials...');
-        let account = this.loadCachedAccount();
-        if (!account || forceRestart) {
-          account = await this.registerCloudflareAccount();
-        }
+        this.setProgress(30, 'preparing_keys', 'Loading pre-warmed tunnel pool credentials...');
+        const pool = await this.ensureAccountPool();
+        const account = pool[0];
+        account.endpoint = account.endpoint || WARP_ENDPOINTS[0];
         await this.startWireproxy(account, this.basePort);
         this.activePort = this.basePort;
+        this.startAutoRotateCron();
         this.setProgress(100, 'connected', `Cloudflare WARP Connected on ${host}:${this.basePort} (warp=on)`);
         return true;
       }
@@ -636,9 +748,8 @@ BindAddress = ${host}:${port}
     }
 
     // 2. Debounce window:
-    // If rate-limited, allow rotation after at least 3 seconds so we don't spam Cloudflare API,
-    // but don't trap the user in an 8-second dead state.
-    const minDebounce = (reason === 'auto_rate_limit' || reason === 'manual') ? 3000 : this.rotationCooldownMs;
+    // If rate-limited, allow rotation after at least 1.5 seconds, but don't trap the user in long cooldowns.
+    const minDebounce = (reason === 'auto_rate_limit' || reason === 'manual' || reason === 'scheduled_cron') ? 1500 : this.rotationCooldownMs;
     if (now - this.lastRotationTime < minDebounce) {
       const waitRemaining = Math.round((minDebounce - (now - this.lastRotationTime)) / 1000);
       console.log(`[WARP] Key rotation in debounce window (${waitRemaining}s remaining). Active tunnel on port ${this.getActivePort()} is ready.`);
@@ -649,17 +760,20 @@ BindAddress = ${host}:${port}
     this.activeRotationPromise = (async () => {
       this.setProgress(20, 'rotating', `Rotating Cloudflare WARP tunnel session keys (${reason})...`);
       try {
-        // Option 1: Running Userspace WireProxy (Multi-Port Zero-Downtime Hot-Swap)
+        // Option 1: Running Userspace WireProxy (Pre-Warmed Multi-Port Zero-Downtime Hot-Swap)
         if (this.wireproxyPath) {
-          console.log(`[WARP] Initiating zero-downtime hot-swap rotation (${reason})...`);
           const currentPort = this.getActivePort();
           const nextPort = this.getNextPort(currentPort);
+          const pool = await this.ensureAccountPool();
+          const portOffset = (nextPort - this.basePort) % pool.length;
+          const account = pool[portOffset] || pool[0];
+          const endpoint = account.endpoint || WARP_ENDPOINTS[portOffset % WARP_ENDPOINTS.length];
+          account.endpoint = endpoint;
 
-          this.setProgress(40, 'registering', 'Negotiating fresh Curve25519 session with Cloudflare API...');
-          const newAccount = await this.registerCloudflareAccount();
+          console.log(`[WARP] Initiating zero-downtime hot-swap rotation (${reason}) to port ${nextPort} (${endpoint})...`);
+          this.setProgress(50, 'hot_swapping', `Launching pre-warmed WireProxy tunnel on port ${nextPort} (${endpoint})...`);
 
-          this.setProgress(70, 'hot_swapping', `Launching secondary WireProxy tunnel on port ${nextPort}...`);
-          await this.startWireproxy(newAccount, nextPort);
+          await this.startWireproxy(account, nextPort);
 
           // Hot-swap active port instantaneously without dropping in-flight traffic
           const oldPort = currentPort;
@@ -673,7 +787,7 @@ BindAddress = ${host}:${port}
 
           this.lastRotationTime = Date.now();
           this.setProgress(100, 'connected', `Cloudflare WARP hot-swapped to port ${nextPort} with fresh edge session (warp=on)`);
-          console.log(`[WARP] Zero-downtime hot-swap complete! Traffic routed to port ${nextPort}. Egress IP refreshed.`);
+          console.log(`[WARP] Zero-downtime hot-swap complete! Traffic routed to port ${nextPort} (${endpoint}, warp=on)`);
           return true;
         }
 

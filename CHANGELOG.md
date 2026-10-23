@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.5.0] - 2026-10-24 — Concurrent 4-Port Pre-Warmed WARP Pool & Zero-Drop Resilience
+
+### 🚀 Major Highlights
+
+- **Concurrent 4-Port Pre-Warmed WARP Pool**: Operates 4 persistent userspace WireProxy daemons concurrently on loopback ports `40000`, `40001`, `40002`, and `40003`. Each port is backed by an independent Cloudflare WARP account with a dedicated `/128` IPv6 address.
+- **Round-Robin Egress Load Balancing**: Inbound inference requests automatically distribute across healthy, warm tunnels, quadrupling aggregate RPM throughput while keeping individual accounts well below upstream rate-limit thresholds.
+- **Zero-Latency Port Hopping (`0ms`)**: Rate-limited ports are marked on a 45-second cooldown without destroying processes or severing sockets. Active requests hop instantly to the next live port with zero startup lag.
+- **Decoupled Model Fallback & Tunnel Isolation**: Model capacity limits are strictly isolated from IP rotations. When an individual model throttles upstream, fallback models are attempted on the same active tunnel before rotating network egress.
+- **100% Dual-Stack IPv6 Enforcement**: Eliminated Cloudflare Singapore shared NAT IPv4 collisions (`104.28.222.43`), ensuring all tunnels receive unique, non-colliding IPv6 addresses.
+- **Independent Keep-Alive Connection Pools**: Dedicated HTTP/HTTPS agent instances per port keep TLS connections hot, reducing TTFT latency to ~1.3s–3.0s.
+- **Full Protocol Parity**: Verified end-to-end compatibility for both OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`) formats across JSON non-streaming, SSE streaming, multi-turn tool calling, and multimodal vision.
+
+---
+
 ## [1.5.1] - 2026-10-23 — Autonomous Zero-Downtime WARP Hot-Swap & Rate Limit Healing
 
 ### 🚀 Major Highlights

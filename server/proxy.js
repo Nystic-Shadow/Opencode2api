@@ -321,7 +321,11 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
-      useWarp = requestWarpFailed ? false : routeHealth.shouldUseWarp(attempt);
+      if (attempt >= 4 && useWarp && !routeHealth.isDirectDegraded()) {
+        useWarp = false;
+      } else {
+        useWarp = requestWarpFailed ? false : routeHealth.shouldUseWarp(attempt);
+      }
     }
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const sessionId = identity.generateCanonicalSessionId();
@@ -854,7 +858,11 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
-      useWarp = requestWarpFailed ? false : routeHealth.shouldUseWarp(attempt);
+      if (attempt >= 4 && useWarp && !routeHealth.isDirectDegraded()) {
+        useWarp = false;
+      } else {
+        useWarp = requestWarpFailed ? false : routeHealth.shouldUseWarp(attempt);
+      }
     }
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const sessionId = identity.generateCanonicalSessionId();

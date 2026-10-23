@@ -120,6 +120,12 @@ class ConfigManager {
       if (process.env.WARP_PORT) {
         this.config.warp_port = parseInt(process.env.WARP_PORT, 10);
       }
+      if (fileConfig.max_retries === undefined || fileConfig.max_retries < 6) {
+        this.config.max_retries = 6;
+      }
+      if (process.env.MAX_RETRIES) {
+        this.config.max_retries = parseInt(process.env.MAX_RETRIES, 10);
+      }
       // Auto-migrate legacy config: enable smart_fallback by default for high availability
       if (fileConfig._smart_fallback_migrated !== true) {
         this.config.smart_fallback = process.env.SMART_FALLBACK !== 'false';

@@ -120,6 +120,11 @@ class ConfigManager {
       if (process.env.WARP_PORT) {
         this.config.warp_port = parseInt(process.env.WARP_PORT, 10);
       }
+      // Auto-migrate legacy config: enable smart_fallback by default for high availability
+      if (fileConfig._smart_fallback_migrated !== true) {
+        this.config.smart_fallback = process.env.SMART_FALLBACK !== 'false';
+        this.config._smart_fallback_migrated = true;
+      }
       if (process.env.SMART_FALLBACK !== undefined) {
         this.config.smart_fallback = process.env.SMART_FALLBACK !== 'false';
       }

@@ -254,7 +254,9 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               <h3 style={{ fontSize: '1rem', fontWeight: '700' }}>Cloudflare WARP Proxy & Auto-Switch</h3>
               {warpStatus?.available ? (
                 warpStatus.connected ? (
-                  <span className="badge badge-success">WARP Connected ({warpStatus.engine ? `${warpStatus.engine} • ` : ''}{warpStatus.host || '127.0.0.1'}:{warpStatus.port})</span>
+                  <span className="badge badge-success">
+                    WARP Connected ({warpStatus.engine ? `${warpStatus.engine} • ` : ''}{warpStatus.host || '127.0.0.1'}:{warpStatus.port}{warpStatus.egressIp ? ` • Egress: ${warpStatus.egressIp}${warpStatus.colo ? ` [${warpStatus.colo}]` : ''}` : ''})
+                  </span>
                 ) : (
                   <span className="badge badge-warning">WARP Disconnected</span>
                 )

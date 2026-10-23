@@ -509,9 +509,44 @@ BindAddress = ${host}:${port}
     }
   }
 
+  async probeEgressTrace(port) {
+    const targetHost = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+    const targetPort = port || this.getActivePort();
+
+    return new Promise((resolve) => {
+      let resolved = false;
+      const agent = this.getWarpAgent(targetPort, targetHost);
+      const req = https.request({
+        hostname: 'cloudflare.com',
+        path: '/cdn-cgi/trace',
+        method: 'GET',
+        agent,
+        timeout: 3000
+      }, res => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          if (resolved) return;
+          resolved = true;
+          const matchIp = body.match(/ip=([^\r\n]+)/);
+          const matchColo = body.match(/colo=([^\r\n]+)/);
+          const matchWarp = body.match(/warp=([^\r\n]+)/);
+          resolve({
+            ip: matchIp ? matchIp[1] : null,
+            colo: matchColo ? matchColo[1] : null,
+            warp: matchWarp ? matchWarp[1] : null
+          });
+        });
+      });
+      req.on('error', () => { if (!resolved) { resolved = true; resolve(null); } });
+      req.on('timeout', () => { req.destroy(); if (!resolved) { resolved = true; resolve(null); } });
+      req.end();
+    });
+  }
+
   async getStatus() {
     const now = Date.now();
-    if (this.statusCache && (now - this.lastStatusCheck < 2000)) {
+    if (this.statusCache && (now - this.lastStatusCheck < 3000)) {
       return this.statusCache;
     }
 
@@ -523,7 +558,9 @@ BindAddress = ${host}:${port}
 
     if (socketAlive) {
       const engine = this.wireproxyPath ? 'Userspace WireGuard' : (this.cliPath ? 'CLI Daemon' : 'SOCKS5 Proxy');
-      this.setProgress(100, 'connected', `Cloudflare WARP Egress Active (${engine} • ${host}:${port})`);
+      const trace = await this.probeEgressTrace(port);
+      const egressDetail = trace?.ip ? ` • IP: ${trace.ip}${trace.colo ? ` (${trace.colo})` : ''}` : '';
+      this.setProgress(100, 'connected', `Cloudflare WARP Egress Active (${engine} • ${host}:${port}${egressDetail})`);
       const result = {
         available: true,
         installed: true,
@@ -535,6 +572,8 @@ BindAddress = ${host}:${port}
         port: port,
         engine: engine,
         socketAlive: true,
+        egressIp: trace?.ip || null,
+        colo: trace?.colo || null,
         reason: 'Active & Answering (warp=on)',
         bootstrapping: this.isBootstrapping,
         progress: this.progress

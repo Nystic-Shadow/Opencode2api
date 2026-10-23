@@ -631,12 +631,13 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
         // Seamlessly hop to next live port that hasn't been tried yet in this request
         const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
+        const livePorts = [warp.basePort, warp.basePort + 1, warp.basePort + 2, warp.basePort + 3].filter(p => warp.portProcesses.has(p));
         if (nextPort !== currentWarpPort && !triedWarpPorts.has(nextPort)) {
           currentWarpPort = nextPort;
           console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
-        } else if (triedWarpPorts.size >= 4) {
-          // All 4 WARP ports burned in this request! Attempt direct route fallback
-          console.warn('[WARP Pool] All 4 WARP tunnel slots in pool hit capacity. Attempting direct host egress lane...');
+        } else if (triedWarpPorts.size >= livePorts.length || livePorts.every(p => triedWarpPorts.has(p))) {
+          // All active WARP ports burned in this request! Attempt direct route fallback
+          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Attempting direct host egress lane...');
           useWarp = false;
         } else {
           currentWarpPort = nextPort;
@@ -687,13 +688,17 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     }
 
     if (attempt <= maxRetries) {
-      const fallback = getNextFallbackModel(currentModel, triedModels, hasImages);
+      const isRouteError = isRateLimited || isForbidden || isWarpFailure;
+      // On IP rate limits (429/403), keep the requested model intact across all available egress lanes!
+      // Only failover to another model if all egress routes have been exhausted OR if it is a model-specific failure (500/503/404)
+      const shouldTryModelFallback = !isRouteError || (!useWarp && triedWarpPorts.size >= 2);
+      const fallback = shouldTryModelFallback ? getNextFallbackModel(currentModel, triedModels, hasImages) : null;
       if (fallback) {
-        console.log(`[Proxy] Model ${currentModel} returned ${attemptResult.statusCode}. Smart failover to ${fallback} (Attempt ${attempt}/${maxRetries + 1})...`);
+        console.log(`[Proxy] Model ${currentModel} exhausted on routes. Smart failover to ${fallback} (Attempt ${attempt}/${maxRetries + 1})...`);
         currentModel = fallback;
         triedModels.add(fallback);
       } else {
-        const routeLabel = useWarp ? `Cloudflare WARP (port ${warp.getActivePort()})` : 'direct route';
+        const routeLabel = useWarp ? `Cloudflare WARP (port ${currentWarpPort})` : 'direct route';
         console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
       }
 
@@ -1323,12 +1328,13 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
         // Seamlessly hop to next live port that hasn't been tried yet in this request
         const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
+        const livePorts = [warp.basePort, warp.basePort + 1, warp.basePort + 2, warp.basePort + 3].filter(p => warp.portProcesses.has(p));
         if (nextPort !== currentWarpPort && !triedWarpPorts.has(nextPort)) {
           currentWarpPort = nextPort;
           console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
-        } else if (triedWarpPorts.size >= 4) {
-          // All 4 WARP ports burned in this request! Attempt direct route fallback
-          console.warn('[WARP Pool] All 4 WARP tunnel slots in pool hit capacity. Attempting direct host egress lane for Anthropic request...');
+        } else if (triedWarpPorts.size >= livePorts.length || livePorts.every(p => triedWarpPorts.has(p))) {
+          // All active WARP ports burned in this request! Attempt direct route fallback
+          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Attempting direct host egress lane for Anthropic request...');
           useWarp = false;
         } else {
           currentWarpPort = nextPort;
@@ -1379,13 +1385,17 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     }
 
     if (attempt <= maxRetries) {
-      const fallback = getNextFallbackModel(currentModel, triedModels, hasImages);
+      const isRouteError = isRateLimited || isForbidden || isWarpFailure;
+      // On IP rate limits (429/403), keep the requested model intact across all available egress lanes!
+      // Only failover to another model if all egress routes have been exhausted OR if it is a model-specific failure (500/503/404)
+      const shouldTryModelFallback = !isRouteError || (!useWarp && triedWarpPorts.size >= 2);
+      const fallback = shouldTryModelFallback ? getNextFallbackModel(currentModel, triedModels, hasImages) : null;
       if (fallback) {
-        console.log(`[Proxy] Anthropic Model ${currentModel} returned ${attemptResult.statusCode}. Smart failover to ${fallback}...`);
+        console.log(`[Proxy] Anthropic Model ${currentModel} exhausted on routes. Smart failover to ${fallback}...`);
         currentModel = fallback;
         triedModels.add(fallback);
       } else {
-        const routeLabel = useWarp ? `Cloudflare WARP (port ${warp.getActivePort()})` : 'direct route';
+        const routeLabel = useWarp ? `Cloudflare WARP (port ${currentWarpPort})` : 'direct route';
         console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on Anthropic model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
       }
       const backoffMs = Math.min(300 * Math.pow(1.5, attempt - 1) + Math.random() * 200, 2000);

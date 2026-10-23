@@ -142,7 +142,7 @@ export default function Overview({ stats, onRefresh }) {
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', fontSize: '0.8rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', fontSize: '0.8rem', flexWrap: 'wrap' }}>
           <div>
             <span style={{ color: 'var(--muted-foreground)' }}>Uptime: </span>
             <span className="font-mono" style={{ fontWeight: '700', color: 'var(--foreground)' }}>
@@ -153,6 +153,34 @@ export default function Overview({ stats, onRefresh }) {
             <span style={{ color: 'var(--muted-foreground)' }}>Status: </span>
             <span className="badge badge-success">Healthy (100%)</span>
           </div>
+          <button
+            onClick={async () => {
+              if (window.confirm('Reset all historical telemetry counters and start a clean test session?')) {
+                try {
+                  const token = localStorage.getItem('opencode_token');
+                  await fetch('/api/stats/reset', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                  });
+                  if (onRefresh) onRefresh();
+                } catch (e) {
+                  console.error(e);
+                }
+              }
+            }}
+            style={{
+              padding: '0.3rem 0.65rem',
+              fontSize: '0.72rem',
+              fontWeight: '600',
+              background: 'rgba(239, 68, 68, 0.15)',
+              color: '#f87171',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              borderRadius: '6px',
+              cursor: 'pointer'
+            }}
+          >
+            Reset Telemetry
+          </button>
         </div>
       </div>
 

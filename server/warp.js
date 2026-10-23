@@ -42,6 +42,8 @@ class CloudflareWarpManager {
     this.accountPool = [];
     this.isPoolInitializing = false;
     this.cronTimer = null;
+    this.regCooldownUntil = 0;
+    this.lastRegTime = 0;
     this.progress = {
       percent: 0,
       stage: 'idle',
@@ -206,10 +208,16 @@ class CloudflareWarpManager {
    * Generates Curve25519 keypair and registers a free Cloudflare WARP account via official REST API
    */
   async registerCloudflareAccount() {
-    // Throttle registrations to at most once per 6 seconds to prevent Cloudflare Error 1015
+    // Check if Cloudflare API recently returned 1015 ("You are being rate limited")
+    if (this.regCooldownUntil && Date.now() < this.regCooldownUntil) {
+      const waitMin = Math.ceil((this.regCooldownUntil - Date.now()) / 60000);
+      throw new Error(`Cloudflare registration paused due to earlier 1015 rate limit (${waitMin}m remaining). Using pool.`);
+    }
+
+    // Throttle registrations to at most once per 12 seconds to prevent Cloudflare Error 1015
     const now = Date.now();
-    if (this.lastRegTime && (now - this.lastRegTime < 6000)) {
-      const waitMs = 6000 - (now - this.lastRegTime);
+    if (this.lastRegTime && (now - this.lastRegTime < 12000)) {
+      const waitMs = 12000 - (now - this.lastRegTime);
       console.log(`[WARP] Throttling Cloudflare registration to prevent 1015 rate limit (waiting ${Math.round(waitMs / 1000)}s)...`);
       await new Promise(r => setTimeout(r, waitMs));
     }
@@ -247,6 +255,10 @@ class CloudflareWarpManager {
         res.on('data', chunk => body += chunk);
         res.on('end', () => {
           if (res.statusCode < 200 || res.statusCode >= 300) {
+            if (res.statusCode === 429 || body.includes('1015')) {
+              this.regCooldownUntil = Date.now() + (15 * 60 * 1000); // 15-minute backoff
+              console.warn('[WARP] Cloudflare registration rate limit (1015) detected. Pausing new registrations for 15 minutes.');
+            }
             return reject(new Error(`Cloudflare registration failed with HTTP ${res.statusCode}: ${body}`));
           }
           try {
@@ -298,17 +310,22 @@ class CloudflareWarpManager {
   }
 
   async replaceBadAccount(idx) {
+    if (this.regCooldownUntil && Date.now() < this.regCooldownUntil) {
+      console.log(`[WARP Pool] Skipping replacement for account ${idx + 1}: Cloudflare registration in cooldown.`);
+      return null;
+    }
     console.warn(`[WARP Pool] Account ${idx + 1} failed edge connectivity. Purging and registering a fresh account...`);
     try {
       const freshAcc = await this.registerCloudflareAccount();
       freshAcc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
+      freshAcc.ipv4Only = (idx % 2 === 1);
       if (this.accountPool && this.accountPool.length > idx) {
         this.accountPool[idx] = freshAcc;
       } else {
         this.accountPool.push(freshAcc);
       }
       this.saveAccountPool();
-      console.log(`[WARP Pool] Fresh replacement account ${idx + 1} ready on ${freshAcc.endpoint}`);
+      console.log(`[WARP Pool] Fresh replacement account ${idx + 1} ready on ${freshAcc.endpoint} (${freshAcc.ipv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})`);
       return freshAcc;
     } catch (err) {
       console.warn(`[WARP Pool] Could not register replacement account ${idx + 1}:`, err.message);
@@ -330,7 +347,7 @@ class CloudflareWarpManager {
   }
 
   async ensureAccountPool() {
-    if (this.accountPool && this.accountPool.length >= 4) {
+    if (this.accountPool && this.accountPool.length >= 8) {
       return this.accountPool;
     }
 
@@ -342,12 +359,13 @@ class CloudflareWarpManager {
         if (Array.isArray(parsed.accounts) && parsed.accounts.length > 0) {
           this.accountPool = parsed.accounts
             .filter(a => a && a.privateKey && a.peerPublicKey)
-            .map(a => {
+            .map((a, idx) => {
               a.endpoint = this.sanitizeEndpoint(a.endpoint);
+              if (a.ipv4Only === undefined) a.ipv4Only = (idx % 2 === 1);
               return a;
             });
           this.saveAccountPool();
-          if (this.accountPool.length >= 4) return this.accountPool;
+          if (this.accountPool.length >= 8) return this.accountPool;
         }
       }
     } catch (e) {}
@@ -356,6 +374,7 @@ class CloudflareWarpManager {
     const cached = this.loadCachedAccount();
     if (cached && !this.accountPool.some(a => a.accountId === cached.accountId)) {
       cached.endpoint = WARP_ENDPOINTS[0];
+      cached.ipv4Only = false;
       this.accountPool.push(cached);
     }
 
@@ -368,6 +387,7 @@ class CloudflareWarpManager {
     // 4. Otherwise register first account synchronously
     const firstAcc = await this.registerCloudflareAccount();
     firstAcc.endpoint = WARP_ENDPOINTS[0];
+    firstAcc.ipv4Only = false;
     this.accountPool.push(firstAcc);
     this.saveAccountPool();
     this.populatePoolInBackground();
@@ -391,17 +411,24 @@ class CloudflareWarpManager {
     this.isPoolInitializing = true;
 
     try {
-      while (this.accountPool.length < 4) {
-        // Enforce safe 4-second delay so Cloudflare API error 1015 never occurs
-        await new Promise(r => setTimeout(r, 4000));
+      while (this.accountPool.length < 8) {
+        if (this.regCooldownUntil && Date.now() < this.regCooldownUntil) {
+          break;
+        }
+        // Enforce safe 12-second delay so Cloudflare API error 1015 never occurs
+        await new Promise(r => setTimeout(r, 12000));
+        if (this.regCooldownUntil && Date.now() < this.regCooldownUntil) {
+          break;
+        }
         try {
           const idx = this.accountPool.length;
-          console.log(`[WARP Pool] Pre-registering account ${idx + 1}/4 for zero-downtime pool...`);
+          console.log(`[WARP Pool] Pre-registering account ${idx + 1}/8 for zero-downtime pool...`);
           const acc = await this.registerCloudflareAccount();
           acc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
+          acc.ipv4Only = (idx % 2 === 1);
           this.accountPool.push(acc);
           this.saveAccountPool();
-          console.log(`[WARP Pool] Account ${idx + 1}/4 pre-warmed on endpoint ${acc.endpoint}`);
+          console.log(`[WARP Pool] Account ${idx + 1}/8 pre-warmed on endpoint ${acc.endpoint} (${acc.ipv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})`);
         } catch (err) {
           console.warn('[WARP Pool] Pre-warm notice in background pool builder:', err.message);
           break; // Stop if rate limited, will retry on next cycle
@@ -434,7 +461,7 @@ class CloudflareWarpManager {
     // a separate, non-colliding IPv6 egress identity on Cloudflare-hosted targets like opencode.ai.
     const addresses = [];
     if (account.addressV4) addresses.push(`${account.addressV4}/32`);
-    if (account.addressV6) addresses.push(`${account.addressV6}/128`);
+    if (account.addressV6 && !account.ipv4Only) addresses.push(`${account.addressV6}/128`);
     if (addresses.length === 0) addresses.push('172.16.0.2/32');
 
     const endpointHost = this.sanitizeEndpoint(account.endpoint) || 'engage.cloudflareclient.com:2408';
@@ -535,7 +562,8 @@ BindAddress = ${host}:${port}
     }
 
     if (trace && trace.ip) {
-      console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${host}:${port} (warp=on • Egress: ${trace.ip} [${trace.colo || 'Edge'}])`);
+      const ipFamily = trace.ip.includes(':') ? 'IPv6' : 'IPv4';
+      console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${host}:${port} (warp=on • Egress: ${trace.ip} [${ipFamily} • ${trace.colo || 'Edge'}])`);
       this.setProgress(100, 'connected', `Cloudflare WARP Egress Active on ${host}:${port} (warp=on • ${trace.ip})`);
       this.socketAlive = true;
       this.statusCache = null;
@@ -845,9 +873,9 @@ BindAddress = ${host}:${port}
     const pool = this.accountPool || [];
     const offset = (port - this.basePort) % (pool.length || 1);
     if (pool[offset]) {
-      // 10-minute cooldown window for rate-limited account
-      pool[offset]._cooldownUntil = Date.now() + (10 * 60 * 1000);
-      console.log(`[WARP Pool] Slot ${offset + 1} (port ${port}) set to 10-minute rate-limit cooldown.`);
+      // 5-minute cooldown window for rate-limited account
+      pool[offset]._cooldownUntil = Date.now() + (5 * 60 * 1000);
+      console.log(`[WARP Pool] Slot ${offset + 1} (port ${port}) set to 5-minute rate-limit cooldown.`);
     }
   }
 
@@ -901,9 +929,9 @@ BindAddress = ${host}:${port}
           const targetPort = this.basePort + (chosenOffset % 4);
           let account = pool[chosenOffset] || pool[0];
 
-          // If all accounts are on cooldown, replenish chosen slot with a fresh Cloudflare account
-          if (!healthyFound || reason === 'auto_rate_limit') {
-            console.log(`[WARP Pool] Slot ${chosenOffset + 1} (port ${targetPort}) refreshing Cloudflare account...`);
+          // If all accounts are on cooldown, replenish chosen slot ONLY if Cloudflare registration is not in cooldown
+          if (!healthyFound && (!this.regCooldownUntil || Date.now() > this.regCooldownUntil)) {
+            console.log(`[WARP Pool] All accounts on cooldown. Slot ${chosenOffset + 1} (port ${targetPort}) attempting Cloudflare account refresh...`);
             const fresh = await this.replaceBadAccount(chosenOffset);
             if (fresh) account = fresh;
           }

@@ -138,7 +138,7 @@ class OpenCodeCliUpdater {
     return new Promise((resolve) => {
       const options = {
         hostname: 'registry.npmjs.org',
-        path: '/opencode-ai/latest',
+        path: '/@opencode%2Fcli/latest',
         method: 'GET',
         headers: {
           'User-Agent': 'OpenCode2API-Gateway-Agent',

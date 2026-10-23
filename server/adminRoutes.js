@@ -70,6 +70,13 @@ async function handleAdminRoute(req, res, pathname) {
     return sendJson(res, 200, metrics.getStats());
   }
 
+  // Reset Stats / Telemetry
+  if (pathname === '/api/stats/reset' && req.method === 'POST') {
+    metrics.reset();
+    notifications.add('Telemetry Reset', 'Gateway statistics and counters reset to zero.', 'info');
+    return sendJson(res, 200, { success: true, message: 'Telemetry successfully reset.' });
+  }
+
   // Playground Chat
   if (pathname === '/api/playground/chat' && req.method === 'POST') {
     const body = await parseBody(req);

@@ -200,6 +200,24 @@ class MetricsCollector {
     return Math.round(totalDaily / days.length);
   }
 
+  reset() {
+    this.totalRequests = 0;
+    this.successfulRequests = 0;
+    this.failedRequests = 0;
+    this.totalTokens = 0;
+    this.totalPromptTokens = 0;
+    this.totalCompletionTokens = 0;
+    this.totalReasoningTokens = 0;
+    this.dailyTokens = {};
+    this.recentRequests = [];
+    this.history = [];
+    this.modelUsage = {};
+    this.requestTimestamps = [];
+    this.tokenTimestamps = [];
+    this.save();
+    return true;
+  }
+
   getUptimeSeconds() {
     return Math.floor(process.uptime());
   }

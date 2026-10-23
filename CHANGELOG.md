@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.5.1] - 2026-10-24 — Automatic Account Retirement & Stale Pool Purging
+
+### 🚀 Major Highlights
+
+- **Automated Account Retirement on 3x Rate Limit**: Accounts that hit upstream rate limits 3 times are recognized as having exhausted their quota; the gateway automatically purges the burned account, registers a fresh Cloudflare WARP account in the background, and re-arms the live WireProxy port with a new IPv6 address.
+- **Stale Pool Pruning (2-Hour Lifespan)**: Boot sequence and pool loader now automatically discard accounts older than 2 hours from `warp_pool.json`, ensuring the gateway never reuses stale, exhausted accounts across restarts or redeployments.
+- **Dedicated Pool Reset Endpoint (`POST /api/warp/refresh-pool`)**: Added an administrative endpoint to flush cached pool credentials and instantly re-bootstrap 4 clean Cloudflare WARP accounts.
+
+---
+
 ## [2.5.0] - 2026-10-24 — Concurrent 4-Port Pre-Warmed WARP Pool & Zero-Drop Resilience
 
 ### 🚀 Major Highlights

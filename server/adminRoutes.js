@@ -203,6 +203,14 @@ async function handleAdminRoute(req, res, pathname) {
     return sendJson(res, 200, { success: ok, ...status });
   }
 
+  // Cloudflare WARP: Flush & Re-arm Account Pool
+  if (pathname === '/api/warp/refresh-pool' && req.method === 'POST') {
+    const ok = await warp.refreshPool();
+    const status = await warp.getStatus();
+    notifications.add('WARP Pool Refreshed', 'Flushed old accounts and generated fresh Cloudflare WARP credentials.', 'info');
+    return sendJson(res, 200, { success: ok, ...status });
+  }
+
   // Cloudflare WARP: Connect & Configure Proxy Mode
   if (pathname === '/api/warp/connect' && req.method === 'POST') {
     const body = await parseBody(req);

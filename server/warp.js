@@ -353,13 +353,15 @@ class CloudflareWarpManager {
       const freshAcc = await this.registerCloudflareAccount();
       freshAcc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
       freshAcc.ipv4Only = false;
+      freshAcc._burnCount = 0;
+      freshAcc._cooldownUntil = 0;
       if (this.accountPool && this.accountPool.length > idx) {
         this.accountPool[idx] = freshAcc;
       } else {
         this.accountPool.push(freshAcc);
       }
       this.saveAccountPool();
-      console.log(`[WARP Pool] Fresh replacement account ${idx + 1} ready on ${freshAcc.endpoint} (Dual-Stack IPv6)`);
+      console.log(`[WARP Pool] Fresh replacement account ${idx + 1} ready on ${freshAcc.endpoint} (Dual-Stack IPv6: ${freshAcc.addressV6})`);
       return freshAcc;
     } catch (err) {
       console.warn(`[WARP Pool] Could not register replacement account ${idx + 1}:`, err.message);
@@ -391,13 +393,22 @@ class CloudflareWarpManager {
         const raw = fs.readFileSync(POOL_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed.accounts) && parsed.accounts.length > 0) {
-          this.accountPool = parsed.accounts
-            .filter(a => a && a.privateKey && a.peerPublicKey)
-            .map((a, idx) => {
+          const now = Date.now();
+          const MAX_AGE_MS = 2 * 60 * 60 * 1000; // 2 hours max age
+          const freshAccounts = parsed.accounts
+            .filter(a => {
+              if (!a || !a.privateKey || !a.peerPublicKey) return false;
+              const regTime = new Date(a.registeredAt || 0).getTime();
+              if (now - regTime > MAX_AGE_MS) return false; // Auto-prune accounts older than 2h
+              if ((a._burnCount || 0) >= 3) return false; // Auto-prune accounts burned 3+ times
+              return true;
+            })
+            .map((a) => {
               a.endpoint = this.sanitizeEndpoint(a.endpoint);
               a.ipv4Only = false;
               return a;
             });
+          this.accountPool = freshAccounts;
           this.saveAccountPool();
           if (this.accountPool.length >= 8) return this.accountPool;
         }
@@ -928,9 +939,26 @@ BindAddress = ${host}:${port}
     const procInfo = this.portProcesses.get(port);
     const account = procInfo?.account;
     if (account) {
-      // 45-second fast cooldown window for rate-limited account (OpenCode sliding window resets quickly)
+      // 45-second fast cooldown window for rate-limited account
       account._cooldownUntil = Date.now() + (45 * 1000);
-      console.log(`[WARP Pool] Account (${account.accountId?.slice(0, 8)}...) on port ${port} set to 45s rate-limit cooldown.`);
+      account._burnCount = (account._burnCount || 0) + 1;
+      console.log(`[WARP Pool] Account (${account.accountId?.slice(0, 8)}...) on port ${port} set to 45s cooldown (burnCount: ${account._burnCount}).`);
+
+      // If an account gets burned 3 times, replace it with a fresh account in the background
+      if (account._burnCount >= 3) {
+        const pool = this.accountPool || [];
+        const idx = pool.findIndex(a => a.accountId === account.accountId);
+        if (idx !== -1) {
+          console.log(`[WARP Pool] Slot ${idx + 1} reached burn threshold. Auto-retiring and generating fresh account...`);
+          this.replaceBadAccount(idx).then((freshAcc) => {
+            if (freshAcc && this.portProcesses.has(port)) {
+              this.startWireproxy(freshAcc, port)
+                .then(() => console.log(`[WARP Pool] Port ${port} re-armed with fresh account ${freshAcc.accountId.slice(0, 8)}!`))
+                .catch(err => console.warn(`[WARP Pool] Port ${port} re-arm notice:`, err.message));
+            }
+          }).catch(() => {});
+        }
+      }
     } else {
       const pool = this.accountPool || [];
       const offset = (port - this.basePort) % (pool.length || 1);
@@ -939,6 +967,17 @@ BindAddress = ${host}:${port}
         console.log(`[WARP Pool] Slot ${offset + 1} (port ${port}) set to 45s rate-limit cooldown.`);
       }
     }
+  }
+
+  async refreshPool() {
+    console.log('[WARP Pool] Flushing old account pool and registering fresh credentials...');
+    this.accountPool = [];
+    try {
+      if (fs.existsSync(POOL_FILE)) fs.unlinkSync(POOL_FILE);
+      if (fs.existsSync(ACCOUNT_FILE)) fs.unlinkSync(ACCOUNT_FILE);
+    } catch (e) {}
+    this.regCooldownUntil = 0;
+    return await this.autoBootstrap(true);
   }
 
   async rotateKeys(reason = 'manual') {

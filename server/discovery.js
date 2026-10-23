@@ -114,14 +114,12 @@ class ModelDiscoveryService {
   }
 
   /**
-   * Fetch JSON from HTTPS endpoint.
+   * Fetch JSON from HTTPS endpoint with resilient WARP-to-direct auto-fallback.
    */
   async fetchJson(url, headers = {}) {
-    return new Promise((resolve, reject) => {
+    const doFetch = (useWarpAgent) => new Promise((resolve, reject) => {
       const u = new URL(url);
-      const warpMode = config.get('warp_mode') || 'auto';
-      const useWarp = warpMode !== 'disabled' && warp.isReady();
-      const agent = useWarp ? warp.getWarpAgent(config.get('warp_port'), config.get('warp_host')) : undefined;
+      const agent = useWarpAgent ? warp.getWarpAgent(warp.getActivePort(), config.get('warp_host')) : undefined;
 
       const req = https.request({
         hostname: u.hostname,
@@ -159,6 +157,19 @@ class ModelDiscoveryService {
       });
       req.end();
     });
+
+    const warpMode = config.get('warp_mode') || 'auto';
+    const shouldUseWarp = warpMode !== 'disabled' && warp.isReady();
+
+    try {
+      return await doFetch(shouldUseWarp);
+    } catch (err) {
+      if (shouldUseWarp) {
+        // Fallback to direct route if WARP fetch failed
+        return await doFetch(false);
+      }
+      throw err;
+    }
   }
 
   /**

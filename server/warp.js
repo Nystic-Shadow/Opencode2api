@@ -13,10 +13,10 @@ const POOL_FILE = path.join(DATA_DIR, 'warp_pool.json');
 const WIREPROXY_CONF = path.join(DATA_DIR, 'wireproxy.conf');
 
 const WARP_ENDPOINTS = [
+  'engage.cloudflareclient.com:2408',
   '162.159.192.1:2408',
-  '188.114.96.1:2408',
-  '162.159.193.1:2408',
-  '188.114.97.1:2408'
+  'engage.cloudflareclient.com:500',
+  '162.159.192.1:4500'
 ];
 
 class CloudflareWarpManager {
@@ -279,12 +279,22 @@ class CloudflareWarpManager {
     });
   }
 
+  sanitizeEndpoint(ep) {
+    if (!ep || typeof ep !== 'string') return 'engage.cloudflareclient.com:2408';
+    // Clean up any known invalid / non-responsive endpoints
+    if (ep.includes('188.114.') || ep.includes('162.159.193.')) {
+      return 'engage.cloudflareclient.com:2408';
+    }
+    return ep;
+  }
+
   loadCachedAccount() {
     try {
       if (fs.existsSync(ACCOUNT_FILE)) {
         const raw = fs.readFileSync(ACCOUNT_FILE, 'utf-8');
         const acc = JSON.parse(raw);
         if (!acc.privateKey || !acc.peerPublicKey) return null;
+        acc.endpoint = this.sanitizeEndpoint(acc.endpoint);
         return acc;
       }
     } catch (e) {}
@@ -302,7 +312,13 @@ class CloudflareWarpManager {
         const raw = fs.readFileSync(POOL_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed.accounts) && parsed.accounts.length > 0) {
-          this.accountPool = parsed.accounts.filter(a => a && a.privateKey && a.peerPublicKey);
+          this.accountPool = parsed.accounts
+            .filter(a => a && a.privateKey && a.peerPublicKey)
+            .map(a => {
+              a.endpoint = this.sanitizeEndpoint(a.endpoint);
+              return a;
+            });
+          this.saveAccountPool();
           if (this.accountPool.length >= 4) return this.accountPool;
         }
       }
@@ -390,16 +406,17 @@ class CloudflareWarpManager {
     if (account.addressV4) addresses.push(`${account.addressV4}/32`);
     if (addresses.length === 0) addresses.push('172.16.0.2/32');
 
-    const endpointHost = account.endpoint || 'engage.cloudflareclient.com:2408';
+    const endpointHost = this.sanitizeEndpoint(account.endpoint) || 'engage.cloudflareclient.com:2408';
 
     const confContent = `[Interface]
 PrivateKey = ${account.privateKey}
 Address = ${addresses.join(', ')}
-DNS = 1.1.1.1
+DNS = 1.1.1.1, 8.8.8.8
 
 [Peer]
 PublicKey = ${account.peerPublicKey}
 Endpoint = ${endpointHost}
+AllowedIPs = 0.0.0.0/0, ::/0
 KeepAlive = 25
 
 [Socks5]
@@ -410,7 +427,7 @@ BindAddress = ${host}:${port}
     fs.writeFileSync(confPath, confContent);
 
     this.setProgress(75, 'launching_tunnel', `Starting userspace WireProxy SOCKS5 daemon on ${host}:${port}...`);
-    console.log(`[WARP] Starting userspace WireProxy SOCKS5 daemon on ${host}:${port}...`);
+    console.log(`[WARP] Starting userspace WireProxy SOCKS5 daemon on ${host}:${port} (${endpointHost})...`);
 
     let procExited = false;
     let procExitCode = null;
@@ -452,8 +469,9 @@ BindAddress = ${host}:${port}
 
     this.setProgress(85, 'verifying_socket', `Probing SOCKS5 handshake on ${host}:${port}...`);
 
-    // Poll until SOCKS5 socket answers handshake (up to 8 seconds)
+    // 1. Poll until local SOCKS5 socket answers handshake (up to 8 seconds)
     const startTime = Date.now();
+    let socketLive = false;
     while (Date.now() - startTime < 8000) {
       if (procExited) {
         throw new Error(`WireProxy process for port ${port} exited prematurely with code ${procExitCode} (signal: ${procExitSignal})`);
@@ -464,17 +482,40 @@ BindAddress = ${host}:${port}
       }
       const alive = await this.probeSocks5(host, port);
       if (alive) {
-        console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${host}:${port} (warp=on)`);
-        this.setProgress(100, 'connected', `Cloudflare WARP Egress Active on ${host}:${port} (warp=on)`);
-        this.socketAlive = true;
-        this.statusCache = null;
-        return proc;
+        socketLive = true;
+        break;
       }
     }
 
+    if (!socketLive) {
+      try { proc.kill('SIGTERM'); } catch (e) {}
+      this.portProcesses.delete(port);
+      throw new Error(`WireProxy launched on ${host}:${port} but SOCKS5 port failed to answer within 8s`);
+    }
+
+    // 2. Poll for genuine Cloudflare Edge egress verification (trace)
+    this.setProgress(90, 'verifying_tunnel', `Verifying edge egress connectivity on ${host}:${port} (${endpointHost})...`);
+    let trace = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (procExited) break;
+      trace = await this.probeEgressTrace(port);
+      if (trace && trace.ip) break;
+      await new Promise(r => setTimeout(r, 600));
+    }
+
+    if (trace && trace.ip) {
+      console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${host}:${port} (warp=on • Egress: ${trace.ip} [${trace.colo || 'Edge'}])`);
+      this.setProgress(100, 'connected', `Cloudflare WARP Egress Active on ${host}:${port} (warp=on • ${trace.ip})`);
+      this.socketAlive = true;
+      this.statusCache = null;
+      return proc;
+    }
+
+    // If edge verification failed on this endpoint, terminate process and throw so rotate/bootstrap can try alternative endpoint
+    console.warn(`[WARP] WireProxy on ${host}:${port} answered SOCKS5, but edge egress trace failed on ${endpointHost}`);
     try { proc.kill('SIGTERM'); } catch (e) {}
     this.portProcesses.delete(port);
-    throw new Error(`WireProxy launched on ${host}:${port} but SOCKS5 port failed to answer within 8s`);
+    throw new Error(`WireProxy tunnel on ${host}:${port} (${endpointHost}) failed edge egress check (code: 4 / unreachable)`);
   }
 
   /**
@@ -547,8 +588,30 @@ BindAddress = ${host}:${port}
         this.setProgress(30, 'preparing_keys', 'Loading pre-warmed tunnel pool credentials...');
         const pool = await this.ensureAccountPool();
         const account = pool[0];
-        account.endpoint = account.endpoint || WARP_ENDPOINTS[0];
-        await this.startWireproxy(account, this.basePort);
+        const candidateEndpoints = [
+          this.sanitizeEndpoint(account.endpoint),
+          'engage.cloudflareclient.com:2408',
+          '162.159.192.1:2408',
+          'engage.cloudflareclient.com:500'
+        ].filter((v, i, a) => v && a.indexOf(v) === i);
+
+        let started = false;
+        let lastErr = null;
+        for (const ep of candidateEndpoints) {
+          account.endpoint = ep;
+          try {
+            await this.startWireproxy(account, this.basePort);
+            started = true;
+            break;
+          } catch (err) {
+            lastErr = err;
+            console.warn(`[WARP] Bootstrap candidate endpoint ${ep} failed:`, err.message);
+            await new Promise(r => setTimeout(r, 400));
+          }
+        }
+
+        if (!started) throw lastErr;
+
         this.activePort = this.basePort;
         this.startAutoRotateCron();
         this.setProgress(100, 'connected', `Cloudflare WARP Connected on ${host}:${this.basePort} (warp=on)`);
@@ -748,8 +811,8 @@ BindAddress = ${host}:${port}
     }
 
     // 2. Debounce window:
-    // If rate-limited, allow rotation after at least 1.5 seconds, but don't trap the user in long cooldowns.
-    const minDebounce = (reason === 'auto_rate_limit' || reason === 'manual' || reason === 'scheduled_cron') ? 1500 : this.rotationCooldownMs;
+    // If rate-limited or recovering, allow rotation after at least 1.0 second, but don't trap the user in long cooldowns.
+    const minDebounce = (reason === 'auto_rate_limit' || reason === 'manual' || reason === 'scheduled_cron' || reason === 'connection_failure') ? 1000 : this.rotationCooldownMs;
     if (now - this.lastRotationTime < minDebounce) {
       const waitRemaining = Math.round((minDebounce - (now - this.lastRotationTime)) / 1000);
       console.log(`[WARP] Key rotation in debounce window (${waitRemaining}s remaining). Active tunnel on port ${this.getActivePort()} is ready.`);
@@ -767,13 +830,34 @@ BindAddress = ${host}:${port}
           const pool = await this.ensureAccountPool();
           const portOffset = (nextPort - this.basePort) % pool.length;
           const account = pool[portOffset] || pool[0];
-          const endpoint = account.endpoint || WARP_ENDPOINTS[portOffset % WARP_ENDPOINTS.length];
-          account.endpoint = endpoint;
 
-          console.log(`[WARP] Initiating zero-downtime hot-swap rotation (${reason}) to port ${nextPort} (${endpoint})...`);
-          this.setProgress(50, 'hot_swapping', `Launching pre-warmed WireProxy tunnel on port ${nextPort} (${endpoint})...`);
+          const candidateEndpoints = [
+            this.sanitizeEndpoint(account.endpoint),
+            'engage.cloudflareclient.com:2408',
+            '162.159.192.1:2408',
+            'engage.cloudflareclient.com:500'
+          ].filter((v, i, a) => v && a.indexOf(v) === i);
 
-          await this.startWireproxy(account, nextPort);
+          let started = false;
+          let lastErr = null;
+          for (const ep of candidateEndpoints) {
+            account.endpoint = ep;
+            console.log(`[WARP] Initiating zero-downtime hot-swap rotation (${reason}) to port ${nextPort} (${ep})...`);
+            this.setProgress(50, 'hot_swapping', `Launching pre-warmed WireProxy tunnel on port ${nextPort} (${ep})...`);
+            try {
+              await this.startWireproxy(account, nextPort);
+              started = true;
+              break;
+            } catch (err) {
+              lastErr = err;
+              console.warn(`[WARP] Rotation candidate endpoint ${ep} on port ${nextPort} failed:`, err.message);
+              await new Promise(r => setTimeout(r, 400));
+            }
+          }
+
+          if (!started) {
+            throw lastErr || new Error(`Failed to establish working WireProxy tunnel on port ${nextPort}`);
+          }
 
           // Hot-swap active port instantaneously without dropping in-flight traffic
           const oldPort = currentPort;
@@ -787,7 +871,7 @@ BindAddress = ${host}:${port}
 
           this.lastRotationTime = Date.now();
           this.setProgress(100, 'connected', `Cloudflare WARP hot-swapped to port ${nextPort} with fresh edge session (warp=on)`);
-          console.log(`[WARP] Zero-downtime hot-swap complete! Traffic routed to port ${nextPort} (${endpoint}, warp=on)`);
+          console.log(`[WARP] Zero-downtime hot-swap complete! Traffic routed to port ${nextPort} (${account.endpoint}, warp=on)`);
           return true;
         }
 
@@ -854,6 +938,7 @@ BindAddress = ${host}:${port}
    * Robust handshake with strict timeout cleanup to prevent socket destruction during inference.
    */
   createSocks5Connection(targetHost, targetPort, proxyHost, proxyPort) {
+    const self = this;
     const pHost = proxyHost || config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const pPort = proxyPort || this.getActivePort();
 
@@ -879,6 +964,10 @@ BindAddress = ${host}:${port}
             cleanupHandshake();
             socket.destroy();
             resolved = true;
+            if (pPort === self.getActivePort()) {
+              self.socketAlive = false;
+              self.statusCache = null;
+            }
             return reject(new Error('SOCKS5 auth negotiation failed with WARP daemon'));
           }
           // CONNECT request: [VER=5, CMD=1, RSV=0, ATYP=3 (DOMAIN), LEN, ...domain, PORT_HI, PORT_LO]
@@ -895,6 +984,10 @@ BindAddress = ${host}:${port}
             cleanupHandshake();
             socket.destroy();
             resolved = true;
+            if (pPort === self.getActivePort()) {
+              self.socketAlive = false;
+              self.statusCache = null;
+            }
             return reject(new Error(`SOCKS5 WARP tunnel rejected target: ${targetHost}, code: ${data[1]}`));
           }
           // Handshake complete: clean up temporary listeners & clear handshake timeout

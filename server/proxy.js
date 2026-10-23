@@ -28,35 +28,54 @@ const routeHealth = {
   directDegradedUntil: 0,
   directConsecutiveFailures: 0,
   directLastReason: '',
+  warpDegradedUntil: 0,
+  warpConsecutiveFailures: 0,
+  warpLastReason: '',
 
   markDirectDegraded(reason = 'upstream error') {
-    // Keep degraded for 24 hours so subsequent requests immediately route through WARP without delay
-    this.directDegradedUntil = Date.now() + (24 * 60 * 60 * 1000);
+    // Keep degraded for 3 minutes so subsequent requests immediately route through WARP without long lockouts
+    this.directDegradedUntil = Date.now() + (3 * 60 * 1000);
     this.directConsecutiveFailures++;
     this.directLastReason = String(reason);
     console.warn(`[RouteManager] Direct route degraded (${reason}). Auto-promoting Cloudflare WARP as primary egress...`);
   },
 
   markDirectHealthy() {
-    if (this.directConsecutiveFailures <= 1) {
-      this.directDegradedUntil = 0;
-      this.directConsecutiveFailures = 0;
-    }
+    this.directDegradedUntil = 0;
+    this.directConsecutiveFailures = 0;
   },
 
   isDirectDegraded() {
     return Date.now() < this.directDegradedUntil;
   },
 
+  markWarpDegraded(reason = 'warp error') {
+    this.warpConsecutiveFailures++;
+    this.warpLastReason = String(reason);
+    // If 2 or more consecutive WARP failures, temporarily degrade WARP for 45 seconds to let direct route serve traffic
+    if (this.warpConsecutiveFailures >= 2) {
+      this.warpDegradedUntil = Date.now() + 45000;
+      console.warn(`[RouteManager] Cloudflare WARP route degraded (${reason}). Auto-failing over to direct route for 45s...`);
+    }
+  },
+
+  markWarpHealthy() {
+    this.warpDegradedUntil = 0;
+    this.warpConsecutiveFailures = 0;
+  },
+
+  isWarpDegraded() {
+    return Date.now() < this.warpDegradedUntil;
+  },
+
   shouldUseWarp(attempt = 1) {
     const warpMode = config.get('warp_mode') || 'auto';
-    if (warpMode === 'disabled') return false;
+    if (warpMode === 'disabled' || warpMode === 'never') return false;
+    if (this.isWarpDegraded()) return false;
     if (!warp.isReady()) return false;
     if (warpMode === 'always') return true;
 
-    // In 'auto' mode:
-    // When Cloudflare WARP is ready & answering, prefer it as high-capacity residential egress!
-    // Also if direct route is degraded, or attempt > 1, use WARP.
+    // In 'auto' mode: prefer WARP when healthy & ready
     return true;
   }
 };
@@ -261,11 +280,12 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const triedModels = new Set([currentModel]);
   const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 2;
   const requestTimeout = config.get('request_timeout_ms') || 60000;
+  let requestWarpFailed = false;
   let useWarp = routeHealth.shouldUseWarp(1);
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
-      useWarp = routeHealth.shouldUseWarp(attempt);
+      useWarp = requestWarpFailed ? false : routeHealth.shouldUseWarp(attempt);
     }
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const sessionId = identity.generateCanonicalSessionId();
@@ -349,7 +369,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       if (!useWarp) {
         routeHealth.markDirectHealthy();
       } else {
-        routeHealth.warpConsecutiveFailures = 0;
+        routeHealth.markWarpHealthy();
       }
 
       // Set fallback headers if auto-failover occurred
@@ -551,8 +571,10 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     // If WARP proxy failed with network/socket error, fallback to direct route
     if (isWarpFailure) {
       console.warn(`[Proxy] WARP connection error (${attemptResult.body}), falling back to direct route for this attempt...`);
+      requestWarpFailed = true;
       useWarp = false;
-      routeHealth.warpConsecutiveFailures++;
+      routeHealth.markWarpDegraded(attemptResult.body);
+      warp.rotateKeys('connection_failure').catch(() => {});
     } else if (isRateLimited || isForbidden) {
       if (useWarp) {
         // WARP egress IP hit free-tier rate limit or was blocked by OpenCode!
@@ -566,7 +588,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         // Direct route hit 429 or 403!
         console.warn(`[Proxy] Direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Auto-promoting Cloudflare WARP as primary egress...`);
         routeHealth.markDirectDegraded(statusCode);
-        if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
+        if (warp.isReady() && !routeHealth.isWarpDegraded() && config.get('warp_mode') !== 'disabled') {
           useWarp = true;
         } else if (config.get('warp_mode') !== 'disabled') {
           warp.autoBootstrap().catch(() => {});
@@ -575,7 +597,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     } else if (!useWarp) {
       // Direct route failed with other error
       routeHealth.markDirectDegraded(statusCode || attemptResult.body);
-      if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
+      if (warp.isReady() && !routeHealth.isWarpDegraded() && config.get('warp_mode') !== 'disabled') {
         useWarp = true;
       }
     }
@@ -780,11 +802,12 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const triedModels = new Set([currentModel]);
   const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 2;
   const requestTimeout = config.get('request_timeout_ms') || 60000;
+  let requestWarpFailed = false;
   let useWarp = routeHealth.shouldUseWarp(1);
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (attempt > 1) {
-      useWarp = routeHealth.shouldUseWarp(attempt);
+      useWarp = requestWarpFailed ? false : routeHealth.shouldUseWarp(attempt);
     }
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const sessionId = identity.generateCanonicalSessionId();
@@ -867,7 +890,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       if (!useWarp) {
         routeHealth.markDirectHealthy();
       } else {
-        routeHealth.warpConsecutiveFailures = 0;
+        routeHealth.markWarpHealthy();
       }
 
       if (resolvedModel !== requestedModel) {
@@ -1208,8 +1231,10 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     // If WARP proxy failed with network/socket error, fallback to direct route
     if (isWarpFailure) {
       console.warn(`[Proxy] Anthropic WARP connection error (${attemptResult.body}), falling back to direct route for this attempt...`);
+      requestWarpFailed = true;
       useWarp = false;
-      routeHealth.warpConsecutiveFailures++;
+      routeHealth.markWarpDegraded(attemptResult.body);
+      warp.rotateKeys('connection_failure').catch(() => {});
     } else if (isRateLimited || isForbidden) {
       if (useWarp) {
         // WARP egress IP hit free-tier rate limit or was blocked by OpenCode!
@@ -1223,7 +1248,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         // Direct route hit 429 or 403!
         console.warn(`[Proxy] Anthropic direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Auto-promoting Cloudflare WARP as primary egress...`);
         routeHealth.markDirectDegraded(statusCode);
-        if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
+        if (warp.isReady() && !routeHealth.isWarpDegraded() && config.get('warp_mode') !== 'disabled') {
           useWarp = true;
         } else if (config.get('warp_mode') !== 'disabled') {
           warp.autoBootstrap().catch(() => {});
@@ -1232,7 +1257,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     } else if (!useWarp) {
       // Direct route failed with other error
       routeHealth.markDirectDegraded(statusCode || attemptResult.body);
-      if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
+      if (warp.isReady() && !routeHealth.isWarpDegraded() && config.get('warp_mode') !== 'disabled') {
         useWarp = true;
       }
     }

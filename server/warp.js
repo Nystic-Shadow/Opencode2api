@@ -496,13 +496,14 @@ class CloudflareWarpManager {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed.accounts) && parsed.accounts.length > 0) {
           const now = Date.now();
-          const MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes max age: automatically prune stale accounts
+          const MAX_AGE_MS = 15 * 60 * 1000; // 15 minutes max age: automatically prune stale accounts
           const freshAccounts = parsed.accounts
             .filter(a => {
               if (!a || !a.privateKey || !a.peerPublicKey) return false;
               const regTime = new Date(a.registeredAt || 0).getTime();
-              if (now - regTime > MAX_AGE_MS) return false; // Auto-prune accounts older than 30m
+              if (now - regTime > MAX_AGE_MS) return false; // Auto-prune accounts older than 15m
               if ((a._burnCount || 0) >= 1) return false; // Auto-prune accounts burned even once on reload
+              if (a._cooldownUntil && now < a._cooldownUntil) return false; // Discard accounts on cooldown
               return true;
             })
             .map((a, idx) => {
@@ -628,19 +629,20 @@ class CloudflareWarpManager {
     // Ensure port is completely free and clean before spawning!
     await this.forceKillPort(port);
 
-    // Ultra-reliable Pure IPv4 egress mode:
-    // Shared Cloudflare WARP IPv6 subnets in some regions (such as Singapore) hit shared rate limits.
-    // Pure IPv4 routing (AllowedIPs = 0.0.0.0/0, DNS = 1.1.1.1, 8.8.8.8) forces WireProxy through
-    // Cloudflare's massive 104.28.x.x IPv4 pool, completely bypassing IPv6 subnet exhaustion.
-    this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port} (Clean IPv4 Egress)...`);
+    // Diversified Dual-Pool Architecture:
+    // Even ports (40000, 40002) = Dual-Stack IPv6 (AllowedIPs = 0.0.0.0/0, ::/0 with dedicated IPv6 address)
+    // Odd ports (40001, 40003) = Pure IPv4 (AllowedIPs = 0.0.0.0/0 to route via Cloudflare's 104.28.x.x IPv4 pool)
+    const isIpv4Only = (port % 2 !== 0);
+    this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port} (${isIpv4Only ? 'Pure IPv4' : 'Dual-Stack IPv6'})...`);
 
     const addresses = [];
     if (account.addressV4) addresses.push(`${account.addressV4}/32`);
+    if (!isIpv4Only && account.addressV6) addresses.push(`${account.addressV6}/128`);
     if (addresses.length === 0) addresses.push('172.16.0.2/32');
 
     const endpointHost = this.sanitizeEndpoint(account.endpoint) || '162.159.192.1:2408';
-    const dnsServers = '1.1.1.1, 8.8.8.8';
-    const allowedIps = '0.0.0.0/0';
+    const dnsServers = isIpv4Only ? '1.1.1.1, 8.8.8.8' : '1.1.1.1, 8.8.8.8, 2606:4700:4700::1111';
+    const allowedIps = isIpv4Only ? '0.0.0.0/0' : '0.0.0.0/0, ::/0';
 
     const confContent = `[Interface]
 PrivateKey = ${account.privateKey}
@@ -1169,21 +1171,21 @@ BindAddress = ${host}:${port}
 
           let account = pool[chosenOffset] || pool[0];
 
-          // If all accounts are on cooldown, pick the slot closest to cooldown expiration
+          // If all accounts in pool are on cooldown, immediately register a brand new account!
           if (!healthyFound) {
-            let lowestIdx = 0;
-            let lowestCd = Infinity;
-            for (let i = 0; i < pool.length; i++) {
-              const cd = pool[i]._cooldownUntil || 0;
-              if (cd < lowestCd) {
-                lowestCd = cd;
-                lowestIdx = i;
-              }
+            console.log('[WARP Pool] All accounts in pool are on cooldown. Registering brand new Cloudflare WARP account...');
+            try {
+              account = await this.registerCloudflareAccount();
+              account.endpoint = WARP_ENDPOINTS[Math.floor(Math.random() * WARP_ENDPOINTS.length)];
+              account._burnCount = 0;
+              account._cooldownUntil = 0;
+              this.accountPool.unshift(account);
+              if (this.accountPool.length > 10) this.accountPool.pop();
+              this.saveAccountPool();
+            } catch (regErr) {
+              console.warn('[WARP Pool] Emergency registration notice:', regErr.message);
+              account = pool[0];
             }
-            chosenOffset = lowestIdx;
-            account = pool[chosenOffset];
-            const waitSec = Math.max(0, Math.ceil((lowestCd - Date.now()) / 1000));
-            console.log(`[WARP Pool] Cycling pool: selecting slot ${chosenOffset + 1} (${waitSec}s cooldown remaining).`);
           }
 
           const candidateEndpoints = [

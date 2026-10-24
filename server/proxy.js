@@ -804,17 +804,17 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         warp.markAccountBurned(currentWarpPort, retryAfterSec);
         triedWarpPorts.add(currentWarpPort);
 
-        const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
-        if (nextPort && !triedWarpPorts.has(nextPort)) {
-          currentWarpPort = nextPort;
-          activeRoute = { type: 'warp', port: nextPort, proxy: null };
-          console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
+        // Instant failover to verified clean proxy outside Cloudflare's Anycast ASN
+        const bestScraped = proxyScraper.getBestProxy();
+        if (bestScraped) {
+          console.log(`[RouteManager] 🚀 Cloudflare WARP IP rate-limited. Instant zero-downtime failover to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (latency: ${bestScraped.latency}ms)`);
+          activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
         } else {
-          // All active WARP slots burned! Instant zero-downtime failover to verified clean proxy pool!
-          const bestScraped = proxyScraper.getBestProxy();
-          if (bestScraped) {
-            console.log(`[RouteManager] 🚀 Cloudflare WARP pool at capacity. Instant failover to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (latency: ${bestScraped.latency}ms)`);
-            activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
+          const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
+          if (nextPort && !triedWarpPorts.has(nextPort)) {
+            currentWarpPort = nextPort;
+            activeRoute = { type: 'warp', port: nextPort, proxy: null };
+            console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
           } else {
             console.warn('[WARP Pool] All active slots hit capacity. Rotating keys...');
             warp.rotateKeys('auto_rate_limit').catch(() => {});
@@ -1612,17 +1612,17 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         warp.markAccountBurned(currentWarpPort, retryAfterSec);
         triedWarpPorts.add(currentWarpPort);
 
-        const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
-        if (nextPort && !triedWarpPorts.has(nextPort)) {
-          currentWarpPort = nextPort;
-          activeRoute = { type: 'warp', port: nextPort, proxy: null };
-          console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
+        // Instant failover to verified clean proxy outside Cloudflare's Anycast ASN
+        const bestScraped = proxyScraper.getBestProxy();
+        if (bestScraped) {
+          console.log(`[RouteManager] 🚀 Cloudflare WARP IP rate-limited. Instant Anthropic failover to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (latency: ${bestScraped.latency}ms)`);
+          activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
         } else {
-          // All active WARP slots burned! Instant zero-downtime failover to verified clean proxy pool!
-          const bestScraped = proxyScraper.getBestProxy();
-          if (bestScraped) {
-            console.log(`[RouteManager] 🚀 Cloudflare WARP pool at capacity. Instant Anthropic failover to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (latency: ${bestScraped.latency}ms)`);
-            activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
+          const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
+          if (nextPort && !triedWarpPorts.has(nextPort)) {
+            currentWarpPort = nextPort;
+            activeRoute = { type: 'warp', port: nextPort, proxy: null };
+            console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
           } else {
             console.warn('[WARP Pool] All active slots hit capacity. Rotating keys...');
             warp.rotateKeys('auto_rate_limit').catch(() => {});

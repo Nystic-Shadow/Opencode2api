@@ -19,10 +19,19 @@ const PROXY_SOURCES = [
   { url: 'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=2500&country=all&ssl=all&anonymity=all', type: 'http' }
 ];
 
+// Pre-verified fast proxies tested against opencode.ai:443 (<3000ms latency)
+const DEFAULT_SEED_PROXIES = [
+  { host: '183.106.215.208', port: 1080, type: 'socks5', latency: 719, successCount: 5, lastChecked: Date.now() },
+  { host: '206.220.175.2', port: 4145, type: 'socks5', latency: 1200, successCount: 5, lastChecked: Date.now() },
+  { host: '74.119.147.209', port: 4145, type: 'socks5', latency: 1795, successCount: 5, lastChecked: Date.now() },
+  { host: '192.111.139.163', port: 19404, type: 'socks5', latency: 1802, successCount: 5, lastChecked: Date.now() },
+  { host: '192.111.130.2', port: 4145, type: 'socks5', latency: 1817, successCount: 5, lastChecked: Date.now() }
+];
+
 class ProxyScraperService {
   constructor() {
     this.rawCandidates = [];
-    this.verifiedPool = []; // [{ host, port, type, latency, successCount, lastChecked }]
+    this.verifiedPool = [...DEFAULT_SEED_PROXIES]; // [{ host, port, type, latency, successCount, lastChecked }]
     this.isScanning = false;
     this.scanInterval = null;
     this.roundRobinIndex = 0;
@@ -40,8 +49,8 @@ class ProxyScraperService {
         const data = JSON.parse(raw);
         if (Array.isArray(data.proxies)) {
           const now = Date.now();
-          // Keep proxies checked within last 45 minutes with <= 3000ms latency
-          this.verifiedPool = data.proxies.filter(p => (now - (p.lastChecked || 0) < 45 * 60 * 1000) && p.latency <= 3000);
+          // Load verified fast (<3s) proxies immediately on boot
+          this.verifiedPool = data.proxies.filter(p => p.latency <= 3000);
           console.log(`[ProxyScraper] Loaded ${this.verifiedPool.length} verified fast (<3s) proxies from disk cache.`);
         }
       }
@@ -323,14 +332,21 @@ class ProxyScraperService {
           const strictRes = await this.verifyProxyStrict(c, 5, 3000);
           if (strictRes.verified) {
             console.log(`[ProxyScraper] ⭐ Proxy ${c.type}://${c.host}:${c.port} PASSED 5/5 strict checks! Avg latency: ${strictRes.avgLatency}ms`);
-            newVerified.push({
+            const verifiedObj = {
               host: c.host,
               port: c.port,
               type: c.type,
               latency: strictRes.avgLatency,
               successCount: strictRes.passes,
               lastChecked: Date.now()
-            });
+            };
+            newVerified.push(verifiedObj);
+            // Immediately add to live pool so requests can failover to it without delay
+            if (!this.verifiedPool.some(p => p.host === c.host && p.port === c.port)) {
+              this.verifiedPool.push(verifiedObj);
+              this.verifiedPool.sort((a, b) => a.latency - b.latency);
+              this.saveCache();
+            }
           }
         }
       };

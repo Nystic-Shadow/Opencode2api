@@ -59,24 +59,21 @@ function generateProjectId(project = null) {
 
 /**
  * Build authentic upstream request headers.
+ * Matches packages/core/src/session/model-request.ts in anomalyco/opencode
  */
 function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
-  const clientVersion = config.get('client_version') || '1.19.4';
+  const clientVersion = config.get('client_version') || '2.0.32';
   const upstreamKey = config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY;
   const authHeader = upstreamKey ? `Bearer ${upstreamKey}` : 'Bearer public';
-  const reqId = 'msg_' + Date.now().toString(36) + crypto.randomBytes(6).toString('hex');
-  const projectDir = encodeURIComponent('/workspace/' + (projectId ? projectId.slice(0, 8) : 'main'));
 
   return {
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/event-stream',
     'Authorization': authHeader,
-    'User-Agent': `opencode/${clientVersion}`,
-    'x-opencode-client': 'cli',
+    'User-Agent': `opencode/latest/${clientVersion}/opencode`,
+    'x-opencode-client': 'opencode',
     'x-opencode-session': sessionId,
     'x-opencode-session-id': sessionId,
-    'x-opencode-request-id': reqId,
-    'x-opencode-directory': projectDir,
     'x-session-affinity': sessionId,
     'X-Session-Id': sessionId,
     'x-opencode-project': projectId || 'global',

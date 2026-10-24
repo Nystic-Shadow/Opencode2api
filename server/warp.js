@@ -259,6 +259,9 @@ class CloudflareWarpManager {
   }
 
   isReady() {
+    if (this.portProcesses && this.portProcesses.size > 0) {
+      return true;
+    }
     if (this.statusCache && typeof this.statusCache.socketAlive === 'boolean') {
       return this.statusCache.socketAlive;
     }
@@ -999,7 +1002,8 @@ BindAddress = ${host}:${port}
         if (idx !== -1) {
           console.log(`[WARP Pool] Slot ${idx + 1} burned. Auto-retiring and generating fresh account...`);
           this.replaceBadAccount(idx).then((freshAcc) => {
-            if (freshAcc && this.portProcesses.has(port)) {
+            const validPorts = [this.basePort, this.basePort + 1, this.basePort + 2, this.basePort + 3];
+            if (freshAcc && validPorts.includes(port)) {
               this.startWireproxy(freshAcc, port)
                 .then(() => console.log(`[WARP Pool] Port ${port} re-armed with fresh account ${freshAcc.accountId.slice(0, 8)} (${freshAcc.ipv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})!`))
                 .catch(err => console.warn(`[WARP Pool] Port ${port} re-arm notice:`, err.message));
@@ -1144,10 +1148,8 @@ BindAddress = ${host}:${port}
           this.cachedKey = '';
           this.statusCache = null;
 
-          // Gracefully drain old wireproxy process after 12 seconds only if truly distinct from active targetPort
-          if (oldPort !== targetPort) {
-            this.scheduleDraining(oldPort);
-          }
+          // Maintain persistent multi-tunnel pool: preserve all ports running in parallel
+          // so getBestPort() can round-robin across clean tunnels without dropping live slots
 
           this.lastRotationTime = Date.now();
           this.setProgress(100, 'connected', `Cloudflare WARP hot-swapped to port ${targetPort} with fresh edge session (warp=on)`);

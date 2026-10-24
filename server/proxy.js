@@ -326,8 +326,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   let warpRotatedInThisRequest = false;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
-    if (attempt > 1) {
+    if (attempt > 1 && triedWarpPorts.size === 0) {
       useWarp = requestWarpFailed ? false : routeHealth.shouldUseWarp(attempt);
+      if (useWarp) currentWarpPort = warp.getBestPort();
     }
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const sessionId = identity.generateCanonicalSessionId();
@@ -699,21 +700,28 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
     if (attempt <= maxRetries) {
       const isRouteError = isRateLimited || isForbidden || isWarpFailure;
-      // On IP rate limits (429/403), keep the requested model intact across all available egress lanes!
-      // Only failover to another model if all egress routes have been exhausted OR if it is a model-specific failure (500/503/404)
-      const shouldTryModelFallback = !isRouteError || (!useWarp && triedWarpPorts.size >= 4);
+      const livePorts = [warp.basePort, warp.basePort + 1, warp.basePort + 2, warp.basePort + 3].filter(p => warp.portProcesses.has(p));
+      const poolCapacityExhausted = !useWarp || triedWarpPorts.size >= Math.min(2, Math.max(1, livePorts.length));
+      // Try model fallback if:
+      // 1. Model-specific failure (500/503/404), OR
+      // 2. All tunnel slots or 2+ distinct egress routes for this model have been tested, OR
+      // 3. We are on attempt >= 2 (allows 1 IP retry on the requested model before immediately failing over to healthy free models)
+      const shouldTryModelFallback = !isRouteError || poolCapacityExhausted || attempt >= 2;
       const fallback = shouldTryModelFallback ? getNextFallbackModel(currentModel, triedModels, hasImages) : null;
       if (fallback) {
-        console.log(`[Proxy] Model ${currentModel} exhausted on routes. Smart failover to ${fallback} (Attempt ${attempt}/${maxRetries + 1})...`);
+        console.log(`[Proxy] Model "${currentModel}" at capacity on tested routes. Smart failover to "${fallback}" (Attempt ${attempt}/${maxRetries + 1})...`);
         currentModel = fallback;
         triedModels.add(fallback);
+        triedWarpPorts.clear();
+        useWarp = warp.isReady() && config.get('warp_mode') !== 'disabled';
+        if (useWarp) currentWarpPort = warp.getBestPort();
       } else {
         const routeLabel = useWarp ? `Cloudflare WARP (port ${currentWarpPort})` : 'direct route';
         console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
       }
 
       // Exponential backoff with random jitter
-      const backoffMs = Math.min(300 * Math.pow(1.5, attempt - 1) + Math.random() * 200, 2000);
+      const backoffMs = Math.min(250 * Math.pow(1.4, attempt - 1) + Math.random() * 150, 1500);
       await new Promise(r => setTimeout(r, backoffMs));
     } else {
       // Retries exhausted
@@ -895,8 +903,9 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   let warpRotatedInThisRequest = false;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
-    if (attempt > 1) {
+    if (attempt > 1 && triedWarpPorts.size === 0) {
       useWarp = requestWarpFailed ? false : routeHealth.shouldUseWarp(attempt);
+      if (useWarp) currentWarpPort = warp.getBestPort();
     }
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const sessionId = identity.generateCanonicalSessionId();
@@ -1406,19 +1415,22 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
     if (attempt <= maxRetries) {
       const isRouteError = isRateLimited || isForbidden || isWarpFailure;
-      // On IP rate limits (429/403), keep the requested model intact across all available egress lanes!
-      // Only failover to another model if all egress routes have been exhausted OR if it is a model-specific failure (500/503/404)
-      const shouldTryModelFallback = !isRouteError || (!useWarp && triedWarpPorts.size >= 4);
+      const livePorts = [warp.basePort, warp.basePort + 1, warp.basePort + 2, warp.basePort + 3].filter(p => warp.portProcesses.has(p));
+      const poolCapacityExhausted = !useWarp || triedWarpPorts.size >= Math.min(2, Math.max(1, livePorts.length));
+      const shouldTryModelFallback = !isRouteError || poolCapacityExhausted || attempt >= 2;
       const fallback = shouldTryModelFallback ? getNextFallbackModel(currentModel, triedModels, hasImages) : null;
       if (fallback) {
-        console.log(`[Proxy] Anthropic Model ${currentModel} exhausted on routes. Smart failover to ${fallback}...`);
+        console.log(`[Proxy] Anthropic Model "${currentModel}" at capacity on tested routes. Smart failover to "${fallback}" (Attempt ${attempt}/${maxRetries + 1})...`);
         currentModel = fallback;
         triedModels.add(fallback);
+        triedWarpPorts.clear();
+        useWarp = warp.isReady() && config.get('warp_mode') !== 'disabled';
+        if (useWarp) currentWarpPort = warp.getBestPort();
       } else {
         const routeLabel = useWarp ? `Cloudflare WARP (port ${currentWarpPort})` : 'direct route';
         console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on Anthropic model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
       }
-      const backoffMs = Math.min(300 * Math.pow(1.5, attempt - 1) + Math.random() * 200, 2000);
+      const backoffMs = Math.min(250 * Math.pow(1.4, attempt - 1) + Math.random() * 150, 1500);
       await new Promise(r => setTimeout(r, backoffMs));
     } else {
       metrics.recordRequest({

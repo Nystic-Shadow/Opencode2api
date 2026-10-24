@@ -43,7 +43,7 @@ const DEFAULT_CONFIG = {
   port: parseInt(process.env.PORT, 10) || 8080,
   admin_username: process.env.DASHBOARD_USER || 'admin',
   admin_password: process.env.DASHBOARD_PASS || 'admin123',
-  client_version: '1.19.4',
+  client_version: '2.0.32',
   discovery_interval_seconds: 600,
   auto_update_cli: true,
   free_only: true,
@@ -97,12 +97,6 @@ class ConfigManager {
       }
 
       this.config = { ...DEFAULT_CONFIG, ...fileConfig };
-
-      // Auto-sanitize legacy non-existent 2.x versions to official verified release
-      if (this.config.client_version && (this.config.client_version.startsWith('2.') || this.config.client_version === '2.0.32')) {
-        this.config.client_version = '1.19.4';
-        this.save();
-      }
 
       // Explicit environment / .env variables ALWAYS take strict precedence over cached disk values:
       if (process.env.DASHBOARD_USER && process.env.DASHBOARD_USER.trim()) {

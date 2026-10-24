@@ -445,8 +445,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     }
 
     const session = persistentSessions.getOrCreate(routeKey);
-    const sessionId = session.sessionId;
-    const projectId = session.projectId;
+    const sessionId = (attempt === 1) ? session.sessionId : identity.generateCanonicalSessionId();
+    const projectId = (attempt === 1) ? session.projectId : identity.generateProjectId();
 
     // Local rate limiter: check if this route has capacity before hitting upstream
     const waitMs = localRateLimiter.waitTime(routeKey);
@@ -1114,8 +1114,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     }
 
     const session = persistentSessions.getOrCreate(routeKey);
-    const sessionId = session.sessionId;
-    const projectId = session.projectId;
+    const sessionId = (attempt === 1) ? session.sessionId : identity.generateCanonicalSessionId();
+    const projectId = (attempt === 1) ? session.projectId : identity.generateProjectId();
 
     // Local rate limiter: check if this route has capacity before hitting upstream
     const waitMs = localRateLimiter.waitTime(routeKey);

@@ -99,7 +99,7 @@ function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
   const headers = {
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/event-stream',
-    'User-Agent': `opencode/${clientVersion}`,
+    'User-Agent': `opencode/latest/${clientVersion}/cli`,
     'x-opencode-client': 'cli',
     'x-opencode-version': clientVersion,
     'x-opencode-session': sessionId,

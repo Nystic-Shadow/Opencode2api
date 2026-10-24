@@ -19,13 +19,16 @@ const PROXY_SOURCES = [
   { url: 'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=2500&country=all&ssl=all&anonymity=all', type: 'http' }
 ];
 
-// Pre-verified fast proxies tested against opencode.ai:443 (<3000ms latency)
+// Pre-verified fast proxies tested directly against opencode.ai:443 (<3000ms latency, 5x strict check)
 const DEFAULT_SEED_PROXIES = [
+  { host: '47.129.105.10', port: 12698, type: 'http', latency: 344, successCount: 5, lastChecked: Date.now() },
+  { host: '47.129.130.0', port: 1142, type: 'http', latency: 369, successCount: 5, lastChecked: Date.now() },
+  { host: '43.207.113.167', port: 8998, type: 'http', latency: 601, successCount: 5, lastChecked: Date.now() },
+  { host: '15.152.38.117', port: 53281, type: 'http', latency: 647, successCount: 5, lastChecked: Date.now() },
+  { host: '43.198.78.37', port: 12149, type: 'http', latency: 653, successCount: 5, lastChecked: Date.now() },
   { host: '183.106.215.208', port: 1080, type: 'socks5', latency: 719, successCount: 5, lastChecked: Date.now() },
   { host: '206.220.175.2', port: 4145, type: 'socks5', latency: 1200, successCount: 5, lastChecked: Date.now() },
-  { host: '74.119.147.209', port: 4145, type: 'socks5', latency: 1795, successCount: 5, lastChecked: Date.now() },
-  { host: '192.111.139.163', port: 19404, type: 'socks5', latency: 1802, successCount: 5, lastChecked: Date.now() },
-  { host: '192.111.130.2', port: 4145, type: 'socks5', latency: 1817, successCount: 5, lastChecked: Date.now() }
+  { host: '74.119.147.209', port: 4145, type: 'socks5', latency: 1795, successCount: 5, lastChecked: Date.now() }
 ];
 
 class ProxyScraperService {

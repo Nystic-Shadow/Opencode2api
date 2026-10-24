@@ -50,6 +50,37 @@ function generateCanonicalSessionId(seed = null) {
 }
 
 /**
+ * Mint canonical message request identifier.
+ * Conforms to OpenCode's Identifier.descending("msg") specification:
+ * ^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$
+ */
+function generateCanonicalRequestId(seed = null) {
+  const n = Date.now();
+  const r = BigInt(n) * 0x1000n + BigInt(Math.floor(Math.random() * 4096));
+  const a = ~r;
+  const timePart = Array.from({ length: 6 }, (_, D) =>
+    Number((a >> BigInt(40 - 8 * D)) & 0xffn).toString(16).padStart(2, '0')
+  ).join('');
+
+  let randPart;
+  if (seed) {
+    const sum = crypto.createHash('sha256').update('msg\x00' + seed + n).digest();
+    let num = BigInt('0x' + sum.subarray(0, 10).toString('hex'));
+    const chars = [];
+    for (let i = 0; i < 14; i++) {
+      chars.unshift(BASE62[Number(num % 62n)]);
+      num = num / 62n;
+    }
+    randPart = chars.join('');
+  } else {
+    const randomBytes = crypto.randomBytes(14);
+    randPart = Array.from(randomBytes, b => BASE62[b % 62]).join('');
+  }
+
+  return 'msg_' + timePart + randPart;
+}
+
+/**
  * Generate 40-character hex project ID.
  */
 function generateProjectId(project = null) {
@@ -61,17 +92,19 @@ function generateProjectId(project = null) {
  * Build authentic upstream request headers.
  * Matches packages/core/src/session/model-request.ts in anomalyco/opencode
  */
-function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
+function buildUpstreamHeaders(sessionId, projectId, payloadLength, userRequestId = null) {
   const clientVersion = config.get('client_version') || '2.0.32';
   const upstreamKey = config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY;
+  const reqId = userRequestId || generateCanonicalRequestId();
 
   const headers = {
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/event-stream',
     'User-Agent': `opencode/${clientVersion}`,
-    'x-opencode-client': 'opencode',
+    'x-opencode-client': 'cli',
     'x-opencode-session': sessionId,
     'x-opencode-session-id': sessionId,
+    'x-opencode-request': reqId,
     'x-session-affinity': sessionId,
     'X-Session-Id': sessionId,
     'x-opencode-project': projectId || 'global',
@@ -90,6 +123,7 @@ function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
 
 module.exports = {
   generateCanonicalSessionId,
+  generateCanonicalRequestId,
   generateProjectId,
   buildUpstreamHeaders
 };

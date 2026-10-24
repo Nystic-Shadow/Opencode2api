@@ -14,11 +14,16 @@ const WIREPROXY_CONF = path.join(DATA_DIR, 'wireproxy.conf');
 
 const WARP_ENDPOINTS = [
   '162.159.192.1:2408',
-  'engage.cloudflareclient.com:2408',
   '162.159.193.1:2408',
   '162.159.195.1:500',
-  '162.159.192.1:500',
-  '188.114.97.1:2408'
+  '162.159.192.2:500',
+  '162.159.193.5:4500',
+  '162.159.204.1:2408',
+  '188.114.96.1:2408',
+  '188.114.97.1:2408',
+  '188.114.98.1:4500',
+  '188.114.99.1:500',
+  'engage.cloudflareclient.com:2408'
 ];
 
 const OPENCODE_IPV6_TARGETS = [
@@ -129,23 +134,16 @@ class CloudflareWarpManager {
       return healthyUnexcluded[this.roundRobinIndex];
     }
 
-    // 2. Any healthy live port not on cooldown
-    const healthy = livePorts.filter(p => {
-      const acc = this.portProcesses.get(p)?.account;
-      return !acc?._cooldownUntil || now > acc._cooldownUntil;
-    });
-
-    if (healthy.length > 0) {
-      this.roundRobinIndex = ((this.roundRobinIndex || 0) + 1) % healthy.length;
-      return healthy[this.roundRobinIndex];
+    // 2. If caller specifically requested exclusion of already-tried ports and none are healthy,
+    // return null so caller knows all available tunnel ports were attempted for this request
+    if (Array.isArray(excludePorts) && excludePorts.length > 0) {
+      return null;
     }
 
-    // 3. Fallback: least recently cooled down port not in exclude list
-    const candidates = Array.isArray(excludePorts) ? livePorts.filter(p => !excludePorts.includes(p)) : [];
-    const pool = candidates.length > 0 ? candidates : livePorts;
-    let lowestPort = pool[0];
+    // 3. Fallback for new requests with no exclusions: least recently cooled down port
+    let lowestPort = livePorts[0];
     let lowestCd = Infinity;
-    for (const p of pool) {
+    for (const p of livePorts) {
       const acc = this.portProcesses.get(p)?.account;
       const cd = acc?._cooldownUntil || 0;
       if (cd < lowestCd) {
@@ -402,37 +400,58 @@ class CloudflareWarpManager {
     return ep.trim();
   }
 
-  async replaceBadAccount(idx) {
-    if (this.isReplacing) {
-      return null;
-    }
-    if (this.regCooldownUntil && Date.now() < this.regCooldownUntil) {
-      console.log(`[WARP Pool] Skipping replacement for account ${idx + 1}: Cloudflare registration in cooldown.`);
-      return null;
-    }
-    this.isReplacing = true;
-    console.warn(`[WARP Pool] Account ${idx + 1} marked exhausted/burned. Purging and registering a fresh replacement...`);
+  queueSlotReplacement(idx, port = null) {
+    if (!this.replacementQueue) this.replacementQueue = [];
+    if (this.replacementQueue.some(item => item.idx === idx)) return;
+    this.replacementQueue.push({ idx, port, requestedAt: Date.now() });
+    this.processReplacementQueue().catch(() => {});
+  }
+
+  async processReplacementQueue() {
+    if (this.isProcessingQueue) return;
+    this.isProcessingQueue = true;
     try {
-      const freshAcc = await this.registerCloudflareAccount();
-      freshAcc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
-      freshAcc.ipv4Only = (idx % 2 === 0); // Alternate: Even slots are IPv4-Only, Odd slots are Dual-Stack IPv6
-      freshAcc._burnCount = 0;
-      freshAcc._cooldownUntil = 0;
-      if (this.accountPool && this.accountPool.length > idx) {
-        this.accountPool[idx] = freshAcc;
-      } else {
-        this.accountPool.push(freshAcc);
+      while (this.replacementQueue && this.replacementQueue.length > 0) {
+        const item = this.replacementQueue.shift();
+        if (this.regCooldownUntil && Date.now() < this.regCooldownUntil) {
+          const waitMin = Math.ceil((this.regCooldownUntil - Date.now()) / 60000);
+          console.log(`[WARP Pool] Postponing replacement for slot ${item.idx + 1}: Cloudflare API registration cooldown (${waitMin}m).`);
+          break;
+        }
+
+        try {
+          console.log(`[WARP Pool] Purging burned slot ${item.idx + 1} and registering fresh account...`);
+          const freshAcc = await this.registerCloudflareAccount();
+          freshAcc.endpoint = WARP_ENDPOINTS[item.idx % WARP_ENDPOINTS.length];
+          freshAcc.ipv4Only = (item.idx % 2 === 0);
+          freshAcc._burnCount = 0;
+          freshAcc._cooldownUntil = 0;
+          if (this.accountPool && this.accountPool.length > item.idx) {
+            this.accountPool[item.idx] = freshAcc;
+          } else {
+            this.accountPool.push(freshAcc);
+          }
+          this.saveAccountPool();
+
+          const validPorts = [this.basePort, this.basePort + 1, this.basePort + 2, this.basePort + 3];
+          const targetPort = (item.idx < 4) ? (this.basePort + item.idx) : item.port;
+          if (validPorts.includes(targetPort)) {
+            await this.startWireproxy(freshAcc, targetPort).catch(err =>
+              console.warn(`[WARP Pool] Port ${targetPort} startup notice:`, err.message)
+            );
+          }
+        } catch (err) {
+          console.warn(`[WARP Pool] Slot ${item.idx + 1} replacement notice:`, err.message);
+        }
       }
-      this.saveAccountPool();
-      const modeLabel = freshAcc.ipv4Only ? 'IPv4-Only' : `Dual-Stack IPv6: ${freshAcc.addressV6}`;
-      console.log(`[WARP Pool] Fresh replacement account ${idx + 1} ready on ${freshAcc.endpoint} (${modeLabel})`);
-      return freshAcc;
-    } catch (err) {
-      console.warn(`[WARP Pool] Could not register replacement account ${idx + 1}:`, err.message);
-      return null;
     } finally {
-      this.isReplacing = false;
+      this.isProcessingQueue = false;
     }
+  }
+
+  async replaceBadAccount(idx) {
+    this.queueSlotReplacement(idx, null);
+    return null;
   }
 
   loadCachedAccount() {
@@ -709,7 +728,7 @@ BindAddress = ${host}:${port}
     let trace = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       if (procExited) break;
-      trace = await this.probeEgressTrace(port, 4500);
+      trace = await this.probeEgressTrace(port, 6500);
       if (trace && trace.ip) break;
       await new Promise(r => setTimeout(r, 600));
     }
@@ -723,11 +742,13 @@ BindAddress = ${host}:${port}
       return proc;
     }
 
-    // If edge verification failed on this endpoint, terminate process and throw so rotate/bootstrap can try alternative endpoint
-    console.warn(`[WARP] WireProxy on ${host}:${port} answered SOCKS5, but edge egress trace failed on ${endpointHost}`);
-    try { proc.kill('SIGTERM'); } catch (e) {}
-    this.portProcesses.delete(port);
-    throw new Error(`WireProxy tunnel on ${host}:${port} (${endpointHost}) failed edge egress check (code: 4 / unreachable)`);
+    // SOCKS5 is verified live and answering. If initial CDN trace took longer, DO NOT kill WireProxy!
+    // WireGuard handshake finishes in the background, allowing inference traffic to flow safely.
+    console.log(`[WARP] WireProxy on ${host}:${port} is answering SOCKS5; background tunnel handshake finishing on ${endpointHost}`);
+    this.setProgress(100, 'connected', `Cloudflare WARP Active on ${host}:${port} (SOCKS5 verified)`);
+    this.socketAlive = true;
+    this.statusCache = null;
+    return proc;
   }
 
   /**
@@ -1036,38 +1057,39 @@ BindAddress = ${host}:${port}
   /**
    * Rotates Cloudflare WARP session keys to acquire a brand new edge egress IP via zero-downtime hot-swap
    */
-  markAccountBurned(port) {
+  markAccountBurned(port, retryAfterSec = 0) {
     this.clearAgent(port);
     const procInfo = this.portProcesses.get(port);
     const account = procInfo?.account;
-    if (account) {
-      // 45-second fast cooldown window for rate-limited account
-      account._cooldownUntil = Date.now() + (45 * 1000);
-      account._burnCount = (account._burnCount || 0) + 1;
-      console.log(`[WARP Pool] Account (${account.accountId?.slice(0, 8)}...) on port ${port} set to 45s cooldown (burnCount: ${account._burnCount}).`);
+    const cooldownMs = (retryAfterSec > 0 ? retryAfterSec * 1000 : 3600 * 1000);
+    const cooldownUntil = Date.now() + cooldownMs;
 
-      // If an account gets burned, immediately replace it with a fresh account in the background
-      if ((account._burnCount || 0) >= 1) {
-        const pool = this.accountPool || [];
-        const idx = pool.findIndex(a => a.accountId === account.accountId);
-        if (idx !== -1) {
-          console.log(`[WARP Pool] Slot ${idx + 1} burned. Auto-retiring and generating fresh account...`);
-          this.replaceBadAccount(idx).then((freshAcc) => {
-            const validPorts = [this.basePort, this.basePort + 1, this.basePort + 2, this.basePort + 3];
-            if (freshAcc && validPorts.includes(port)) {
-              this.startWireproxy(freshAcc, port)
-                .then(() => console.log(`[WARP Pool] Port ${port} re-armed with fresh account ${freshAcc.accountId.slice(0, 8)} (${freshAcc.ipv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})!`))
-                .catch(err => console.warn(`[WARP Pool] Port ${port} re-arm notice:`, err.message));
-            }
-          }).catch(() => {});
-        }
+    if (account) {
+      account._cooldownUntil = cooldownUntil;
+      account._burnCount = (account._burnCount || 0) + 1;
+      console.log(`[WARP Pool] Account (${account.accountId?.slice(0, 8)}...) on port ${port} set to ${Math.round(cooldownMs / 60000)}m cooldown (burnCount: ${account._burnCount}).`);
+
+      // Immediately hot-swap port with an unburned backup account from pool slots 4..7 if available!
+      const pool = this.accountPool || [];
+      const cleanBackup = pool.slice(4).find(a => !a._cooldownUntil || Date.now() > a._cooldownUntil);
+      if (cleanBackup) {
+        console.log(`[WARP Pool] Instantly hot-swapping burned port ${port} to pre-warmed backup slot (${cleanBackup.accountId?.slice(0, 8)})...`);
+        this.startWireproxy(cleanBackup, port)
+          .then(() => console.log(`[WARP Pool] Port ${port} hot-swapped to fresh backup account!`))
+          .catch(err => console.warn(`[WARP Pool] Port ${port} backup hot-swap notice:`, err.message));
+      }
+
+      const idx = pool.findIndex(a => a.accountId === account.accountId);
+      if (idx !== -1) {
+        this.queueSlotReplacement(idx, port);
       }
     } else {
       const pool = this.accountPool || [];
       const offset = (port - this.basePort) % (pool.length || 1);
       if (pool[offset]) {
-        pool[offset]._cooldownUntil = Date.now() + (45 * 1000);
-        console.log(`[WARP Pool] Slot ${offset + 1} (port ${port}) set to 45s rate-limit cooldown.`);
+        pool[offset]._cooldownUntil = cooldownUntil;
+        console.log(`[WARP Pool] Slot ${offset + 1} (port ${port}) set to ${Math.round(cooldownMs / 60000)}m rate-limit cooldown.`);
+        this.queueSlotReplacement(offset, port);
       }
     }
   }

@@ -377,6 +377,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
             resolve({
               success: false,
               statusCode: upstreamRes.statusCode,
+              headers: upstreamRes.headers,
               body: errBody
             });
           });
@@ -639,32 +640,33 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         }
       }
     } else if (isRateLimited || isForbidden) {
+      const retryAfterHeader = attemptResult.headers?.['retry-after'];
+      const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
+
       if (useWarp) {
-        console.warn(`[WARP] Rate limit detected on port ${currentWarpPort}. Marking slot burned (45s cooldown)...`);
-        warp.markAccountBurned(currentWarpPort);
+        console.warn(`[WARP] Rate limit detected on port ${currentWarpPort}. Marking slot burned...`);
+        warp.markAccountBurned(currentWarpPort, retryAfterSec);
         triedWarpPorts.add(currentWarpPort);
 
         // Seamlessly hop to next live port that hasn't been tried yet in this request
         const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
-        const livePorts = [warp.basePort, warp.basePort + 1, warp.basePort + 2, warp.basePort + 3].filter(p => warp.portProcesses.has(p));
-        if (nextPort !== currentWarpPort && !triedWarpPorts.has(nextPort)) {
+        if (nextPort && !triedWarpPorts.has(nextPort)) {
           currentWarpPort = nextPort;
+          useWarp = true;
           console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
-        } else if (triedWarpPorts.size >= livePorts.length || livePorts.every(p => triedWarpPorts.has(p))) {
-          // All active WARP ports burned in this request! Attempt direct route fallback
+        } else {
+          // All active WARP ports burned in this request! Attempt direct host egress lane
           console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Attempting direct host egress lane...');
           useWarp = false;
-        } else {
-          currentWarpPort = nextPort;
-          console.log(`[WARP] Cycling to port ${currentWarpPort}...`);
         }
       } else {
         // Direct route hit rate limit, check if any WARP port is available
         console.warn(`[Proxy] Direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Checking WARP tunnel pool...`);
         routeHealth.markDirectDegraded(statusCode);
-        if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
+        const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
+        if (nextPort && warp.isReady() && config.get('warp_mode') !== 'disabled') {
           useWarp = true;
-          currentWarpPort = warp.getBestPort();
+          currentWarpPort = nextPort;
         } else if (config.get('warp_mode') !== 'disabled') {
           warp.autoBootstrap().catch(() => {});
         }
@@ -716,9 +718,13 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         console.log(`[Proxy] Model "${currentModel}" at capacity on tested routes. Smart failover to "${fallback}" (Attempt ${attempt}/${maxRetries + 1})...`);
         currentModel = fallback;
         triedModels.add(fallback);
-        triedWarpPorts.clear();
-        useWarp = warp.isReady() && config.get('warp_mode') !== 'disabled';
-        if (useWarp) currentWarpPort = warp.getBestPort();
+        const nextUntriedPort = warp.getBestPort(Array.from(triedWarpPorts));
+        if (nextUntriedPort && warp.isReady() && config.get('warp_mode') !== 'disabled') {
+          useWarp = true;
+          currentWarpPort = nextUntriedPort;
+        } else {
+          useWarp = false;
+        }
       } else {
         const routeLabel = useWarp ? `Cloudflare WARP (port ${currentWarpPort})` : 'direct route';
         console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
@@ -967,6 +973,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             resolve({
               success: false,
               statusCode: upstreamRes.statusCode,
+              headers: upstreamRes.headers,
               body: errBody
             });
           });
@@ -1368,32 +1375,33 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         }
       }
     } else if (isRateLimited || isForbidden) {
+      const retryAfterHeader = attemptResult.headers?.['retry-after'];
+      const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
+
       if (useWarp) {
-        console.warn(`[WARP] Anthropic rate limit detected on port ${currentWarpPort}. Marking slot burned (45s cooldown)...`);
-        warp.markAccountBurned(currentWarpPort);
+        console.warn(`[WARP] Anthropic rate limit detected on port ${currentWarpPort}. Marking slot burned...`);
+        warp.markAccountBurned(currentWarpPort, retryAfterSec);
         triedWarpPorts.add(currentWarpPort);
 
         // Seamlessly hop to next live port that hasn't been tried yet in this request
         const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
-        const livePorts = [warp.basePort, warp.basePort + 1, warp.basePort + 2, warp.basePort + 3].filter(p => warp.portProcesses.has(p));
-        if (nextPort !== currentWarpPort && !triedWarpPorts.has(nextPort)) {
+        if (nextPort && !triedWarpPorts.has(nextPort)) {
           currentWarpPort = nextPort;
+          useWarp = true;
           console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
-        } else if (triedWarpPorts.size >= livePorts.length || livePorts.every(p => triedWarpPorts.has(p))) {
+        } else {
           // All active WARP ports burned in this request! Attempt direct route fallback
           console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Attempting direct host egress lane for Anthropic request...');
           useWarp = false;
-        } else {
-          currentWarpPort = nextPort;
-          console.log(`[WARP] Cycling to port ${currentWarpPort}...`);
         }
       } else {
         // Direct route hit rate limit, check if any WARP port is available
         console.warn(`[Proxy] Anthropic direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Checking WARP tunnel pool...`);
         routeHealth.markDirectDegraded(statusCode);
-        if (warp.isReady() && config.get('warp_mode') !== 'disabled') {
+        const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
+        if (nextPort && warp.isReady() && config.get('warp_mode') !== 'disabled') {
           useWarp = true;
-          currentWarpPort = warp.getBestPort();
+          currentWarpPort = nextPort;
         } else if (config.get('warp_mode') !== 'disabled') {
           warp.autoBootstrap().catch(() => {});
         }
@@ -1441,9 +1449,13 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         console.log(`[Proxy] Anthropic Model "${currentModel}" at capacity on tested routes. Smart failover to "${fallback}" (Attempt ${attempt}/${maxRetries + 1})...`);
         currentModel = fallback;
         triedModels.add(fallback);
-        triedWarpPorts.clear();
-        useWarp = warp.isReady() && config.get('warp_mode') !== 'disabled';
-        if (useWarp) currentWarpPort = warp.getBestPort();
+        const nextUntriedPort = warp.getBestPort(Array.from(triedWarpPorts));
+        if (nextUntriedPort && warp.isReady() && config.get('warp_mode') !== 'disabled') {
+          useWarp = true;
+          currentWarpPort = nextUntriedPort;
+        } else {
+          useWarp = false;
+        }
       } else {
         const routeLabel = useWarp ? `Cloudflare WARP (port ${currentWarpPort})` : 'direct route';
         console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on Anthropic model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);

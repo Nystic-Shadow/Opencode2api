@@ -21,6 +21,98 @@ const upstreamAgent = new https.Agent({
 
 let proxyIndex = 0;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LOCAL RATE LIMITER — Prevents burning WARP ports by throttling outbound
+// requests to match OpenCode's free tier window. Implements a sliding-window
+// token bucket per egress route (WARP port / direct).
+// ═══════════════════════════════════════════════════════════════════════════
+const localRateLimiter = {
+  // Sliding window: track request timestamps per route
+  windows: new Map(), // routeKey -> [timestamps]
+  // Max requests per route per window (conservative: OpenCode allows ~100-200/day but
+  // rate-limits within short windows too. Keep per-minute limit low.)
+  maxPerMinute: 4,
+  windowMs: 60 * 1000,
+  // Global serialization: only 1 request in-flight to upstream at a time to avoid
+  // multi-request storms that burn all ports instantly
+  queue: [],
+  processing: false,
+  concurrentInFlight: 0,
+  maxConcurrent: 2, // Allow max 2 concurrent upstream requests
+
+  canProceed(routeKey) {
+    const now = Date.now();
+    if (!this.windows.has(routeKey)) this.windows.set(routeKey, []);
+    const win = this.windows.get(routeKey);
+    // Prune old entries outside window
+    while (win.length > 0 && (now - win[0]) > this.windowMs) win.shift();
+    return win.length < this.maxPerMinute;
+  },
+
+  record(routeKey) {
+    const now = Date.now();
+    if (!this.windows.has(routeKey)) this.windows.set(routeKey, []);
+    this.windows.get(routeKey).push(now);
+  },
+
+  // Returns how many ms to wait before route is available again
+  waitTime(routeKey) {
+    const now = Date.now();
+    if (!this.windows.has(routeKey)) return 0;
+    const win = this.windows.get(routeKey);
+    while (win.length > 0 && (now - win[0]) > this.windowMs) win.shift();
+    if (win.length < this.maxPerMinute) return 0;
+    return Math.max(0, win[0] + this.windowMs - now);
+  },
+
+  // Mark a route as hard-burned (upstream returned 429) — block for longer
+  markBurned(routeKey, durationMs = 120000) {
+    if (!this.windows.has(routeKey)) this.windows.set(routeKey, []);
+    const win = this.windows.get(routeKey);
+    const now = Date.now();
+    // Fill the window so it's blocked for durationMs
+    for (let i = 0; i < this.maxPerMinute; i++) {
+      win.push(now + durationMs - this.windowMs);
+    }
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SESSION PERSISTENCE — Each WARP port keeps a stable session ID to leverage
+// OpenCode's session affinity and prompt caching. Only rotated when the port
+// itself is rotated. Direct route gets its own stable session.
+// ═══════════════════════════════════════════════════════════════════════════
+const persistentSessions = {
+  sessions: new Map(), // routeKey -> { sessionId, projectId, createdAt }
+
+  getOrCreate(routeKey) {
+    if (this.sessions.has(routeKey)) {
+      return this.sessions.get(routeKey);
+    }
+    const session = {
+      sessionId: identity.generateCanonicalSessionId(),
+      projectId: identity.generateProjectId(),
+      createdAt: Date.now()
+    };
+    this.sessions.set(routeKey, session);
+    return session;
+  },
+
+  invalidate(routeKey) {
+    this.sessions.delete(routeKey);
+  },
+
+  // Rotate session for a route (e.g., after rate limit)
+  rotate(routeKey) {
+    this.sessions.set(routeKey, {
+      sessionId: identity.generateCanonicalSessionId(),
+      projectId: identity.generateProjectId(),
+      createdAt: Date.now()
+    });
+    return this.sessions.get(routeKey);
+  }
+};
+
 // Adaptive Route Health & Intelligent Egress Router
 const routeHealth = {
   directDegradedUntil: 0,
@@ -333,8 +425,33 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       if (useWarp) currentWarpPort = warp.getBestPort();
     }
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
-    const sessionId = identity.generateCanonicalSessionId();
-    const projectId = identity.generateProjectId();
+
+    // Use persistent session per route to leverage session affinity & prompt caching
+    const routeKey = useWarp ? `warp:${currentWarpPort}` : 'direct';
+    const session = persistentSessions.getOrCreate(routeKey);
+    const sessionId = session.sessionId;
+    const projectId = session.projectId;
+
+    // Local rate limiter: check if this route has capacity before hitting upstream
+    const waitMs = localRateLimiter.waitTime(routeKey);
+    if (waitMs > 0 && attempt <= maxRetries) {
+      // This route is throttled — try a different route first before waiting
+      if (useWarp) {
+        const altPort = warp.getBestPort([...triedWarpPorts, currentWarpPort]);
+        if (altPort && !triedWarpPorts.has(altPort)) {
+          const altRouteKey = `warp:${altPort}`;
+          if (localRateLimiter.canProceed(altRouteKey)) {
+            currentWarpPort = altPort;
+            continue; // Re-enter loop with new port
+          }
+        }
+      }
+      // No alternative route — wait for throttle to clear (but cap at 5s)
+      const cappedWait = Math.min(waitMs, 5000);
+      console.log(`[RateLimiter] Route ${routeKey} throttled, waiting ${Math.round(cappedWait/1000)}s...`);
+      await new Promise(r => setTimeout(r, cappedWait));
+    }
+    localRateLimiter.record(routeKey);
 
     const upstreamPayload = {
       ...baseSanitized,
@@ -643,6 +760,11 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       const retryAfterHeader = attemptResult.headers?.['retry-after'];
       const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
 
+      // Mark this route as burned in local rate limiter so we don't re-hit it immediately
+      const burnedRouteKey = useWarp ? `warp:${currentWarpPort}` : 'direct';
+      localRateLimiter.markBurned(burnedRouteKey, retryAfterSec > 0 ? retryAfterSec * 1000 : 120000);
+      persistentSessions.rotate(burnedRouteKey);
+
       if (useWarp) {
         console.warn(`[WARP] Rate limit detected on port ${currentWarpPort}. Marking slot burned...`);
         warp.markAccountBurned(currentWarpPort, retryAfterSec);
@@ -929,8 +1051,33 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       if (useWarp) currentWarpPort = warp.getBestPort();
     }
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
-    const sessionId = identity.generateCanonicalSessionId();
-    const projectId = identity.generateProjectId();
+
+    // Use persistent session per route to leverage session affinity & prompt caching
+    const routeKey = useWarp ? `warp:${currentWarpPort}` : 'direct';
+    const session = persistentSessions.getOrCreate(routeKey);
+    const sessionId = session.sessionId;
+    const projectId = session.projectId;
+
+    // Local rate limiter: check if this route has capacity before hitting upstream
+    const waitMs = localRateLimiter.waitTime(routeKey);
+    if (waitMs > 0 && attempt <= maxRetries) {
+      // This route is throttled — try a different route first before waiting
+      if (useWarp) {
+        const altPort = warp.getBestPort([...triedWarpPorts, currentWarpPort]);
+        if (altPort && !triedWarpPorts.has(altPort)) {
+          const altRouteKey = `warp:${altPort}`;
+          if (localRateLimiter.canProceed(altRouteKey)) {
+            currentWarpPort = altPort;
+            continue; // Re-enter loop with new port
+          }
+        }
+      }
+      // No alternative route — wait for throttle to clear (but cap at 5s)
+      const cappedWait = Math.min(waitMs, 5000);
+      console.log(`[RateLimiter] Route ${routeKey} throttled, waiting ${Math.round(cappedWait/1000)}s...`);
+      await new Promise(r => setTimeout(r, cappedWait));
+    }
+    localRateLimiter.record(routeKey);
 
     const upstreamPayload = {
       model: upstreamModel,
@@ -1377,6 +1524,11 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     } else if (isRateLimited || isForbidden) {
       const retryAfterHeader = attemptResult.headers?.['retry-after'];
       const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
+
+      // Mark this route as burned in local rate limiter so we don't re-hit it immediately
+      const burnedRouteKey = useWarp ? `warp:${currentWarpPort}` : 'direct';
+      localRateLimiter.markBurned(burnedRouteKey, retryAfterSec > 0 ? retryAfterSec * 1000 : 120000);
+      persistentSessions.rotate(burnedRouteKey);
 
       if (useWarp) {
         console.warn(`[WARP] Anthropic rate limit detected on port ${currentWarpPort}. Marking slot burned...`);

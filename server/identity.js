@@ -93,7 +93,7 @@ function generateProjectId(project = null) {
  * Matches packages/core/src/session/model-request.ts in anomalyco/opencode
  */
 function buildUpstreamHeaders(sessionId, projectId, payloadLength, userRequestId = null) {
-  const clientVersion = config.get('client_version') || '2.0.32';
+  const clientVersion = config.get('client_version') || '2.1.4';
   const upstreamKey = config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY;
   const reqId = userRequestId || generateCanonicalRequestId();
 
@@ -102,6 +102,7 @@ function buildUpstreamHeaders(sessionId, projectId, payloadLength, userRequestId
     'Accept': 'application/json, text/event-stream',
     'User-Agent': `opencode/${clientVersion}`,
     'x-opencode-client': 'cli',
+    'x-opencode-version': clientVersion,
     'x-opencode-session': sessionId,
     'x-opencode-session-id': sessionId,
     'x-opencode-request': reqId,

@@ -43,7 +43,7 @@ const DEFAULT_CONFIG = {
   port: parseInt(process.env.PORT, 10) || 8080,
   admin_username: process.env.DASHBOARD_USER || 'admin',
   admin_password: process.env.DASHBOARD_PASS || 'admin123',
-  client_version: '2.0.32',
+  client_version: '2.1.4',
   discovery_interval_seconds: 600,
   auto_update_cli: true,
   free_only: true,
@@ -127,8 +127,8 @@ class ConfigManager {
         this.config.max_retries = parseInt(process.env.MAX_RETRIES, 10);
       }
       // Auto-migrate legacy config: enable smart_fallback by default for high availability
-      if (!this.config.client_version || this.config.client_version.startsWith('1.')) {
-        this.config.client_version = '2.0.32';
+      if (!this.config.client_version || this.config.client_version.startsWith('1.') || this.config.client_version === '2.0.32') {
+        this.config.client_version = '2.1.4';
       }
 
       if (fileConfig._smart_fallback_migrated !== true) {

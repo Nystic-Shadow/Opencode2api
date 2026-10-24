@@ -152,6 +152,8 @@ const routeHealth = {
     const warpMode = config.get('warp_mode') || 'auto';
     if (warpMode === 'disabled' || warpMode === 'never') return false;
     if (warpMode === 'always') return warp.isReady();
+    // If direct route is degraded (e.g. VPS IP 429), ALWAYS use WARP
+    if (this.isDirectDegraded()) return true;
     if (this.isWarpDegraded()) return false;
     if (!warp.isReady()) return false;
     return true;
@@ -768,10 +770,17 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           useWarp = true;
           console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
         } else {
-          // If all pool slots hit limit, force a fresh account registration and rotation
-          warp.purgeAndRegeneratePool().catch(() => {});
-          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Regenerating fresh WARP identity pool...');
-          useWarp = false;
+          // All active ports in pool have been tried for this request.
+          // Trigger a rapid key rotation to bring up a fresh account with a new IP
+          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Rotating keys for fresh egress IP...');
+          const rotated = await warp.rotateKeys('auto_rate_limit');
+          if (rotated) {
+            currentWarpPort = warp.getBestPort();
+            useWarp = true;
+            triedWarpPorts.clear(); // Reset tried ports since we have a fresh IP now
+          } else {
+            useWarp = config.get('warp_mode') === 'always' || routeHealth.isDirectDegraded();
+          }
         }
       } else {
         // Direct route hit rate limit, check if any WARP port is available
@@ -837,7 +846,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           useWarp = true;
           currentWarpPort = nextUntriedPort;
         } else {
-          useWarp = false;
+          useWarp = (config.get('warp_mode') === 'always' || routeHealth.isDirectDegraded() || warp.isReady());
         }
       } else {
         const routeLabel = useWarp ? `Cloudflare WARP (port ${currentWarpPort})` : 'direct route';
@@ -1538,9 +1547,15 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           useWarp = true;
           console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
         } else {
-          warp.purgeAndRegeneratePool().catch(() => {});
-          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Regenerating fresh WARP identity pool...');
-          useWarp = false;
+          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Rotating keys for fresh egress IP...');
+          const rotated = await warp.rotateKeys('auto_rate_limit');
+          if (rotated) {
+            currentWarpPort = warp.getBestPort();
+            useWarp = true;
+            triedWarpPorts.clear();
+          } else {
+            useWarp = config.get('warp_mode') === 'always' || routeHealth.isDirectDegraded();
+          }
         }
       } else {
         // Direct route hit rate limit, check if any WARP port is available
@@ -1602,7 +1617,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           useWarp = true;
           currentWarpPort = nextUntriedPort;
         } else {
-          useWarp = false;
+          useWarp = (config.get('warp_mode') === 'always' || routeHealth.isDirectDegraded() || warp.isReady());
         }
       } else {
         const routeLabel = useWarp ? `Cloudflare WARP (port ${currentWarpPort})` : 'direct route';

@@ -108,23 +108,26 @@ const GATE_READ_TOOL = {
 
 /**
  * Merge client tools with OpenCode CLI gate requirements.
- * When client sends no tools (plain chat), attaches gate tool with tool_choice: "none"
- * so upstream gate is satisfied while the model answers in plain text without hallucinations.
- * When client sends tools, ensures the gate's "read" tool rides along.
+ * When client sends no tools (plain chat), attaches all 5 official CLI core tools
+ * with tool_choice: "none" so upstream gate is satisfied while the model answers
+ * in plain text without hallucinations.
+ * When client sends tools, ensures the core tools ride along.
  */
 function mergeTools(clientTools, clientToolChoice) {
   const hasUserTools = Array.isArray(clientTools) && clientTools.length > 0;
   if (!hasUserTools) {
     return {
-      tools: [GATE_READ_TOOL],
+      tools: CORE_TOOLS,
       toolChoice: "none"
     };
   }
 
-  const merged = [...clientTools];
-  const hasRead = merged.some(t => (t.function?.name || t.name) === 'read');
-  if (!hasRead) {
-    merged.unshift(GATE_READ_TOOL);
+  const merged = [...CORE_TOOLS];
+  for (const ct of clientTools) {
+    const name = ct.function?.name || ct.name;
+    if (!merged.some(t => (t.function?.name || t.name) === name)) {
+      merged.push(ct);
+    }
   }
 
   return {

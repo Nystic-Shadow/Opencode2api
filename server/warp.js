@@ -15,14 +15,12 @@ const WIREPROXY_CONF = path.join(DATA_DIR, 'wireproxy.conf');
 const WARP_ENDPOINTS = [
   '162.159.192.1:2408',
   '162.159.193.1:2408',
-  '162.159.195.1:500',
-  '162.159.192.2:500',
-  '162.159.193.5:4500',
+  '162.159.195.1:2408',
   '162.159.204.1:2408',
   '188.114.96.1:2408',
   '188.114.97.1:2408',
-  '188.114.98.1:4500',
-  '188.114.99.1:500',
+  '188.114.98.1:2408',
+  '188.114.99.1:2408',
   'engage.cloudflareclient.com:2408'
 ];
 
@@ -60,6 +58,8 @@ class CloudflareWarpManager {
     this.portProcesses = new Map();
     // Map of port -> drainTimeout
     this.drainingTimers = new Map();
+    // Map of port -> active Promise lock to eliminate concurrent port binding collisions
+    this.portMutex = new Map();
     this.lastRotationTime = 0;
     this.rotationCooldownMs = 1500;
     this.isRotating = false;
@@ -596,36 +596,51 @@ class CloudflareWarpManager {
   }
 
   /**
-   * Starts WireProxy userspace SOCKS5 engine
+   * Starts WireProxy userspace SOCKS5 engine with strict per-port serialization
    */
   async startWireproxy(account, targetPort = null) {
     if (!this.wireproxyPath) {
       throw new Error('wireproxy binary not found on system');
     }
 
-    const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const port = targetPort || this.getActivePort();
+
+    // Acquire per-port lock to prevent concurrent bind collisions
+    while (this.portMutex.has(port)) {
+      await this.portMutex.get(port);
+    }
+    let releaseLock;
+    const lockPromise = new Promise(resolve => { releaseLock = resolve; });
+    this.portMutex.set(port, lockPromise);
+
+    try {
+      return await this._doStartWireproxy(account, port);
+    } finally {
+      this.portMutex.delete(port);
+      if (typeof releaseLock === 'function') releaseLock();
+    }
+  }
+
+  async _doStartWireproxy(account, port) {
+    const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const confPath = path.join(DATA_DIR, `wireproxy_${port}.conf`);
 
     // Ensure port is completely free and clean before spawning!
     await this.forceKillPort(port);
 
-    // Guarantee strict IPv4 vs Dual-Stack slot parity:
-    // Even ports (40000, 40002) = pure IPv4 egress (AllowedIPs = 0.0.0.0/0) to bypass IPv6 subnet exhaustion!
-    // Odd ports (40001, 40003) = dual-stack IPv6 egress (AllowedIPs = 0.0.0.0/0, ::/0).
-    const isIpv4Only = (port % 2 === 0);
-    account.ipv4Only = isIpv4Only;
-    this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port} (${isIpv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})...`);
+    // Ultra-reliable Pure IPv4 egress mode:
+    // Shared Cloudflare WARP IPv6 subnets in some regions (such as Singapore) hit shared rate limits.
+    // Pure IPv4 routing (AllowedIPs = 0.0.0.0/0, DNS = 1.1.1.1, 8.8.8.8) forces WireProxy through
+    // Cloudflare's massive 104.28.x.x IPv4 pool, completely bypassing IPv6 subnet exhaustion.
+    this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port} (Clean IPv4 Egress)...`);
 
-    // All ports get full dual-stack addresses and full AllowedIPs for 100% reliable egress
     const addresses = [];
     if (account.addressV4) addresses.push(`${account.addressV4}/32`);
-    if (account.addressV6) addresses.push(`${account.addressV6}/128`);
     if (addresses.length === 0) addresses.push('172.16.0.2/32');
 
     const endpointHost = this.sanitizeEndpoint(account.endpoint) || '162.159.192.1:2408';
-    const dnsServers = '1.1.1.1, 8.8.8.8, 2606:4700:4700::1111';
-    const allowedIps = '0.0.0.0/0, ::/0';
+    const dnsServers = '1.1.1.1, 8.8.8.8';
+    const allowedIps = '0.0.0.0/0';
 
     const confContent = `[Interface]
 PrivateKey = ${account.privateKey}
@@ -656,8 +671,6 @@ BindAddress = ${host}:${port}
       detached: false,
       stdio: ['ignore', 'pipe', 'pipe']
     });
-
-    this.portProcesses.set(port, { proc, startedAt: Date.now(), account });
 
     let lastStdout = '';
     let lastStderr = '';
@@ -719,7 +732,6 @@ BindAddress = ${host}:${port}
 
     if (!socketLive) {
       try { proc.kill('SIGTERM'); } catch (e) {}
-      this.portProcesses.delete(port);
       throw new Error(`WireProxy launched on ${host}:${port} but SOCKS5 port failed to answer within 8s`);
     }
 
@@ -728,27 +740,24 @@ BindAddress = ${host}:${port}
     let trace = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       if (procExited) break;
-      trace = await this.probeEgressTrace(port, 6500);
+      trace = await this.probeEgressTrace(port, 5000);
       if (trace && trace.ip) break;
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 500));
     }
 
     if (trace && trace.ip) {
       const ipFamily = trace.ip.includes(':') ? 'IPv6' : 'IPv4';
       console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${host}:${port} (warp=on • Egress: ${trace.ip} [${ipFamily} • ${trace.colo || 'Edge'}])`);
       this.setProgress(100, 'connected', `Cloudflare WARP Egress Active on ${host}:${port} (warp=on • ${trace.ip})`);
+      this.portProcesses.set(port, { proc, startedAt: Date.now(), account, egressIp: trace.ip });
       this.socketAlive = true;
       this.statusCache = null;
       return proc;
     }
 
-    // SOCKS5 is verified live and answering. If initial CDN trace took longer, DO NOT kill WireProxy!
-    // WireGuard handshake finishes in the background, allowing inference traffic to flow safely.
-    console.log(`[WARP] WireProxy on ${host}:${port} is answering SOCKS5; background tunnel handshake finishing on ${endpointHost}`);
-    this.setProgress(100, 'connected', `Cloudflare WARP Active on ${host}:${port} (SOCKS5 verified)`);
-    this.socketAlive = true;
-    this.statusCache = null;
-    return proc;
+    // If edge trace timed out on this endpoint, cleanly stop process and propagate error so caller can try next candidate endpoint
+    try { proc.kill('SIGKILL'); } catch (e) {}
+    throw new Error(`WireProxy on port ${port} connected to SOCKS5 but failed Cloudflare edge handshake on endpoint ${endpointHost}`);
   }
 
   /**
@@ -826,7 +835,8 @@ BindAddress = ${host}:${port}
           '162.159.192.1:2408',
           '162.159.193.1:2408',
           '188.114.97.1:2408',
-          '162.159.195.1:500'
+          '162.159.195.1:2408',
+          'engage.cloudflareclient.com:2408'
         ].filter((v, i, a) => v && a.indexOf(v) === i);
 
         let started = false;
@@ -1181,7 +1191,8 @@ BindAddress = ${host}:${port}
             '162.159.192.1:2408',
             'engage.cloudflareclient.com:2408',
             '162.159.193.1:2408',
-            '162.159.195.1:500'
+            '162.159.195.1:2408',
+            '188.114.97.1:2408'
           ].filter((v, i, a) => v && a.indexOf(v) === i);
 
           let targetPort = candidatePorts[0];

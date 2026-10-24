@@ -9,6 +9,9 @@ set -e
 
 mkdir -p /app/data
 
+# Terminate any leftover wireproxy processes from previous runs to ensure clean ports
+pkill -9 -f wireproxy 2>/dev/null || true
+
 # If legacy warp-svc is present on the host/system, start dbus and warp-svc
 if command -v warp-svc >/dev/null 2>&1; then
   mkdir -p /var/run/dbus /var/lib/dbus /var/lib/cloudflare-warp

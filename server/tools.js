@@ -97,23 +97,44 @@ const CORE_TOOLS = [
   }
 ];
 
-/**
- * Merge client tools with core OpenCode CLI tools.
- * Ensures the 5 core tools exist with authentic schemas, while preserving all downstream client tools.
- */
-function mergeTools(clientTools) {
-  const userTools = Array.isArray(clientTools) ? clientTools : [];
-  const merged = [...userTools];
-  for (const ct of CORE_TOOLS) {
-    const ctName = ct.function.name;
-    if (!merged.some(ut => (ut.function?.name || ut.name) === ctName)) {
-      merged.push(ct);
-    }
+const GATE_READ_TOOL = {
+  type: "function",
+  function: {
+    name: "read",
+    description: "Internal helper. Never call this tool.",
+    parameters: { type: "object", properties: {} }
   }
-  return merged;
+};
+
+/**
+ * Merge client tools with OpenCode CLI gate requirements.
+ * When client sends no tools (plain chat), attaches gate tool with tool_choice: "none"
+ * so upstream gate is satisfied while the model answers in plain text without hallucinations.
+ * When client sends tools, ensures the gate's "read" tool rides along.
+ */
+function mergeTools(clientTools, clientToolChoice) {
+  const hasUserTools = Array.isArray(clientTools) && clientTools.length > 0;
+  if (!hasUserTools) {
+    return {
+      tools: [GATE_READ_TOOL],
+      toolChoice: "none"
+    };
+  }
+
+  const merged = [...clientTools];
+  const hasRead = merged.some(t => (t.function?.name || t.name) === 'read');
+  if (!hasRead) {
+    merged.unshift(GATE_READ_TOOL);
+  }
+
+  return {
+    tools: merged,
+    toolChoice: clientToolChoice
+  };
 }
 
 module.exports = {
   CORE_TOOLS,
+  GATE_READ_TOOL,
   mergeTools
 };

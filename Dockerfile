@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     procps \
+    psmisc \
     && ARCH="${TARGETARCH:-amd64}" \
     && curl -fsSL "https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_linux_${ARCH}.tar.gz" -o /tmp/wireproxy.tar.gz \
     && tar -xzf /tmp/wireproxy.tar.gz -C /usr/local/bin/ wireproxy \

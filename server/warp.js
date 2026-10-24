@@ -14,15 +14,36 @@ const WIREPROXY_CONF = path.join(DATA_DIR, 'wireproxy.conf');
 
 const WARP_ENDPOINTS = [
   '162.159.192.1:2408',
+  'engage.cloudflareclient.com:2408',
   '162.159.193.1:2408',
-  '188.114.97.1:2408',
   '162.159.195.1:500',
-  '188.114.96.1:2408',
   '162.159.192.1:500',
-  '188.114.98.1:1701',
-  '188.114.99.1:4500',
-  'engage.cloudflareclient.com:2408'
+  '188.114.97.1:2408'
 ];
+
+const OPENCODE_IPV6_TARGETS = [
+  '2606:4700:78::90:0:140',
+  '2606:4700:78::90:0:141',
+  '2606:4700:78::90:0:142',
+  '2606:4700:78::90:0:143'
+];
+
+function parseIpv6Address(ip) {
+  let parts = ip.split(':');
+  if (ip.includes('::')) {
+    const emptyIdx = parts.indexOf('');
+    const before = parts.slice(0, emptyIdx).filter(Boolean);
+    const after = parts.slice(emptyIdx + 1).filter(Boolean);
+    const missing = 8 - (before.length + after.length);
+    const zeroes = new Array(missing).fill('0');
+    parts = [...before, ...zeroes, ...after];
+  }
+  const buf = Buffer.alloc(16);
+  for (let i = 0; i < 8; i++) {
+    buf.writeUInt16BE(parseInt(parts[i] || '0', 16), i * 2);
+  }
+  return buf;
+}
 
 class CloudflareWarpManager {
   constructor() {
@@ -171,6 +192,15 @@ class CloudflareWarpManager {
         procInfo.proc.kill('SIGKILL');
       } catch (e) {}
       this.portProcesses.delete(port);
+    }
+
+    // On Linux: ruthlessly terminate any orphaned wireproxy process holding this port or config
+    if (process.platform === 'linux') {
+      try {
+        const { execSync } = require('child_process');
+        execSync(`pkill -9 -f wireproxy_${port}.conf 2>/dev/null || true`);
+        execSync(`fuser -k ${port}/tcp 2>/dev/null || true`);
+      } catch (e) {}
     }
 
     // Wait and verify socket is truly closed so no EADDRINUSE happens
@@ -610,15 +640,22 @@ BindAddress = ${host}:${port}
 
     this.portProcesses.set(port, { proc, startedAt: Date.now(), account });
 
+    let lastStdout = '';
+    let lastStderr = '';
+
     proc.stdout.on('data', d => {
       const msg = d.toString().trim();
-      if (msg.includes('bind:') || msg.includes('error')) console.warn(`[WireProxy:${port}]`, msg);
+      lastStdout = msg;
+      if (msg.includes('bind:') || msg.includes('error') || msg.includes('fatal')) console.warn(`[WireProxy:${port}]`, msg);
     });
 
     proc.stderr.on('data', d => {
       const msg = d.toString().trim();
+      lastStderr = msg;
       if (msg.includes('Interface state was Down, requested Up, now Up')) {
         console.log(`[WireProxy:${port}] Tunnel connected to Cloudflare Edge (warp=on)`);
+      } else if (msg.includes('error') || msg.includes('fatal') || msg.includes('bind:')) {
+        console.warn(`[WireProxy:${port}]`, msg);
       }
     });
 
@@ -626,7 +663,11 @@ BindAddress = ${host}:${port}
       procExited = true;
       procExitCode = code;
       procExitSignal = sig;
-      console.warn(`[WireProxy:${port}] Process exited (code: ${code}, signal: ${sig})`);
+      if (code !== 0 && code !== null) {
+        console.warn(`[WireProxy:${port}] Process exited (code: ${code}, signal: ${sig}) - last stderr: "${lastStderr}", last stdout: "${lastStdout}"`);
+      } else {
+        console.log(`[WireProxy:${port}] Process exited (code: ${code}, signal: ${sig})`);
+      }
       const current = this.portProcesses.get(port);
       if (current && current.proc === proc) {
         this.portProcesses.delete(port);
@@ -1067,7 +1108,12 @@ BindAddress = ${host}:${port}
         // Option 1: Running Userspace WireProxy (Pre-Warmed Multi-Port Zero-Downtime Hot-Swap)
         if (this.wireproxyPath) {
           const currentPort = this.getActivePort();
-          const targetPort = this.getNextPort(currentPort);
+          const allPorts = [this.basePort, this.basePort + 1, this.basePort + 2, this.basePort + 3];
+          const primaryNext = this.getNextPort(currentPort);
+          const candidatePorts = [
+            primaryNext,
+            ...allPorts.filter(p => p !== currentPort && p !== primaryNext)
+          ];
           const pool = await this.ensureAccountPool();
 
           // If rate limit triggered rotation: immediately mark current account on cooldown
@@ -1111,37 +1157,47 @@ BindAddress = ${host}:${port}
           const candidateEndpoints = [
             this.sanitizeEndpoint(account.endpoint),
             '162.159.192.1:2408',
+            'engage.cloudflareclient.com:2408',
             '162.159.193.1:2408',
-            '188.114.97.1:2408',
             '162.159.195.1:500'
           ].filter((v, i, a) => v && a.indexOf(v) === i);
 
+          let targetPort = candidatePorts[0];
           let started = false;
           let lastErr = null;
-          for (const ep of candidateEndpoints) {
-            account.endpoint = ep;
-            console.log(`[WARP] Initiating zero-downtime hot-swap rotation (${reason}) to port ${targetPort} (${ep})...`);
-            this.setProgress(50, 'hot_swapping', `Launching pre-warmed WireProxy tunnel on port ${targetPort} (${ep})...`);
-            try {
-              await this.startWireproxy(account, targetPort);
-              started = true;
-              break;
-            } catch (err) {
-              lastErr = err;
-              console.warn(`[WARP] Rotation candidate endpoint ${ep} on port ${targetPort} failed:`, err.message);
-              await new Promise(r => setTimeout(r, 400));
+
+          for (const portToTry of candidatePorts) {
+            targetPort = portToTry;
+            for (const ep of candidateEndpoints) {
+              account.endpoint = ep;
+              console.log(`[WARP] Initiating zero-downtime hot-swap rotation (${reason}) to port ${targetPort} (${ep})...`);
+              this.setProgress(50, 'hot_swapping', `Launching pre-warmed WireProxy tunnel on port ${targetPort} (${ep})...`);
+              try {
+                await this.startWireproxy(account, targetPort);
+                started = true;
+                break;
+              } catch (err) {
+                lastErr = err;
+                console.warn(`[WARP] Rotation candidate endpoint ${ep} on port ${targetPort} failed:`, err.message);
+                await new Promise(r => setTimeout(r, 400));
+              }
             }
+            if (started) break;
           }
 
           if (!started) {
             console.warn(`[WARP] All candidate endpoints failed for account offset ${chosenOffset}. Purging bad account and refreshing...`);
             const replacement = await this.replaceBadAccount(chosenOffset);
             if (replacement) {
-              try {
-                await this.startWireproxy(replacement, targetPort);
-                started = true;
-              } catch (reErr) {
-                lastErr = reErr;
+              for (const portToTry of candidatePorts) {
+                targetPort = portToTry;
+                try {
+                  await this.startWireproxy(replacement, targetPort);
+                  started = true;
+                  break;
+                } catch (reErr) {
+                  lastErr = reErr;
+                }
               }
             }
           }
@@ -1263,13 +1319,26 @@ BindAddress = ${host}:${port}
             }
             return reject(new Error('SOCKS5 auth negotiation failed with WARP daemon'));
           }
-          // CONNECT request: [VER=5, CMD=1, RSV=0, ATYP=3 (DOMAIN), LEN, ...domain, PORT_HI, PORT_LO]
-          const hostBuf = Buffer.from(targetHost);
-          const req = Buffer.concat([
-            Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]),
-            hostBuf,
-            Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff])
-          ]);
+          // CONNECT request:
+          // For odd ports (40001, 40003), route opencode.ai directly over IPv6 [ATYP=4]
+          // so WireProxy uses the dedicated, unique IPv6 address of the WARP account!
+          let req;
+          if (pPort % 2 !== 0 && targetHost === 'opencode.ai') {
+            const v6Addr = OPENCODE_IPV6_TARGETS[Math.floor(Math.random() * OPENCODE_IPV6_TARGETS.length)];
+            const v6Buf = parseIpv6Address(v6Addr);
+            req = Buffer.concat([
+              Buffer.from([0x05, 0x01, 0x00, 0x04]),
+              v6Buf,
+              Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff])
+            ]);
+          } else {
+            const hostBuf = Buffer.from(targetHost);
+            req = Buffer.concat([
+              Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]),
+              hostBuf,
+              Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff])
+            ]);
+          }
           state = 'connect';
           socket.write(req);
         } else if (state === 'connect') {

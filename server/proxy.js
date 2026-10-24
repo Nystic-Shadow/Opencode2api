@@ -312,7 +312,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   }
 
   const baseSanitized = sanitizeClientPayload(clientPayload);
-  const mergedTools = tools.mergeTools(clientPayload.tools);
+  const toolResult = tools.mergeTools(clientPayload.tools, clientPayload.tool_choice);
+  const mergedTools = toolResult.tools;
+  const mergedToolChoice = toolResult.toolChoice;
 
   let currentModel = requestedModel;
   const hasImages = payloadHasImages(clientPayload);
@@ -339,6 +341,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       model: upstreamModel,
       stream: true,
       tools: mergedTools,
+      ...(mergedToolChoice !== undefined ? { tool_choice: mergedToolChoice } : {}),
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...(thinkingConfig ? { thinking: thinkingConfig } : {})
     };
@@ -350,7 +353,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       let isTimedOut = false;
       const upstreamReq = https.request({
         hostname: 'opencode.ai',
-        path: '/inference/openai/v1/chat/completions',
+        path: '/inference/v1/chat/completions',
         method: 'POST',
         headers: upstreamHeaders,
         agent: getUpstreamAgent(attempt, useWarp, currentWarpPort),
@@ -514,6 +517,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           const rTokens = finalUsage?.completion_tokens_details?.reasoning_tokens || Math.ceil(accumulatedReasoning.length / 4);
           const total = finalUsage?.total_tokens || (pTokens + cTokens);
 
+          const realToolCalls = accumulatedToolCalls.filter(tc => tc.function?.name !== 'read');
           const responseJson = {
             id: completionId,
             object: "chat.completion",
@@ -526,9 +530,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
                   role: "assistant",
                   content: accumulatedContent,
                   reasoning_content: accumulatedReasoning || undefined,
-                  tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
+                  tool_calls: realToolCalls.length > 0 ? realToolCalls : undefined
                 },
-                finish_reason: accumulatedToolCalls.length > 0 ? "tool_calls" : "stop"
+                finish_reason: realToolCalls.length > 0 ? "tool_calls" : "stop"
               }
             ],
             usage: finalUsage || {
@@ -859,7 +863,18 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     }));
   }
 
-  const mergedTools = tools.mergeTools(clientTools);
+  let clientToolChoice = undefined;
+  if (clientPayload.tool_choice) {
+    if (clientPayload.tool_choice.type === 'auto') clientToolChoice = 'auto';
+    else if (clientPayload.tool_choice.type === 'any') clientToolChoice = 'required';
+    else if (clientPayload.tool_choice.type === 'tool' && clientPayload.tool_choice.name) {
+      clientToolChoice = { type: 'function', function: { name: clientPayload.tool_choice.name } };
+    }
+  }
+
+  const toolResult = tools.mergeTools(clientTools, clientToolChoice);
+  const mergedTools = toolResult.tools;
+  const mergedToolChoice = toolResult.toolChoice;
 
   const isFreeOnly = config.get('free_only') !== false;
   const isRequestedFree = discovery.isModelFree(requestedModel);
@@ -916,6 +931,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       messages: openAiMessages,
       stream: true,
       tools: mergedTools,
+      ...(mergedToolChoice !== undefined ? { tool_choice: mergedToolChoice } : {}),
       ...(clientPayload.temperature !== undefined ? { temperature: clientPayload.temperature } : {}),
       ...(clientPayload.top_p !== undefined ? { top_p: clientPayload.top_p } : {}),
       ...(clientPayload.max_tokens ? { max_tokens: clientPayload.max_tokens } : {})
@@ -928,7 +944,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       let isTimedOut = false;
       const upstreamReq = https.request({
         hostname: 'opencode.ai',
-        path: '/inference/openai/v1/chat/completions',
+        path: '/inference/v1/chat/completions',
         method: 'POST',
         headers: upstreamHeaders,
         agent: getUpstreamAgent(attempt, useWarp, currentWarpPort),
@@ -1147,6 +1163,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
                 if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
                   for (const tc of delta.tool_calls) {
+                    if (tc.function?.name === 'read') continue;
                     const tIndex = tc.index !== undefined ? tc.index : 0;
                     ensureToolBlock(tIndex, tc.id, tc.function?.name);
                     if (tc.function?.arguments) {
@@ -1231,7 +1248,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
               text: accumulatedContent
             });
           }
-          for (const tc of accumulatedToolCalls) {
+          const realToolCalls = accumulatedToolCalls.filter(tc => tc.function?.name !== 'read');
+          for (const tc of realToolCalls) {
             let parsedInput = {};
             try { parsedInput = JSON.parse(tc.function.arguments); } catch (e) {}
             content.push({
@@ -1248,7 +1266,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             role: 'assistant',
             model: requestedModel,
             content: content,
-            stop_reason: accumulatedToolCalls.length > 0 ? 'tool_use' : 'end_turn',
+            stop_reason: realToolCalls.length > 0 ? 'tool_use' : 'end_turn',
             stop_sequence: null,
             usage: {
               input_tokens: pTokens,

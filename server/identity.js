@@ -68,7 +68,7 @@ function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
   const headers = {
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/event-stream',
-    'User-Agent': `opencode/latest/${clientVersion}/opencode`,
+    'User-Agent': `opencode/${clientVersion}`,
     'x-opencode-client': 'opencode',
     'x-opencode-session': sessionId,
     'x-opencode-session-id': sessionId,
@@ -78,11 +78,11 @@ function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
     'Content-Length': payloadLength
   };
 
-  // Only pass Authorization header if a genuine Zen / OpenCode key is configured.
-  // Official OpenCode CLI NEVER sends "Bearer public" to upstream inference endpoints;
-  // sending "Bearer public" causes upstream to bucket all requests into a single shared quota.
+  // Upstream requires Bearer public for anonymous free tier access, or genuine key when provided
   if (upstreamKey && upstreamKey.trim()) {
     headers['Authorization'] = `Bearer ${upstreamKey.trim()}`;
+  } else {
+    headers['Authorization'] = 'Bearer public';
   }
 
   return headers;

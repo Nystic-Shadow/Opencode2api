@@ -1,6 +1,6 @@
 {
   "name": "opencode2api",
-  "version": "2.5.5",
+  "version": "2.5.6",
   "description": "High-performance OpenAI and Anthropic compatible API gateway for OpenCode free tier",
   "main": "server/index.js",
   "scripts": {

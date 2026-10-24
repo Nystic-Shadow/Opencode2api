@@ -29,6 +29,9 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [updateMsg, setUpdateMsg] = useState(null);
+  const [proxyStatus, setProxyStatus] = useState(null);
+  const [isRescanningProxies, setIsRescanningProxies] = useState(false);
+  const [proxyFeedback, setProxyFeedback] = useState(null);
 
   useEffect(() => {
     const fetchWarp = async () => {
@@ -43,7 +46,20 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         }
       } catch (e) {}
     };
+    const fetchProxies = async () => {
+      try {
+        const token = localStorage.getItem('o2p_token');
+        const res = await fetch('/api/proxies/status', {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setProxyStatus(data);
+        }
+      } catch (e) {}
+    };
     fetchWarp();
+    fetchProxies();
   }, []);
 
   const pollWarpProgress = () => {
@@ -144,6 +160,28 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
       setWarpFeedback('Failed to trigger auto-install: ' + e.message);
     } finally {
       setIsInstallingWarp(false);
+    }
+  };
+
+  const handleRescanProxies = async () => {
+    setIsRescanningProxies(true);
+    setProxyFeedback('Proxy sweep initiated! Checking candidate endpoints directly against opencode.ai with strict 5x tests...');
+    try {
+      const token = localStorage.getItem('o2p_token');
+      const res = await fetch('/api/proxies/rescan', {
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setProxyStatus(data);
+        setProxyFeedback('5x strict verification sweep running in background. High-speed (<3s) proxies auto-added to clean pool.');
+      }
+      setTimeout(() => setProxyFeedback(null), 5000);
+    } catch (e) {
+      setProxyFeedback('Proxy rescan error: ' + e.message);
+    } finally {
+      setIsRescanningProxies(false);
     }
   };
 
@@ -543,6 +581,112 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Inbuilt Scraped Proxy Engine Card */}
+      <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', border: '1px solid var(--border)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+              <h3 style={{ fontSize: '1rem', fontWeight: '700', margin: 0 }}>
+                Inbuilt Scraped Proxy Pool
+              </h3>
+              <span className={`badge ${proxyStatus?.verifiedCount > 0 ? 'badge-active' : 'badge-idle'}`}>
+                {proxyStatus?.isScanning ? '⚡ 5x Probing Sweep...' : (proxyStatus?.verifiedCount > 0 ? `● ${proxyStatus.verifiedCount} Verified Live (<3s)` : '○ Standby')}
+              </span>
+            </div>
+            <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', margin: 0 }}>
+              Autonomous global proxy scraper with strict 5-pass verification directly against <code>opencode.ai:443</code>. Guaranteed latency &lt;3000ms. Provides instant zero-downtime failover whenever Cloudflare WARP or direct IPs reach capacity limits.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleRescanProxies}
+            disabled={isRescanningProxies || proxyStatus?.isScanning}
+            className="btn btn-secondary"
+            style={{ fontSize: '0.78rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+          >
+            <span>{isRescanningProxies || proxyStatus?.isScanning ? '⏳ Sweeping & Verifying...' : '🔄 Rescan & Verify 5x Now'}</span>
+          </button>
+        </div>
+
+        {proxyFeedback && (
+          <div style={{
+            padding: '0.65rem',
+            backgroundColor: 'var(--muted)',
+            borderRadius: 'var(--radius)',
+            borderLeft: '3px solid #2fbc5b',
+            fontSize: '0.8rem'
+          }}>
+            {proxyFeedback}
+          </div>
+        )}
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+          gap: '0.75rem',
+          padding: '0.75rem',
+          backgroundColor: 'var(--background)',
+          borderRadius: 'var(--radius)',
+          border: '1px solid var(--border)'
+        }}>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Active Clean Pool</div>
+            <div style={{ fontSize: '1.1rem', fontWeight: '800', color: '#2fbc5b' }}>
+              {proxyStatus?.verifiedCount || 0} <span style={{ fontSize: '0.75rem', fontWeight: '500' }}>proxies</span>
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Fastest Proxy Latency</div>
+            <div style={{ fontSize: '1.1rem', fontWeight: '800', color: 'var(--foreground)' }}>
+              {proxyStatus?.fastestProxy ? `${proxyStatus.fastestProxy.latency}ms` : 'Scanning...'}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Validation Strictness</div>
+            <div style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--foreground)' }}>
+              5x Consecutive Passes (&le;3s)
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Target Egress Target</div>
+            <div style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--foreground)' }}>
+              Direct <code>opencode.ai:443</code>
+            </div>
+          </div>
+        </div>
+
+        {proxyStatus?.topProxies && proxyStatus.topProxies.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+            <div style={{ fontSize: '0.75rem', fontWeight: '600', color: 'var(--muted-foreground)' }}>
+              Top Verified High-Speed Proxies (Ready for Instant Egress Failover):
+            </div>
+            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+              {proxyStatus.topProxies.map((p, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    padding: '0.25rem 0.55rem',
+                    backgroundColor: 'var(--muted)',
+                    borderRadius: 'var(--radius)',
+                    border: '1px solid var(--border)',
+                    fontSize: '0.72rem',
+                    fontFamily: 'monospace',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem'
+                  }}
+                >
+                  <span style={{ color: '#2fbc5b', fontWeight: '700' }}>{p.latency}ms</span>
+                  <span style={{ color: 'var(--foreground)' }}>{p.endpoint}</span>
+                  <span style={{ color: 'var(--muted-foreground)', fontSize: '0.65rem' }}>({p.passes}/5 ✓)</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Settings Form */}

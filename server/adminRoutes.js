@@ -7,6 +7,7 @@ const updater = require('./updater');
 const notifications = require('./notifications');
 const proxy = require('./proxy');
 const warp = require('./warp');
+const proxyScraper = require('./proxyScraper');
 
 // In-memory admin sessions
 const sessions = new Set();
@@ -224,6 +225,18 @@ async function handleAdminRoute(req, res, pathname) {
     const resInstall = await warp.triggerAutoInstall();
     const status = await warp.getStatus();
     return sendJson(res, 200, { ...resInstall, ...status });
+  }
+
+  // Inbuilt Scraped Proxies: Pool Status
+  if (pathname === '/api/proxies/status' && req.method === 'GET') {
+    return sendJson(res, 200, proxyScraper.getStatus());
+  }
+
+  // Inbuilt Scraped Proxies: Trigger Fast Re-scan
+  if (pathname === '/api/proxies/rescan' && req.method === 'POST') {
+    proxyScraper.runScrapeAndVerify().catch(() => {});
+    notifications.add('Proxy Sweep Started', 'Strict 5x verification sweep initiated for scraped proxy pool.', 'info');
+    return sendJson(res, 200, { success: true, message: 'Strict proxy sweep started in background', ...proxyScraper.getStatus() });
   }
 
   // Settings: Check CLI Update

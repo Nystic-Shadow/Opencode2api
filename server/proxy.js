@@ -9,6 +9,7 @@ const discovery = require('./discovery');
 const keys = require('./keys');
 const metrics = require('./metrics');
 const warp = require('./warp');
+const proxyScraper = require('./proxyScraper');
 
 // High-performance keepAlive connection agent: keeps TLS sockets hot, eliminates handshake lag
 const upstreamAgent = new https.Agent({
@@ -161,12 +162,25 @@ const routeHealth = {
 };
 
 /**
- * Returns either a Cloudflare WARP SOCKS5 agent, proxy tunnel agent, or direct keepAlive agent.
+ * Returns either a Cloudflare WARP SOCKS5 agent, scraped proxy agent, proxy tunnel agent, or direct keepAlive agent.
  */
-function getUpstreamAgent(attempt = 1, useWarp = false, targetPort = null) {
-  if (useWarp && warp.isReady()) {
-    const port = targetPort || warp.getBestPort();
+function getUpstreamAgent(attempt = 1, routeTypeOrUseWarp = 'warp', targetParam = null) {
+  let routeType = routeTypeOrUseWarp;
+  if (typeof routeTypeOrUseWarp === 'boolean') {
+    routeType = routeTypeOrUseWarp ? 'warp' : 'direct';
+  }
+
+  if (routeType === 'warp' && warp.isReady()) {
+    const port = typeof targetParam === 'number' ? targetParam : warp.getBestPort();
     return warp.getWarpAgent(port, config.get('warp_host'));
+  }
+
+  if (routeType === 'scraped') {
+    const proxyObj = (targetParam && typeof targetParam === 'object') ? targetParam : proxyScraper.getBestProxy();
+    if (proxyObj) {
+      const agent = proxyScraper.createProxyAgent(proxyObj);
+      if (agent) return agent;
+    }
   }
 
   const envProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -175,51 +189,53 @@ function getUpstreamAgent(attempt = 1, useWarp = false, targetPort = null) {
     ? configuredProxies
     : (envProxy ? [envProxy] : []);
 
-  if (proxyList.length > 0) {
-    const proxyUrlStr = proxyList[(attempt - 1) % proxyList.length];
-    try {
-      const proxyUrl = new URL(proxyUrlStr);
-      const agent = new https.Agent({
-        keepAlive: true
-      });
-      agent.createConnection = function(options, callback) {
-        const targetHost = options.host || options.hostname || 'opencode.ai';
-        const targetPort = options.port || 443;
-        const connectReq = http.request({
-          host: proxyUrl.hostname,
-          port: proxyUrl.port || 80,
-          method: 'CONNECT',
-          path: `${targetHost}:${targetPort}`,
-          headers: {
-            Host: `${targetHost}:${targetPort}`,
-            ...(proxyUrl.username ? {
-              'Proxy-Authorization': 'Basic ' + Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString('base64')
-            } : {})
-          },
-          timeout: 10000
+  if (routeType === 'user_proxy' || (routeType !== 'warp' && routeType !== 'scraped' && proxyList.length > 0)) {
+    if (proxyList.length > 0) {
+      const proxyUrlStr = proxyList[(attempt - 1) % proxyList.length];
+      try {
+        const proxyUrl = new URL(proxyUrlStr);
+        const agent = new https.Agent({
+          keepAlive: true
         });
-        connectReq.on('timeout', () => {
-          connectReq.destroy(new Error(`Proxy CONNECT to ${proxyUrl.host} timed out`));
-        });
-        connectReq.on('connect', (res, socket, head) => {
-          if (res.statusCode !== 200) {
-            callback(new Error(`Proxy CONNECT returned HTTP ${res.statusCode}`));
-            return;
-          }
-          const tlsSocket = tls.connect({
-            socket: socket,
-            servername: options.servername || targetHost
-          }, () => {
-            callback(null, tlsSocket);
+        agent.createConnection = function(options, callback) {
+          const targetHost = options.host || options.hostname || 'opencode.ai';
+          const targetPort = options.port || 443;
+          const connectReq = http.request({
+            host: proxyUrl.hostname,
+            port: proxyUrl.port || 80,
+            method: 'CONNECT',
+            path: `${targetHost}:${targetPort}`,
+            headers: {
+              Host: `${targetHost}:${targetPort}`,
+              ...(proxyUrl.username ? {
+                'Proxy-Authorization': 'Basic ' + Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString('base64')
+              } : {})
+            },
+            timeout: 10000
           });
-          tlsSocket.on('error', err => callback(err));
-        });
-        connectReq.on('error', err => callback(err));
-        connectReq.end();
-      };
-      return agent;
-    } catch (err) {
-      console.error('[ProxyAgent] Failed to create proxy agent, falling back to direct:', err.message);
+          connectReq.on('timeout', () => {
+            connectReq.destroy(new Error(`Proxy CONNECT to ${proxyUrl.host} timed out`));
+          });
+          connectReq.on('connect', (res, socket, head) => {
+            if (res.statusCode !== 200) {
+              callback(new Error(`Proxy CONNECT returned HTTP ${res.statusCode}`));
+              return;
+            }
+            const tlsSocket = tls.connect({
+              socket: socket,
+              servername: options.servername || targetHost
+            }, () => {
+              callback(null, tlsSocket);
+            });
+            tlsSocket.on('error', err => callback(err));
+          });
+          connectReq.on('error', err => callback(err));
+          connectReq.end();
+        };
+        return agent;
+      } catch (err) {
+        console.error('[ProxyAgent] Failed to create proxy agent, falling back to direct:', err.message);
+      }
     }
   }
 
@@ -402,20 +418,32 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 5;
   const requestTimeout = config.get('request_timeout_ms') || 60000;
   let requestWarpFailed = false;
-  let useWarp = routeHealth.shouldUseWarp(1);
-  let currentWarpPort = warp.getBestPort();
   const triedWarpPorts = new Set();
   let warpRotatedInThisRequest = false;
 
+  const egressMode = config.get('egress_mode') || 'hybrid';
+  let activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
+  if (egressMode === 'scraped_only') {
+    const p = proxyScraper.getBestProxy();
+    activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
+  } else if (!warp.isReady() || config.get('warp_mode') === 'disabled' || routeHealth.isWarpDegraded()) {
+    const p = proxyScraper.getBestProxy();
+    activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
+  }
+
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
-    if (attempt > 1 && triedWarpPorts.size === 0) {
-      useWarp = requestWarpFailed ? false : routeHealth.shouldUseWarp(attempt);
-      if (useWarp) currentWarpPort = warp.getBestPort();
-    }
+    let useWarp = activeRoute.type === 'warp';
+    let currentWarpPort = activeRoute.port || warp.getBestPort();
+
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
 
-    // Use persistent session per route to leverage session affinity & prompt caching
-    const routeKey = useWarp ? `warp:${currentWarpPort}` : 'direct';
+    let routeKey = 'direct';
+    if (activeRoute.type === 'warp') {
+      routeKey = `warp:${currentWarpPort}`;
+    } else if (activeRoute.type === 'scraped' && activeRoute.proxy) {
+      routeKey = `scraped:${activeRoute.proxy.host}:${activeRoute.proxy.port}`;
+    }
+
     const session = persistentSessions.getOrCreate(routeKey);
     const sessionId = session.sessionId;
     const projectId = session.projectId;
@@ -423,18 +451,17 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     // Local rate limiter: check if this route has capacity before hitting upstream
     const waitMs = localRateLimiter.waitTime(routeKey);
     if (waitMs > 0 && attempt <= maxRetries) {
-      // This route is throttled — try a different route first before waiting
-      if (useWarp) {
+      if (activeRoute.type === 'warp') {
         const altPort = warp.getBestPort([...triedWarpPorts, currentWarpPort]);
         if (altPort && !triedWarpPorts.has(altPort)) {
           const altRouteKey = `warp:${altPort}`;
           if (localRateLimiter.canProceed(altRouteKey)) {
             currentWarpPort = altPort;
-            continue; // Re-enter loop with new port
+            activeRoute.port = altPort;
+            continue;
           }
         }
       }
-      // No alternative route — wait for throttle to clear (but cap at 5s)
       const cappedWait = Math.min(waitMs, 5000);
       console.log(`[RateLimiter] Route ${routeKey} throttled, waiting ${Math.round(cappedWait/1000)}s...`);
       await new Promise(r => setTimeout(r, cappedWait));
@@ -461,7 +488,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         path: '/inference/v1/chat/completions',
         method: 'POST',
         headers: upstreamHeaders,
-        agent: getUpstreamAgent(attempt, useWarp, currentWarpPort),
+        agent: getUpstreamAgent(attempt, activeRoute.type, activeRoute.type === 'warp' ? currentWarpPort : activeRoute.proxy),
         timeout: requestTimeout
       }, (upstreamRes) => {
         // If upstream error (non-200), buffer body to inspect retryability
@@ -469,9 +496,12 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           let errBody = '';
           upstreamRes.on('data', chunk => errBody += chunk.toString());
           upstreamRes.on('end', () => {
-            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${useWarp ? 'WARP' : 'Direct'}): ${errBody}`);
+            const routeDesc = activeRoute.type === 'warp'
+              ? `WARP:${currentWarpPort}`
+              : (activeRoute.type === 'scraped' && activeRoute.proxy ? `Proxy:${activeRoute.proxy.host}` : 'Direct');
+            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${routeDesc}): ${errBody}`);
             if (upstreamRes.statusCode === 429 || upstreamRes.statusCode === 403) {
-              if (useWarp && typeof warp.clearAgent === 'function') {
+              if (activeRoute.type === 'warp' && typeof warp.clearAgent === 'function') {
                 warp.clearAgent(currentWarpPort);
               }
               try { upstreamReq.destroy(); } catch (e) {}
@@ -719,7 +749,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       bodyStr.includes('Rate limit');
     const isForbidden = statusCode === 403;
 
-    const isWarpFailure = useWarp && (
+    const isWarpFailure = activeRoute.type === 'warp' && (
       statusCode === 502 ||
       statusCode === 504 ||
       bodyStr.includes('ECONNREFUSED') ||
@@ -729,76 +759,99 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       bodyStr.includes('SOCKS5')
     );
 
-    // If WARP proxy failed with network/socket error, attempt rapid rotation to healthy tunnel slot
+    const isScrapedFailure = activeRoute.type === 'scraped' && (
+      statusCode === 502 ||
+      statusCode === 504 ||
+      bodyStr.includes('ECONNREFUSED') ||
+      bodyStr.includes('timeout') ||
+      bodyStr.includes('ETIMEDOUT') ||
+      bodyStr.includes('ECONNRESET') ||
+      bodyStr.includes('CONNECT') ||
+      bodyStr.includes('SOCKS5')
+    );
+
     if (isWarpFailure) {
-      console.warn(`[Proxy] WARP connection notice (${attemptResult.body}), rotating to clean tunnel slot...`);
+      console.warn(`[Proxy] WARP connection notice (${attemptResult.body}), evaluating failover...`);
       routeHealth.markWarpDegraded(attemptResult.body);
-      if (!warpRotatedInThisRequest) {
-        const rotated = await warp.rotateKeys('connection_failure');
+      const bestScraped = proxyScraper.getBestProxy();
+      if (bestScraped) {
+        console.log(`[Proxy] Failover from WARP socket error to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (${bestScraped.latency}ms)`);
+        activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
+      } else if (!warpRotatedInThisRequest) {
+        warp.rotateKeys('connection_failure').catch(() => {});
         warpRotatedInThisRequest = true;
-        if (rotated) {
-          useWarp = true;
-          requestWarpFailed = false;
-        } else {
-          useWarp = false;
-          requestWarpFailed = true;
-        }
+      }
+    } else if (isScrapedFailure) {
+      if (activeRoute.proxy) {
+        proxyScraper.markProxyBurned(`${activeRoute.proxy.host}:${activeRoute.proxy.port}`, 1800);
+      }
+      const nextScraped = proxyScraper.getBestProxy();
+      if (nextScraped) {
+        console.log(`[Proxy] Scraped proxy socket notice. Rotating to next verified proxy: ${nextScraped.type}://${nextScraped.host}:${nextScraped.port} (${nextScraped.latency}ms)`);
+        activeRoute = { type: 'scraped', port: null, proxy: nextScraped };
+      } else if (warp.isReady()) {
+        activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
       }
     } else if (isRateLimited || isForbidden) {
       const retryAfterHeader = attemptResult.headers?.['retry-after'];
       const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
 
-      // Mark this route as burned in local rate limiter so we don't re-hit it immediately
-      const burnedRouteKey = useWarp ? `warp:${currentWarpPort}` : 'direct';
-      localRateLimiter.markBurned(burnedRouteKey, retryAfterSec > 0 ? retryAfterSec * 1000 : 120000);
-      persistentSessions.rotate(burnedRouteKey);
+      localRateLimiter.markBurned(routeKey, retryAfterSec > 0 ? retryAfterSec * 1000 : 120000);
+      persistentSessions.rotate(routeKey);
 
-      if (useWarp) {
-        console.warn(`[WARP] Rate limit detected on port ${currentWarpPort}. Swapping account and refreshing tunnel...`);
+      if (activeRoute.type === 'warp') {
+        console.warn(`[WARP] Rate limit detected on port ${currentWarpPort}. Marking burned...`);
         warp.markAccountBurned(currentWarpPort, retryAfterSec);
         triedWarpPorts.add(currentWarpPort);
 
-        // Immediately trigger background key refresh if available
-        if (typeof warp.rotateKeys === 'function') {
-          warp.rotateKeys('auto_rate_limit').catch(() => {});
-        }
-
-        // Seamlessly hop to next live port that hasn't been tried yet in this request
         const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
         if (nextPort && !triedWarpPorts.has(nextPort)) {
           currentWarpPort = nextPort;
-          useWarp = true;
+          activeRoute = { type: 'warp', port: nextPort, proxy: null };
           console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
         } else {
-          // All active ports in pool have been tried for this request.
-          // Trigger a rapid key rotation to bring up a fresh account with a new IP
-          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Rotating keys for fresh egress IP...');
-          const rotated = await warp.rotateKeys('auto_rate_limit');
-          if (rotated) {
-            currentWarpPort = warp.getBestPort();
-            useWarp = true;
-            triedWarpPorts.clear(); // Reset tried ports since we have a fresh IP now
+          // All active WARP slots burned! Instant zero-downtime failover to verified clean proxy pool!
+          const bestScraped = proxyScraper.getBestProxy();
+          if (bestScraped) {
+            console.log(`[RouteManager] 🚀 Cloudflare WARP pool at capacity. Instant failover to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (latency: ${bestScraped.latency}ms)`);
+            activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
           } else {
-            useWarp = config.get('warp_mode') === 'always' || routeHealth.isDirectDegraded();
+            console.warn('[WARP Pool] All active slots hit capacity. Rotating keys...');
+            warp.rotateKeys('auto_rate_limit').catch(() => {});
+          }
+        }
+      } else if (activeRoute.type === 'scraped') {
+        if (activeRoute.proxy) {
+          proxyScraper.markProxyBurned(`${activeRoute.proxy.host}:${activeRoute.proxy.port}`, retryAfterSec || 1800);
+        }
+        const nextScraped = proxyScraper.getBestProxy();
+        if (nextScraped) {
+          console.log(`[Proxy] Scraped proxy rate-limited. Rotating to next verified proxy: ${nextScraped.host}:${nextScraped.port} (${nextScraped.latency}ms)...`);
+          activeRoute = { type: 'scraped', port: null, proxy: nextScraped };
+        } else {
+          const nextWarpPort = warp.getBestPort();
+          if (nextWarpPort && warp.isReady()) {
+            activeRoute = { type: 'warp', port: nextWarpPort, proxy: null };
+          } else {
+            activeRoute = { type: 'direct', port: null, proxy: null };
           }
         }
       } else {
-        // Direct route hit rate limit, check if any WARP port is available
-        console.warn(`[Proxy] Direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Checking WARP tunnel pool...`);
-        routeHealth.markDirectDegraded(statusCode);
-        const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
-        if (nextPort && warp.isReady() && config.get('warp_mode') !== 'disabled') {
-          useWarp = true;
-          currentWarpPort = nextPort;
-        } else if (config.get('warp_mode') !== 'disabled') {
-          warp.autoBootstrap().catch(() => {});
+        // Direct route hit rate limit
+        const bestScraped = proxyScraper.getBestProxy();
+        if (bestScraped) {
+          activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
+        } else if (warp.isReady()) {
+          activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
         }
       }
-    } else if (!useWarp) {
-      // Direct route failed with other error
+    } else if (activeRoute.type === 'direct') {
       routeHealth.markDirectDegraded(statusCode || attemptResult.body);
-      if (warp.isReady() && !routeHealth.isWarpDegraded() && config.get('warp_mode') !== 'disabled') {
-        useWarp = true;
+      const bestScraped = proxyScraper.getBestProxy();
+      if (bestScraped) {
+        activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
+      } else if (warp.isReady()) {
+        activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
       }
     }
 
@@ -828,28 +881,21 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     }
 
     if (attempt <= maxRetries) {
-      const isRouteError = isRateLimited || isForbidden || isWarpFailure;
+      const isRouteError = isRateLimited || isForbidden || isWarpFailure || isScrapedFailure;
       const livePorts = [warp.basePort, warp.basePort + 1, warp.basePort + 2, warp.basePort + 3].filter(p => warp.portProcesses.has(p));
-      const poolCapacityExhausted = !useWarp || triedWarpPorts.size >= Math.min(2, Math.max(1, livePorts.length));
-      // Try model fallback if:
-      // 1. Model-specific failure (500/503/404), OR
-      // 2. All tunnel slots or 2+ distinct egress routes for this model have been tested, OR
-      // 3. We are on attempt >= 2 (allows 1 IP retry on the requested model before immediately failing over to healthy free models)
-      const shouldTryModelFallback = !isRouteError || poolCapacityExhausted || attempt >= 2;
+      const poolCapacityExhausted = activeRoute.type !== 'warp' || triedWarpPorts.size >= Math.min(2, Math.max(1, livePorts.length));
+      const shouldTryModelFallback = (!isRouteError || poolCapacityExhausted || attempt >= 3) && config.get('smart_fallback');
       const fallback = shouldTryModelFallback ? getNextFallbackModel(currentModel, triedModels, hasImages) : null;
       if (fallback) {
         console.log(`[Proxy] Model "${currentModel}" at capacity on tested routes. Smart failover to "${fallback}" (Attempt ${attempt}/${maxRetries + 1})...`);
         currentModel = fallback;
         triedModels.add(fallback);
-        const nextUntriedPort = warp.getBestPort(Array.from(triedWarpPorts));
-        if (nextUntriedPort && warp.isReady() && config.get('warp_mode') !== 'disabled') {
-          useWarp = true;
-          currentWarpPort = nextUntriedPort;
-        } else {
-          useWarp = (config.get('warp_mode') === 'always' || routeHealth.isDirectDegraded() || warp.isReady());
-        }
       } else {
-        const routeLabel = useWarp ? `Cloudflare WARP (port ${currentWarpPort})` : 'direct route';
+        const routeLabel = activeRoute.type === 'warp'
+          ? `Cloudflare WARP (port ${currentWarpPort})`
+          : (activeRoute.type === 'scraped' && activeRoute.proxy
+              ? `verified proxy (${activeRoute.proxy.host}:${activeRoute.proxy.port})`
+              : 'direct route');
         console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
       }
 
@@ -1041,20 +1087,32 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 5;
   const requestTimeout = config.get('request_timeout_ms') || 60000;
   let requestWarpFailed = false;
-  let useWarp = routeHealth.shouldUseWarp(1);
-  let currentWarpPort = warp.getBestPort();
   const triedWarpPorts = new Set();
   let warpRotatedInThisRequest = false;
 
+  const egressMode = config.get('egress_mode') || 'hybrid';
+  let activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
+  if (egressMode === 'scraped_only') {
+    const p = proxyScraper.getBestProxy();
+    activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
+  } else if (!warp.isReady() || config.get('warp_mode') === 'disabled' || routeHealth.isWarpDegraded()) {
+    const p = proxyScraper.getBestProxy();
+    activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
+  }
+
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
-    if (attempt > 1 && triedWarpPorts.size === 0) {
-      useWarp = requestWarpFailed ? false : routeHealth.shouldUseWarp(attempt);
-      if (useWarp) currentWarpPort = warp.getBestPort();
-    }
+    let useWarp = activeRoute.type === 'warp';
+    let currentWarpPort = activeRoute.port || warp.getBestPort();
+
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
 
-    // Use persistent session per route to leverage session affinity & prompt caching
-    const routeKey = useWarp ? `warp:${currentWarpPort}` : 'direct';
+    let routeKey = 'direct';
+    if (activeRoute.type === 'warp') {
+      routeKey = `warp:${currentWarpPort}`;
+    } else if (activeRoute.type === 'scraped' && activeRoute.proxy) {
+      routeKey = `scraped:${activeRoute.proxy.host}:${activeRoute.proxy.port}`;
+    }
+
     const session = persistentSessions.getOrCreate(routeKey);
     const sessionId = session.sessionId;
     const projectId = session.projectId;
@@ -1062,18 +1120,17 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     // Local rate limiter: check if this route has capacity before hitting upstream
     const waitMs = localRateLimiter.waitTime(routeKey);
     if (waitMs > 0 && attempt <= maxRetries) {
-      // This route is throttled — try a different route first before waiting
-      if (useWarp) {
+      if (activeRoute.type === 'warp') {
         const altPort = warp.getBestPort([...triedWarpPorts, currentWarpPort]);
         if (altPort && !triedWarpPorts.has(altPort)) {
           const altRouteKey = `warp:${altPort}`;
           if (localRateLimiter.canProceed(altRouteKey)) {
             currentWarpPort = altPort;
-            continue; // Re-enter loop with new port
+            activeRoute.port = altPort;
+            continue;
           }
         }
       }
-      // No alternative route — wait for throttle to clear (but cap at 5s)
       const cappedWait = Math.min(waitMs, 5000);
       console.log(`[RateLimiter] Route ${routeKey} throttled, waiting ${Math.round(cappedWait/1000)}s...`);
       await new Promise(r => setTimeout(r, cappedWait));
@@ -1101,16 +1158,19 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         path: '/inference/v1/chat/completions',
         method: 'POST',
         headers: upstreamHeaders,
-        agent: getUpstreamAgent(attempt, useWarp, currentWarpPort),
+        agent: getUpstreamAgent(attempt, activeRoute.type, activeRoute.type === 'warp' ? currentWarpPort : activeRoute.proxy),
         timeout: requestTimeout
       }, (upstreamRes) => {
         if (upstreamRes.statusCode !== 200) {
           let errBody = '';
           upstreamRes.on('data', chunk => errBody += chunk.toString());
           upstreamRes.on('end', () => {
-            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${useWarp ? 'WARP' : 'Direct'}): ${errBody}`);
+            const routeDesc = activeRoute.type === 'warp'
+              ? `WARP:${currentWarpPort}`
+              : (activeRoute.type === 'scraped' && activeRoute.proxy ? `Proxy:${activeRoute.proxy.host}` : 'Direct');
+            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for Anthropic model ${currentModel} (${routeDesc}): ${errBody}`);
             if (upstreamRes.statusCode === 429 || upstreamRes.statusCode === 403) {
-              if (useWarp && typeof warp.clearAgent === 'function') {
+              if (activeRoute.type === 'warp' && typeof warp.clearAgent === 'function') {
                 warp.clearAgent(currentWarpPort);
               }
               try { upstreamReq.destroy(); } catch (e) {}
@@ -1497,7 +1557,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       bodyStr.includes('Rate limit');
     const isForbidden = statusCode === 403;
 
-    const isWarpFailure = useWarp && (
+    const isWarpFailure = activeRoute.type === 'warp' && (
       statusCode === 502 ||
       statusCode === 504 ||
       bodyStr.includes('ECONNREFUSED') ||
@@ -1507,73 +1567,98 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       bodyStr.includes('SOCKS5')
     );
 
-    // If WARP proxy failed with network/socket error, attempt rapid rotation to healthy tunnel slot
+    const isScrapedFailure = activeRoute.type === 'scraped' && (
+      statusCode === 502 ||
+      statusCode === 504 ||
+      bodyStr.includes('ECONNREFUSED') ||
+      bodyStr.includes('timeout') ||
+      bodyStr.includes('ETIMEDOUT') ||
+      bodyStr.includes('ECONNRESET') ||
+      bodyStr.includes('CONNECT') ||
+      bodyStr.includes('SOCKS5')
+    );
+
     if (isWarpFailure) {
-      console.warn(`[Proxy] Anthropic WARP connection notice (${attemptResult.body}), rotating to clean tunnel slot...`);
+      console.warn(`[Proxy] Anthropic WARP connection notice (${attemptResult.body}), evaluating failover...`);
       routeHealth.markWarpDegraded(attemptResult.body);
-      if (!warpRotatedInThisRequest) {
-        const rotated = await warp.rotateKeys('connection_failure');
+      const bestScraped = proxyScraper.getBestProxy();
+      if (bestScraped) {
+        console.log(`[Proxy] Failover from Anthropic WARP error to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (${bestScraped.latency}ms)`);
+        activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
+      } else if (!warpRotatedInThisRequest) {
+        warp.rotateKeys('connection_failure').catch(() => {});
         warpRotatedInThisRequest = true;
-        if (rotated) {
-          useWarp = true;
-          requestWarpFailed = false;
-        } else {
-          useWarp = false;
-          requestWarpFailed = true;
-        }
+      }
+    } else if (isScrapedFailure) {
+      if (activeRoute.proxy) {
+        proxyScraper.markProxyBurned(`${activeRoute.proxy.host}:${activeRoute.proxy.port}`, 1800);
+      }
+      const nextScraped = proxyScraper.getBestProxy();
+      if (nextScraped) {
+        console.log(`[Proxy] Anthropic scraped proxy socket notice. Rotating to next verified proxy: ${nextScraped.type}://${nextScraped.host}:${nextScraped.port} (${nextScraped.latency}ms)`);
+        activeRoute = { type: 'scraped', port: null, proxy: nextScraped };
+      } else if (warp.isReady()) {
+        activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
       }
     } else if (isRateLimited || isForbidden) {
       const retryAfterHeader = attemptResult.headers?.['retry-after'];
       const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
 
-      // Mark this route as burned in local rate limiter so we don't re-hit it immediately
-      const burnedRouteKey = useWarp ? `warp:${currentWarpPort}` : 'direct';
-      localRateLimiter.markBurned(burnedRouteKey, retryAfterSec > 0 ? retryAfterSec * 1000 : 120000);
-      persistentSessions.rotate(burnedRouteKey);
+      localRateLimiter.markBurned(routeKey, retryAfterSec > 0 ? retryAfterSec * 1000 : 120000);
+      persistentSessions.rotate(routeKey);
 
-      if (useWarp) {
-        console.warn(`[WARP] Anthropic rate limit detected on port ${currentWarpPort}. Swapping account...`);
+      if (activeRoute.type === 'warp') {
+        console.warn(`[WARP] Anthropic rate limit detected on port ${currentWarpPort}. Marking burned...`);
         warp.markAccountBurned(currentWarpPort, retryAfterSec);
         triedWarpPorts.add(currentWarpPort);
 
-        if (typeof warp.rotateKeys === 'function') {
-          warp.rotateKeys('auto_rate_limit').catch(() => {});
-        }
-
-        // Seamlessly hop to next live port that hasn't been tried yet in this request
         const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
         if (nextPort && !triedWarpPorts.has(nextPort)) {
           currentWarpPort = nextPort;
-          useWarp = true;
+          activeRoute = { type: 'warp', port: nextPort, proxy: null };
           console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
         } else {
-          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Rotating keys for fresh egress IP...');
-          const rotated = await warp.rotateKeys('auto_rate_limit');
-          if (rotated) {
-            currentWarpPort = warp.getBestPort();
-            useWarp = true;
-            triedWarpPorts.clear();
+          // All active WARP slots burned! Instant zero-downtime failover to verified clean proxy pool!
+          const bestScraped = proxyScraper.getBestProxy();
+          if (bestScraped) {
+            console.log(`[RouteManager] 🚀 Cloudflare WARP pool at capacity. Instant Anthropic failover to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (latency: ${bestScraped.latency}ms)`);
+            activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
           } else {
-            useWarp = config.get('warp_mode') === 'always' || routeHealth.isDirectDegraded();
+            console.warn('[WARP Pool] All active slots hit capacity. Rotating keys...');
+            warp.rotateKeys('auto_rate_limit').catch(() => {});
+          }
+        }
+      } else if (activeRoute.type === 'scraped') {
+        if (activeRoute.proxy) {
+          proxyScraper.markProxyBurned(`${activeRoute.proxy.host}:${activeRoute.proxy.port}`, retryAfterSec || 1800);
+        }
+        const nextScraped = proxyScraper.getBestProxy();
+        if (nextScraped) {
+          console.log(`[Proxy] Anthropic scraped proxy rate-limited. Rotating to next verified proxy: ${nextScraped.host}:${nextScraped.port} (${nextScraped.latency}ms)...`);
+          activeRoute = { type: 'scraped', port: null, proxy: nextScraped };
+        } else {
+          const nextWarpPort = warp.getBestPort();
+          if (nextWarpPort && warp.isReady()) {
+            activeRoute = { type: 'warp', port: nextWarpPort, proxy: null };
+          } else {
+            activeRoute = { type: 'direct', port: null, proxy: null };
           }
         }
       } else {
-        // Direct route hit rate limit, check if any WARP port is available
-        console.warn(`[Proxy] Anthropic direct route returned ${statusCode} (${isRateLimited ? 'Rate Limit' : 'Forbidden'}). Checking WARP tunnel pool...`);
-        routeHealth.markDirectDegraded(statusCode);
-        const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
-        if (nextPort && warp.isReady() && config.get('warp_mode') !== 'disabled') {
-          useWarp = true;
-          currentWarpPort = nextPort;
-        } else if (config.get('warp_mode') !== 'disabled') {
-          warp.autoBootstrap().catch(() => {});
+        const bestScraped = proxyScraper.getBestProxy();
+        if (bestScraped) {
+          activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
+        } else if (warp.isReady()) {
+          activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
         }
       }
-    } else if (!useWarp) {
-      // Direct route failed with other error
+    } else if (activeRoute.type === 'direct') {
       routeHealth.markDirectDegraded(statusCode || attemptResult.body);
-      if (warp.isReady() && !routeHealth.isWarpDegraded() && config.get('warp_mode') !== 'disabled') {
-        useWarp = true;
+      const bestScraped = proxyScraper.getBestProxy();
+      if (bestScraped) {
+        activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
+      } else if (warp.isReady()) {
+        activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
       }
     }
 
@@ -1603,24 +1688,21 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     }
 
     if (attempt <= maxRetries) {
-      const isRouteError = isRateLimited || isForbidden || isWarpFailure;
+      const isRouteError = isRateLimited || isForbidden || isWarpFailure || isScrapedFailure;
       const livePorts = [warp.basePort, warp.basePort + 1, warp.basePort + 2, warp.basePort + 3].filter(p => warp.portProcesses.has(p));
-      const poolCapacityExhausted = !useWarp || triedWarpPorts.size >= Math.min(2, Math.max(1, livePorts.length));
-      const shouldTryModelFallback = !isRouteError || poolCapacityExhausted || attempt >= 2;
+      const poolCapacityExhausted = activeRoute.type !== 'warp' || triedWarpPorts.size >= Math.min(2, Math.max(1, livePorts.length));
+      const shouldTryModelFallback = (!isRouteError || poolCapacityExhausted || attempt >= 3) && config.get('smart_fallback');
       const fallback = shouldTryModelFallback ? getNextFallbackModel(currentModel, triedModels, hasImages) : null;
       if (fallback) {
         console.log(`[Proxy] Anthropic Model "${currentModel}" at capacity on tested routes. Smart failover to "${fallback}" (Attempt ${attempt}/${maxRetries + 1})...`);
         currentModel = fallback;
         triedModels.add(fallback);
-        const nextUntriedPort = warp.getBestPort(Array.from(triedWarpPorts));
-        if (nextUntriedPort && warp.isReady() && config.get('warp_mode') !== 'disabled') {
-          useWarp = true;
-          currentWarpPort = nextUntriedPort;
-        } else {
-          useWarp = (config.get('warp_mode') === 'always' || routeHealth.isDirectDegraded() || warp.isReady());
-        }
       } else {
-        const routeLabel = useWarp ? `Cloudflare WARP (port ${currentWarpPort})` : 'direct route';
+        const routeLabel = activeRoute.type === 'warp'
+          ? `Cloudflare WARP (port ${currentWarpPort})`
+          : (activeRoute.type === 'scraped' && activeRoute.proxy
+              ? `verified proxy (${activeRoute.proxy.host}:${activeRoute.proxy.port})`
+              : 'direct route');
         console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on Anthropic model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
       }
       const backoffMs = Math.min(250 * Math.pow(1.4, attempt - 1) + Math.random() * 150, 1500);

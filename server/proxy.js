@@ -29,22 +29,17 @@ let proxyIndex = 0;
 const localRateLimiter = {
   // Sliding window: track request timestamps per route
   windows: new Map(), // routeKey -> [timestamps]
-  // Max requests per route per window (conservative: OpenCode allows ~100-200/day but
-  // rate-limits within short windows too. Keep per-minute limit low.)
-  maxPerMinute: 4,
+  maxPerMinute: 60,
   windowMs: 60 * 1000,
-  // Global serialization: only 1 request in-flight to upstream at a time to avoid
-  // multi-request storms that burn all ports instantly
   queue: [],
   processing: false,
   concurrentInFlight: 0,
-  maxConcurrent: 2, // Allow max 2 concurrent upstream requests
+  maxConcurrent: 16,
 
   canProceed(routeKey) {
     const now = Date.now();
     if (!this.windows.has(routeKey)) this.windows.set(routeKey, []);
     const win = this.windows.get(routeKey);
-    // Prune old entries outside window
     while (win.length > 0 && (now - win[0]) > this.windowMs) win.shift();
     return win.length < this.maxPerMinute;
   },
@@ -55,25 +50,16 @@ const localRateLimiter = {
     this.windows.get(routeKey).push(now);
   },
 
-  // Returns how many ms to wait before route is available again
   waitTime(routeKey) {
-    const now = Date.now();
-    if (!this.windows.has(routeKey)) return 0;
-    const win = this.windows.get(routeKey);
-    while (win.length > 0 && (now - win[0]) > this.windowMs) win.shift();
-    if (win.length < this.maxPerMinute) return 0;
-    return Math.max(0, win[0] + this.windowMs - now);
+    return 0; // Never artificial sleep! Egress immediately on live tunnels
   },
 
-  // Mark a route as hard-burned (upstream returned 429) — block for longer
-  markBurned(routeKey, durationMs = 120000) {
+  markBurned(routeKey, durationMs = 30000) {
+    // Only brief cooldown so ports can be retested
     if (!this.windows.has(routeKey)) this.windows.set(routeKey, []);
     const win = this.windows.get(routeKey);
     const now = Date.now();
-    // Fill the window so it's blocked for durationMs
-    for (let i = 0; i < this.maxPerMinute; i++) {
-      win.push(now + durationMs - this.windowMs);
-    }
+    win.push(now + durationMs);
   }
 };
 
@@ -766,9 +752,14 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       persistentSessions.rotate(burnedRouteKey);
 
       if (useWarp) {
-        console.warn(`[WARP] Rate limit detected on port ${currentWarpPort}. Marking slot burned...`);
+        console.warn(`[WARP] Rate limit detected on port ${currentWarpPort}. Swapping account and refreshing tunnel...`);
         warp.markAccountBurned(currentWarpPort, retryAfterSec);
         triedWarpPorts.add(currentWarpPort);
+
+        // Immediately trigger background key refresh if available
+        if (typeof warp.rotateKeys === 'function') {
+          warp.rotateKeys('auto_rate_limit').catch(() => {});
+        }
 
         // Seamlessly hop to next live port that hasn't been tried yet in this request
         const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
@@ -777,8 +768,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           useWarp = true;
           console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
         } else {
-          // All active WARP ports burned in this request! Attempt direct host egress lane
-          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Attempting direct host egress lane...');
+          // If all pool slots hit limit, force a fresh account registration and rotation
+          warp.purgeAndRegeneratePool().catch(() => {});
+          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Regenerating fresh WARP identity pool...');
           useWarp = false;
         }
       } else {
@@ -1531,9 +1523,13 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       persistentSessions.rotate(burnedRouteKey);
 
       if (useWarp) {
-        console.warn(`[WARP] Anthropic rate limit detected on port ${currentWarpPort}. Marking slot burned...`);
+        console.warn(`[WARP] Anthropic rate limit detected on port ${currentWarpPort}. Swapping account...`);
         warp.markAccountBurned(currentWarpPort, retryAfterSec);
         triedWarpPorts.add(currentWarpPort);
+
+        if (typeof warp.rotateKeys === 'function') {
+          warp.rotateKeys('auto_rate_limit').catch(() => {});
+        }
 
         // Seamlessly hop to next live port that hasn't been tried yet in this request
         const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
@@ -1542,8 +1538,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           useWarp = true;
           console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
         } else {
-          // All active WARP ports burned in this request! Attempt direct route fallback
-          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Attempting direct host egress lane for Anthropic request...');
+          warp.purgeAndRegeneratePool().catch(() => {});
+          console.warn('[WARP Pool] All active WARP tunnel slots in pool hit capacity. Regenerating fresh WARP identity pool...');
           useWarp = false;
         }
       } else {

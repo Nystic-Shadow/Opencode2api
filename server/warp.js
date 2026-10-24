@@ -617,15 +617,15 @@ class CloudflareWarpManager {
     account.ipv4Only = isIpv4Only;
     this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port} (${isIpv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})...`);
 
-    // WireProxy Egress: Enable dual-stack IPv4/IPv6 OR pure IPv4-only egress to bypass IPv6 subnet exhaustion.
+    // All ports get full dual-stack addresses and full AllowedIPs for 100% reliable egress
     const addresses = [];
     if (account.addressV4) addresses.push(`${account.addressV4}/32`);
-    if (account.addressV6 && !isIpv4Only) addresses.push(`${account.addressV6}/128`);
+    if (account.addressV6) addresses.push(`${account.addressV6}/128`);
     if (addresses.length === 0) addresses.push('172.16.0.2/32');
 
     const endpointHost = this.sanitizeEndpoint(account.endpoint) || '162.159.192.1:2408';
-    const dnsServers = isIpv4Only ? '1.1.1.1, 8.8.8.8' : '1.1.1.1, 2606:4700:4700::1111, 8.8.8.8';
-    const allowedIps = isIpv4Only ? '0.0.0.0/0' : '0.0.0.0/0, ::/0';
+    const dnsServers = '1.1.1.1, 8.8.8.8, 2606:4700:4700::1111';
+    const allowedIps = '0.0.0.0/0, ::/0';
 
     const confContent = `[Interface]
 PrivateKey = ${account.privateKey}
@@ -1341,26 +1341,14 @@ BindAddress = ${host}:${port}
             }
             return reject(new Error('SOCKS5 auth negotiation failed with WARP daemon'));
           }
-          // CONNECT request:
-          // For odd ports (40001, 40003), route opencode.ai directly over IPv6 [ATYP=4]
-          // so WireProxy uses the dedicated, unique IPv6 address of the WARP account!
-          let req;
-          if (pPort % 2 !== 0 && targetHost === 'opencode.ai') {
-            const v6Addr = OPENCODE_IPV6_TARGETS[Math.floor(Math.random() * OPENCODE_IPV6_TARGETS.length)];
-            const v6Buf = parseIpv6Address(v6Addr);
-            req = Buffer.concat([
-              Buffer.from([0x05, 0x01, 0x00, 0x04]),
-              v6Buf,
-              Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff])
-            ]);
-          } else {
-            const hostBuf = Buffer.from(targetHost);
-            req = Buffer.concat([
-              Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]),
-              hostBuf,
-              Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff])
-            ]);
-          }
+          // CONNECT request: Always forward domain name [ATYP=0x03] directly to WireProxy
+          // so WireProxy resolves it internally via Cloudflare edge DNS without routing leaks
+          const hostBuf = Buffer.from(targetHost);
+          const req = Buffer.concat([
+            Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]),
+            hostBuf,
+            Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff])
+          ]);
           state = 'connect';
           socket.write(req);
         } else if (state === 'connect') {

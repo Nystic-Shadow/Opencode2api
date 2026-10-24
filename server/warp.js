@@ -13,12 +13,15 @@ const POOL_FILE = path.join(DATA_DIR, 'warp_pool.json');
 const WIREPROXY_CONF = path.join(DATA_DIR, 'wireproxy.conf');
 
 const WARP_ENDPOINTS = [
-  'engage.cloudflareclient.com:2408',
   '162.159.192.1:2408',
+  '162.159.193.1:2408',
+  '188.114.97.1:2408',
   '162.159.195.1:500',
-  'engage.cloudflareclient.com:500',
-  '162.159.195.1:2408',
-  '162.159.192.1:500'
+  '188.114.96.1:2408',
+  '162.159.192.1:500',
+  '188.114.98.1:1701',
+  '188.114.99.1:4500',
+  'engage.cloudflareclient.com:2408'
 ];
 
 class CloudflareWarpManager {
@@ -365,24 +368,24 @@ class CloudflareWarpManager {
   }
 
   sanitizeEndpoint(ep) {
-    if (!ep || typeof ep !== 'string') return 'engage.cloudflareclient.com:2408';
-    const trimmed = ep.trim();
-    if (trimmed.startsWith('162.159.193.1') || trimmed.includes(':4500')) {
-      return '162.159.192.1:2408';
-    }
-    return trimmed;
+    if (!ep || typeof ep !== 'string') return '162.159.192.1:2408';
+    return ep.trim();
   }
 
   async replaceBadAccount(idx) {
+    if (this.isReplacing) {
+      return null;
+    }
     if (this.regCooldownUntil && Date.now() < this.regCooldownUntil) {
       console.log(`[WARP Pool] Skipping replacement for account ${idx + 1}: Cloudflare registration in cooldown.`);
       return null;
     }
+    this.isReplacing = true;
     console.warn(`[WARP Pool] Account ${idx + 1} marked exhausted/burned. Purging and registering a fresh replacement...`);
     try {
       const freshAcc = await this.registerCloudflareAccount();
       freshAcc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
-      freshAcc.ipv4Only = false; // Always dual-stack IPv6 to ensure independent /64 prefix
+      freshAcc.ipv4Only = (idx % 2 === 0); // Alternate: Even slots are IPv4-Only, Odd slots are Dual-Stack IPv6
       freshAcc._burnCount = 0;
       freshAcc._cooldownUntil = 0;
       if (this.accountPool && this.accountPool.length > idx) {
@@ -397,6 +400,8 @@ class CloudflareWarpManager {
     } catch (err) {
       console.warn(`[WARP Pool] Could not register replacement account ${idx + 1}:`, err.message);
       return null;
+    } finally {
+      this.isReplacing = false;
     }
   }
 
@@ -453,7 +458,7 @@ class CloudflareWarpManager {
             })
             .map((a, idx) => {
               a.endpoint = this.sanitizeEndpoint(WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length]);
-              a.ipv4Only = false; // Always dual-stack IPv6 to ensure independent /64 prefix
+              a.ipv4Only = (idx % 2 === 0); // Alternate IPv4-Only (even slots) and Dual-Stack IPv6 (odd slots)
               return a;
             });
           this.accountPool = freshAccounts;
@@ -467,7 +472,7 @@ class CloudflareWarpManager {
     const cached = this.loadCachedAccount();
     if (cached && !this.accountPool.some(a => a.accountId === cached.accountId)) {
       cached.endpoint = WARP_ENDPOINTS[0];
-      cached.ipv4Only = false;
+      cached.ipv4Only = true;
       this.accountPool.push(cached);
     }
 
@@ -480,7 +485,7 @@ class CloudflareWarpManager {
     // 4. Otherwise register first account synchronously
     const firstAcc = await this.registerCloudflareAccount();
     firstAcc.endpoint = WARP_ENDPOINTS[0];
-    firstAcc.ipv4Only = false;
+    firstAcc.ipv4Only = true;
     this.accountPool.push(firstAcc);
     this.saveAccountPool();
     this.populatePoolInBackground();
@@ -518,7 +523,7 @@ class CloudflareWarpManager {
           console.log(`[WARP Pool] Pre-registering account ${idx + 1}/8 for zero-downtime pool...`);
           const acc = await this.registerCloudflareAccount();
           acc.endpoint = WARP_ENDPOINTS[idx % WARP_ENDPOINTS.length];
-          acc.ipv4Only = false; // Always dual-stack IPv6 to ensure independent /64 prefix
+          acc.ipv4Only = (idx % 2 === 0);
           this.accountPool.push(acc);
           this.saveAccountPool();
           const modeLabel = acc.ipv4Only ? 'IPv4-Only' : `Dual-Stack IPv6: ${acc.addressV6}`;
@@ -556,7 +561,11 @@ class CloudflareWarpManager {
     // Ensure port is completely free and clean before spawning!
     await this.forceKillPort(port);
 
-    const isIpv4Only = Boolean(account.ipv4Only);
+    // Guarantee strict IPv4 vs Dual-Stack slot parity:
+    // Even ports (40000, 40002) = pure IPv4 egress (AllowedIPs = 0.0.0.0/0) to bypass IPv6 subnet exhaustion!
+    // Odd ports (40001, 40003) = dual-stack IPv6 egress (AllowedIPs = 0.0.0.0/0, ::/0).
+    const isIpv4Only = (port % 2 === 0);
+    account.ipv4Only = isIpv4Only;
     this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port} (${isIpv4Only ? 'IPv4-Only' : 'Dual-Stack IPv6'})...`);
 
     // WireProxy Egress: Enable dual-stack IPv4/IPv6 OR pure IPv4-only egress to bypass IPv6 subnet exhaustion.
@@ -565,7 +574,7 @@ class CloudflareWarpManager {
     if (account.addressV6 && !isIpv4Only) addresses.push(`${account.addressV6}/128`);
     if (addresses.length === 0) addresses.push('172.16.0.2/32');
 
-    const endpointHost = this.sanitizeEndpoint(account.endpoint) || 'engage.cloudflareclient.com:2408';
+    const endpointHost = this.sanitizeEndpoint(account.endpoint) || '162.159.192.1:2408';
     const dnsServers = isIpv4Only ? '1.1.1.1, 8.8.8.8' : '1.1.1.1, 2606:4700:4700::1111, 8.8.8.8';
     const allowedIps = isIpv4Only ? '0.0.0.0/0' : '0.0.0.0/0, ::/0';
 
@@ -752,9 +761,10 @@ BindAddress = ${host}:${port}
         const account = pool[0];
         const candidateEndpoints = [
           this.sanitizeEndpoint(account.endpoint),
-          'engage.cloudflareclient.com:2408',
           '162.159.192.1:2408',
-          'engage.cloudflareclient.com:500'
+          '162.159.193.1:2408',
+          '188.114.97.1:2408',
+          '162.159.195.1:500'
         ].filter((v, i, a) => v && a.indexOf(v) === i);
 
         let started = false;
@@ -1100,9 +1110,10 @@ BindAddress = ${host}:${port}
 
           const candidateEndpoints = [
             this.sanitizeEndpoint(account.endpoint),
-            'engage.cloudflareclient.com:2408',
             '162.159.192.1:2408',
-            'engage.cloudflareclient.com:500'
+            '162.159.193.1:2408',
+            '188.114.97.1:2408',
+            '162.159.195.1:500'
           ].filter((v, i, a) => v && a.indexOf(v) === i);
 
           let started = false;

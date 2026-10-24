@@ -127,6 +127,10 @@ class ConfigManager {
         this.config.max_retries = parseInt(process.env.MAX_RETRIES, 10);
       }
       // Auto-migrate legacy config: enable smart_fallback by default for high availability
+      if (!this.config.client_version || this.config.client_version.startsWith('1.')) {
+        this.config.client_version = '2.0.32';
+      }
+
       if (fileConfig._smart_fallback_migrated !== true) {
         this.config.smart_fallback = process.env.SMART_FALLBACK !== 'false';
         this.config._smart_fallback_migrated = true;

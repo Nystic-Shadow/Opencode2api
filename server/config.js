@@ -50,7 +50,7 @@ const DEFAULT_CONFIG = {
   global_rpm_limit: 0, // 0 = unlimited
   global_tpm_limit: 0, // 0 = unlimited
   smart_fallback: process.env.SMART_FALLBACK !== 'false', // Default: true for zero-drop high resilience (auto failovers across free models if one hits capacity)
-  max_retries: parseInt(process.env.MAX_RETRIES, 10) || 5, // Auto-retry attempts on transient upstream drops (up to 6 attempts across models and fresh IPs)
+  max_retries: parseInt(process.env.MAX_RETRIES, 10) || 8, // Auto-retry attempts on transient upstream drops (up to 8 attempts across verified proxies and models)
   request_timeout_ms: 60000,
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
   proxies: process.env.PROXIES ? process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean) : [],

@@ -116,7 +116,7 @@ class ModelDiscoveryService {
   }
 
   /**
-   * Fetch JSON from HTTPS endpoint with resilient WARP-to-direct auto-fallback.
+   * Fetch JSON from HTTPS endpoint with resilient route failover.
    */
   async fetchJson(url, headers = {}) {
     const candidates = egress.getCandidates();

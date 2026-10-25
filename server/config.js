@@ -104,14 +104,6 @@ const DEFAULT_CONFIG = {
   queue_wait_ms: parseInt(process.env.QUEUE_WAIT_MS, 10) || 15000,
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
   proxies: process.env.PROXIES ? process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean) : [],
-  warp_mode: process.env.WARP_MODE || 'disabled', // opt-in legacy WARP
-  warp_engine: process.env.WARP_ENGINE || 'disabled', // opt-in legacy WARP
-  warp_host: process.env.WARP_HOST || '127.0.0.1',
-  warp_auto_switch: process.env.WARP_AUTO_SWITCH !== 'false',
-  warp_rotate_on_unauth: false,
-  warp_rotate_on_rate_limit: false,
-  warp_auto_rotate_minutes: parseInt(process.env.WARP_AUTO_ROTATE_MINUTES, 10) || 0, // 0 = stable egress
-  warp_port: parseInt(process.env.WARP_PORT, 10) || 40000,
   egress_mode: process.env.EGRESS_MODE || 'proxy_only',
   allow_direct_fallback: process.env.ALLOW_DIRECT_FALLBACK === 'true',
   upstream_models_url: 'https://opencode.ai/zen/v1/models',
@@ -164,6 +156,12 @@ class ConfigManager {
 
       this.config = { ...DEFAULT_CONFIG, ...fileConfig };
 
+      // WARP was removed. Drop any legacy warp_* keys persisted by older
+      // builds so they are not exposed through /api/settings or reused.
+      for (const key of Object.keys(this.config)) {
+        if (key.startsWith('warp_')) delete this.config[key];
+      }
+
       // Explicit environment / .env variables ALWAYS take strict precedence over cached disk values:
       if (process.env.DASHBOARD_USER && process.env.DASHBOARD_USER.trim()) {
         this.config.admin_username = process.env.DASHBOARD_USER.trim();
@@ -182,18 +180,6 @@ class ConfigManager {
       } else if (!this.config.upstream_inference_url || this.config.upstream_inference_url === LEGACY_UPSTREAM_INFERENCE_URL) {
         this.config.upstream_inference_url = DEFAULT_UPSTREAM_INFERENCE_URL;
       }
-      if (process.env.WARP_MODE) {
-        this.config.warp_mode = process.env.WARP_MODE.trim();
-      }
-      if (process.env.WARP_ENGINE) {
-        this.config.warp_engine = process.env.WARP_ENGINE.trim();
-      }
-      if (process.env.WARP_HOST) {
-        this.config.warp_host = process.env.WARP_HOST.trim();
-      }
-      if (process.env.WARP_PORT) {
-        this.config.warp_port = parseInt(process.env.WARP_PORT, 10);
-      }
       if (process.env.EGRESS_MODE) {
         this.config.egress_mode = process.env.EGRESS_MODE.trim();
       }
@@ -203,6 +189,13 @@ class ConfigManager {
       if (process.env.ALLOW_DIRECT_FALLBACK !== undefined) {
         this.config.allow_direct_fallback = process.env.ALLOW_DIRECT_FALLBACK === 'true';
       }
+
+      // 'warp_only' and other legacy modes fail closed to proxy_only instead
+      // of silently falling through to a different egress policy.
+      const egressMode = String(this.config.egress_mode || 'proxy_only').toLowerCase();
+      this.config.egress_mode = ['auto', 'proxy_only', 'direct'].includes(egressMode)
+        ? egressMode
+        : 'proxy_only';
 
       // Retry budget: fail fast instead of spending minutes per request.
       const envRetries = process.env.MAX_RETRIES !== undefined ? parseInt(process.env.MAX_RETRIES, 10) : NaN;
@@ -225,16 +218,6 @@ class ConfigManager {
       this.config.queue_max_per_key = envOrConfigInt('QUEUE_MAX_PER_KEY', this.config.queue_max_per_key, 4, 1);
       this.config.queue_max_size = envOrConfigInt('QUEUE_MAX_SIZE', this.config.queue_max_size, 100, 0);
       this.config.queue_wait_ms = envOrConfigInt('QUEUE_WAIT_MS', this.config.queue_wait_ms, 15000, 0);
-
-      // Stable egress is more reliable than periodic WARP key churn. Rotation
-      // remains possible through an explicit env override, never through 401/429.
-      if (process.env.WARP_AUTO_ROTATE_MINUTES !== undefined) {
-        this.config.warp_auto_rotate_minutes = Math.max(0, parseInt(process.env.WARP_AUTO_ROTATE_MINUTES, 10) || 0);
-      } else {
-        this.config.warp_auto_rotate_minutes = 0;
-      }
-      this.config.warp_rotate_on_unauth = false;
-      this.config.warp_rotate_on_rate_limit = false;
 
       // Auto-migrate legacy config: enable smart_fallback by default for high availability
       if (!this.config.client_version || this.config.client_version.startsWith('1.') || this.config.client_version === '2.0.32') {

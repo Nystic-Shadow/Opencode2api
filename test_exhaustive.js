@@ -312,77 +312,30 @@ async function runExhaustiveTests() {
     };
   });
 
-  // 11. Admin Authentication & WARP Status
-  await test('GET /api/warp/status (Admin Authentication & WARP Diagnostics)', async () => {
+  // 11. Admin Authentication & Egress Proxy Pool Status
+  await test('GET /api/proxies/status (Admin Authentication & Proxy Pool Diagnostics)', async () => {
     // First login
     const loginRes = await request({ path: '/api/auth/login', method: 'POST' }, {
       username: 'admin',
-      password: '••••••••' === '••••••••' ? 'admin123' : 'admin123'
+      password: 'admin123'
     });
     const loginData = JSON.parse(loginRes.body);
     if (!loginData.token) return { ok: false, detail: 'Admin login failed' };
     adminToken = loginData.token;
 
-    // Query WARP status
-    const warpRes = await request({
-      path: '/api/warp/status',
+    const proxyRes = await request({
+      path: '/api/proxies/status',
       method: 'GET',
       headers: { 'Authorization': `Bearer ${adminToken}` }
     });
-    const warpData = JSON.parse(warpRes.body);
-    const isAvailable = warpData.available === true || warpData.installed === true;
+    const proxyData = JSON.parse(proxyRes.body);
     return {
-      ok: warpRes.statusCode === 200 && isAvailable,
-      detail: `WARP available: ${isAvailable}, Status: ${warpData.status}, Mode: ${warpData.mode}, Port: ${warpData.port}`
+      ok: proxyRes.statusCode === 200 && Number.isFinite(proxyData.configuredCount),
+      detail: `Configured: ${proxyData.configuredCount}, healthy: ${proxyData.verifiedCount}, scanning: ${proxyData.isScanning}`
     };
   });
 
-  // 12. Cloudflare WARP Manual Key Rotation
-  await test('POST /api/warp/rotate (Dynamic WireGuard Key Rotation)', async () => {
-    const res = await request({
-      path: '/api/warp/rotate',
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${adminToken}` }
-    }, {});
-    const data = JSON.parse(res.body);
-    return {
-      ok: res.statusCode === 200 && data.success === true,
-      detail: `Key rotation completed: success=${data.success}, session reconnected: running=${data.running}`
-    };
-  });
-
-  // 13. End-to-end WARP Egress Routing Verification
-  await test('POST /v1/chat/completions (WARP Tunnel Egress Inference)', async () => {
-    // Temporarily set warp_mode to 'always'
-    await request({
-      path: '/api/settings',
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${adminToken}` }
-    }, { warp_mode: 'always' });
-
-    // Run inference through WARP
-    const res = await request({ path: '/v1/chat/completions', method: 'POST' }, {
-      model: 'deepseek-v4.1-flash',
-      messages: [{ role: 'user', content: 'Say "WARP route verified".' }],
-      stream: false
-    });
-    const data = JSON.parse(res.body);
-    const content = data.choices?.[0]?.message?.content || '';
-
-    // Restore to auto failover
-    await request({
-      path: '/api/settings',
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${adminToken}` }
-    }, { warp_mode: 'auto' });
-
-    return {
-      ok: res.statusCode === 200 && content.length > 0,
-      detail: `Tunnel pass verified via 127.0.0.1:40000. Reply: "${content.trim()}"`
-    };
-  });
-
-  // 14. Scoped API Key Management & Quota Rate Limiting
+  // 12. Scoped API Key Management & Quota Rate Limiting
   await test('API Keys Lifecycle (Creation, Scoped Auth, Quota Deduction, Deletion)', async () => {
     // Create new key
     const createRes = await request({

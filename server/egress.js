@@ -3,7 +3,6 @@ const https = require('https');
 const net = require('net');
 const tls = require('tls');
 const config = require('./config');
-const warp = require('./warp');
 
 const DEFAULT_PORTS = {
   http: 80,
@@ -125,8 +124,8 @@ class EgressManager {
       timeout: 60000,
       keepAliveMsecs: 30000
     });
-    // Plain-HTTP direct egress exists only for local test upstreams. Proxy and
-    // WARP agents tunnel TLS, so callers must reject http targets for them.
+    // Plain-HTTP direct egress exists only for local test upstreams. Proxy
+    // agents tunnel TLS, so callers must reject http targets for them.
     this.directHttpAgent = new http.Agent({
       keepAlive: true,
       maxSockets: 64,
@@ -151,12 +150,6 @@ class EgressManager {
     config.onChange(() => {
       this.reload();
     });
-
-    // WARP owns tunnel lifecycle; when a tunnel starts/reconnects/exits, clear
-    // any stale quota/circuit state associated with that local route.
-    if (typeof warp.onRouteChange === 'function') {
-      warp.onRouteChange((route, reason) => this.resetRoute(route, reason));
-    }
   }
 
   onRouteReset(fn) {
@@ -372,7 +365,6 @@ class EgressManager {
 
   _healthKey(route) {
     if (!route) return 'unknown';
-    if (route.type === 'warp') return `warp:${route.port}`;
     if (route.type === 'proxy') return route.id;
     return 'direct';
   }
@@ -394,7 +386,6 @@ class EgressManager {
 
   isAvailable(route) {
     if (!route) return false;
-    if (route.type === 'warp' && !warp.isReady()) return false;
     const health = this._health(route);
     return health.openUntil <= Date.now();
   }
@@ -414,41 +405,12 @@ class EgressManager {
     return remaining > 0 ? remaining : 0;
   }
 
-  getWarpRoutes() {
-    if (config.get('warp_mode') === 'disabled' || config.get('warp_mode') === 'never') return [];
-    if (!warp.isReady()) return [];
-    let ports = typeof warp.getCandidatePorts === 'function'
-      ? warp.getCandidatePorts()
-      : [];
-    if (ports.length === 0) {
-      const fallback = warp.getBestPort();
-      if (fallback) ports = [fallback];
-    }
-    return ports
-      .filter(Boolean)
-      .map(port => ({ type: 'warp', port, id: `warp:${port}` }));
-  }
-
-  getWarpRoute() {
-    return this.getWarpRoutes()[0] || null;
-  }
-
   _allowDirect() {
-    const explicit = config.get('allow_direct_fallback');
-    if (explicit === true) return true;
-    if (explicit === false) return false;
-    // No explicit policy: direct egress is only a fallback when no anonymity
-    // transport is configured. Deployments that require anonymity set
-    // ALLOW_DIRECT_FALLBACK=false (the compose file does this).
-    if (this.proxies.length > 0) return false;
-    const mode = String(config.get('warp_mode') || 'auto').toLowerCase();
-    if (mode === 'disabled' || mode === 'never') return true;
-    if (mode === 'always') return false;
-    return true;
+    return config.get('allow_direct_fallback') === true;
   }
 
   getCandidates() {
-    const mode = String(config.get('egress_mode') || 'auto').toLowerCase();
+    const mode = String(config.get('egress_mode') || 'proxy_only').toLowerCase();
     const direct = { type: 'direct', id: 'direct' };
     const proxyRoutes = this.proxies.map(proxy => ({
       ...proxy,
@@ -456,19 +418,15 @@ class EgressManager {
       proxyType: proxy.type,
       id: proxy.id
     }));
-    const warpRoutes = this.getWarpRoutes();
 
     let routes;
     if (mode === 'direct') {
       routes = [direct];
-    } else if (mode === 'warp_only') {
-      routes = warpRoutes;
-    } else if (mode === 'proxy_only' || mode === 'scraped_only') {
+    } else if (mode === 'proxy_only') {
       routes = proxyRoutes;
     } else {
-      // auto / hybrid: stable WARP first, then user-owned proxies, then direct
-      // only when explicitly allowed.
-      routes = [...warpRoutes, ...proxyRoutes];
+      // auto: proxies first, direct only when explicitly allowed.
+      routes = [...proxyRoutes];
       if (this._allowDirect()) routes.push(direct);
     }
 
@@ -489,7 +447,6 @@ class EgressManager {
 
   getAgent(route, protocol = 'https:') {
     if (!route) return protocol === 'http:' ? this.directHttpAgent : this.directAgent;
-    if (route.type === 'warp') return warp.getWarpAgent(route.port);
     if (route.type === 'direct') return protocol === 'http:' ? this.directHttpAgent : this.directAgent;
     if (route.type === 'proxy') return this._getProxyAgent(route);
     return protocol === 'http:' ? this.directHttpAgent : this.directAgent;
@@ -721,7 +678,6 @@ class EgressManager {
       mode: config.get('egress_mode') || 'auto',
       proxies: this.proxies.map(proxy => ({ id: proxy.id, type: proxy.type })),
       allowDirect: this._allowDirect(),
-      warpReady: warp.isReady(),
       routes,
       health: Object.fromEntries(this.health)
     };

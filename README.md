@@ -10,7 +10,7 @@
 
 [![Node.js](https://img.shields.io/badge/Node.js-20-339933.svg?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Docker Compose](https://img.shields.io/badge/Docker_Compose-Ready-2496ED.svg?style=for-the-badge&logo=docker&logoColor=white)](docker-compose.yml)
-[![Proxy Egress](https://img.shields.io/badge/Egress-Explicit_Proxies-2496ED.svg?style=for-the-badge&logo=cloudflare&logoColor=white)](https://github.com/Nystic-Shadow/Opencode2api)
+[![Proxy Egress](https://img.shields.io/badge/Egress-Explicit_Proxies-2496ED.svg?style=for-the-badge)](https://github.com/Nystic-Shadow/Opencode2api)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
 
 </div>
@@ -87,7 +87,7 @@ quota cooldown? ──► 429 + Retry-After (no IP rotation)
 admission queue ──► 429 queue_full + Retry-After when saturated
     │
     ▼
-select egress route: healthy explicit proxies (WARP only if explicitly enabled)
+select egress route: healthy explicit proxies, then direct only if allowed
     │
     ▼
 upstream request with timeout and overall deadline
@@ -118,7 +118,7 @@ Key properties:
 - **Node.js 20+** for local runs (the Docker image uses `node:20-bookworm-slim`)
 - **Docker + Docker Compose v2** for the recommended deployment
 - **One or more explicit HTTP, HTTPS, or SOCKS5 proxies** for inference egress
-- No WARP sidecar or `NET_ADMIN` capability is required in proxy-only mode
+- No tunnel sidecar or `NET_ADMIN` capability is required in proxy-only mode
 
 ---
 
@@ -164,7 +164,7 @@ The stack contains:
 
 - `gateway` — the Node.js API gateway on port `8080`
 
-WARP is disabled in the default Compose deployment. The gateway binds HTTP immediately; model discovery and proxy health checks run in the background.
+The gateway binds HTTP immediately; model discovery and proxy health checks run in the background.
 
 ### 4. Verify
 
@@ -212,39 +212,11 @@ $env:DASHBOARD_PASS='replace-with-a-long-random-password'; npm start
 
 Open <http://127.0.0.1:8080/>. The API base URL is `http://127.0.0.1:8080/v1`.
 
-For anonymous egress locally, use one of:
+For anonymous egress locally, use an explicit proxy:
 
 - **Your proxy (recommended):** set `PROXIES=...` and `EGRESS_MODE=proxy_only`.
-- **Legacy embedded WARP:** install `wireproxy` and set `WARP_ENGINE=embedded`.
-- **Legacy WARP CLI:** install Cloudflare WARP and set `WARP_ENGINE=cli`.
-- **Legacy WARP sidecar:** run a SOCKS5 WARP container and set `WARP_ENGINE=sidecar`, `WARP_HOST`, `WARP_PORT`.
 
-If you intentionally want direct egress for local development, set `WARP_ENGINE=disabled` and `ALLOW_DIRECT_FALLBACK=true`. This exposes your host IP to the upstream and is not anonymous.
-
----
-
-## Legacy optional: WARP engine modes
-
-WARP support remains in the codebase for operators who explicitly configure it, but the default Compose deployment is **proxy-only** and sets `WARP_ENGINE=disabled`. The service does not require WARP, `NET_ADMIN`, or a WARP sidecar.
-
-`WARP_ENGINE` controls who owns the tunnel when WARP is explicitly enabled:
-
-| Mode | Behavior | Use when |
-| :--- | :--- | :--- |
-| `sidecar` | The gateway only talks to an external SOCKS5 endpoint. It never spawns `wireproxy`. | Docker Compose, or a separate WARP container |
-| `embedded` | The gateway spawns and supervises `wireproxy` on loopback ports `40000–40003`. | Local Linux/Windows with `wireproxy` installed |
-| `cli` | The gateway configures and uses the official `warp-cli` proxy mode. | Host with Cloudflare WARP installed |
-| `disabled` | No WARP transport. | Direct or user-proxy-only deployments |
-| `auto` | `sidecar` for a non-loopback `WARP_HOST`; otherwise `embedded` if `wireproxy` exists, then `cli`, then `sidecar`. | Default |
-
-Aliases: `external`, `proxy`, and `socks5` map to `sidecar`; `wireproxy` maps to `embedded`; `warp-cli` maps to `cli`; `off` and `none` map to `disabled`.
-
-### Rotation policy
-
-- `WARP_AUTO_ROTATE_MINUTES=0` by default: no periodic key churn.
-- `warp_rotate_on_unauth` and `warp_rotate_on_rate_limit` are forced to `false`.
-- In `sidecar` mode, key rotation belongs to the sidecar. Restart the sidecar if you intentionally need a new WARP identity.
-- The gateway does **not** rotate IPs to evade quotas or anti-bot controls.
+If you intentionally want direct egress for local development, set `ALLOW_DIRECT_FALLBACK=true`. This exposes your host IP to the upstream and is not anonymous.
 
 ---
 
@@ -252,8 +224,7 @@ Aliases: `external`, `proxy`, and `socks5` map to `sidecar`; `wireproxy` maps to
 
 | `EGRESS_MODE` | Route order |
 | :--- | :--- |
-| `auto` / `hybrid` | WARP (if enabled) → user proxies → direct only if `ALLOW_DIRECT_FALLBACK=true` |
-| `warp_only` | WARP only |
+| `auto` | Explicit proxies → direct only if `ALLOW_DIRECT_FALLBACK=true` |
 | `proxy_only` (Compose default) | Explicit user proxies only |
 | `direct` | Direct only (not anonymous) |
 
@@ -262,13 +233,7 @@ Aliases: `external`, `proxy`, and `socks5` map to `sidecar`; `wireproxy` maps to
 - `false` (default) — never use direct egress. Recommended for anonymous deployments.
 - `true` — allow direct egress as the last route. This leaks the host IP and is not anonymous.
 
-`WARP_MODE`:
-
-- `always` — keep WARP enabled and prevent implicit direct fallback.
-- `disabled` / `never` — disable WARP.
-- `auto` — default.
-
-Compose sets `WARP_ENGINE=disabled`, `WARP_MODE=disabled`, `EGRESS_MODE=proxy_only`, and `ALLOW_DIRECT_FALLBACK=false`. `PROXIES` is required.
+Compose sets `EGRESS_MODE=proxy_only` and `ALLOW_DIRECT_FALLBACK=false`. `PROXIES` is required.
 
 ---
 
@@ -282,12 +247,7 @@ Compose sets `WARP_ENGINE=disabled`, `WARP_MODE=disabled`, `EGRESS_MODE=proxy_on
 | `OPENCODE_ZEN_KEY` | empty | Upstream Zen key for paid models |
 | `UPSTREAM_INFERENCE_URL` | OpenCode Zen URL | Override the upstream chat endpoint (local testing or compatible mirrors; plain HTTP requires direct egress) |
 | `PROXIES` | empty | Comma-separated explicit `http://`, `https://`, or `socks5://` proxies; required by Compose; maximum 100 |
-| `WARP_ENGINE` | `disabled` | Legacy optional WARP engine |
-| `WARP_MODE` | `disabled` | Legacy optional WARP mode |
-| `WARP_HOST` | `127.0.0.1` | Legacy WARP SOCKS5 host |
-| `WARP_PORT` | `40000` | Legacy WARP SOCKS5 port |
-| `WARP_AUTO_ROTATE_MINUTES` | `0` | Legacy WARP rotation; `0` disables it |
-| `EGRESS_MODE` | `proxy_only` | `auto`, `warp_only`, `proxy_only`, `direct` |
+| `EGRESS_MODE` | `proxy_only` | `auto`, `proxy_only`, `direct` |
 | `ALLOW_DIRECT_FALLBACK` | `false` | `true`/`false` direct-egress policy |
 | `MAX_RETRIES` | `2` | Retries per request, capped at `3` |
 | `REQUEST_TIMEOUT_MS` | `30000` | Per-attempt timeout |
@@ -369,8 +329,7 @@ Always `200` while the Node process is alive. Used by the image `HEALTHCHECK`.
   "service": "OpenCode2API",
   "uptime_seconds": 42,
   "models_count": 8,
-  "egress_ready": true,
-  "warp_ready": false
+  "egress_ready": true
 }
 ```
 
@@ -382,7 +341,6 @@ Always `200` while the Node process is alive. Used by the image `HEALTHCHECK`.
 {
   "status": "ready",
   "models_count": 8,
-  "warp": { "engine": "disabled", "ready": false, "host": "127.0.0.1", "port": 40000 },
   "egress": {
     "mode": "proxy_only",
     "ready_routes": [{ "id": "socks5://proxy.example:1080", "type": "proxy" }],
@@ -405,7 +363,7 @@ Compose uses `/readyz` for its healthcheck. The Docker image itself uses `/healt
 | `429` | `free_tier_rate_limit` | Upstream quota/capacity; honor `Retry-After` |
 | `429` | `queue_full` | Gateway concurrency limit; retry shortly |
 | `502` | upstream/stream | Upstream connection or stream failed |
-| `503` | `no_egress_route` | WARP/proxy not ready and direct fallback disabled |
+| `503` | `no_egress_route` | No healthy proxy route and direct fallback disabled |
 | `504` | deadline | Overall request deadline exceeded |
 
 The gateway does not retry `429` on another IP. It returns the limit to the caller so clients can back off honestly.
@@ -421,7 +379,7 @@ docker compose config    # validate compose interpolation
 node --check server/proxy.js
 ```
 
-The reliability suite covers proxy parsing, SOCKS5 response parsing, retry classification, quota cooldown, route ordering, admission queue limits, and WARP engine selection. It does not require network access.
+The reliability suite covers proxy parsing, SOCKS5 response parsing, retry classification, quota cooldown, route ordering, and admission queue limits. It does not require network access.
 
 A live smoke test after deployment:
 
@@ -453,7 +411,6 @@ The dashboard Settings page shows healthy/configured proxies, 5x pass status, la
 - `config.json` — normalized runtime configuration
 - `keys.json` — API keys (master key included)
 - `admin-password.txt` — generated dashboard password
-- `warp_account.json`, `warp_pool.json`, `wireproxy_*.conf` — legacy optional WARP state (only if explicitly enabled)
 
 Back up `keys.json` and `config.json`. Treat the whole directory as a secret.
 
@@ -480,7 +437,7 @@ Routes are tried in order. A network error or `5xx` marks the route unhealthy af
 - `restart: unless-stopped`
 - `/readyz` as the real readiness gate
 - Persistent `data/` volume
-- No WARP sidecar or `NET_ADMIN` capability required
+- No tunnel sidecar or `NET_ADMIN` capability required
 
 ---
 
@@ -490,7 +447,7 @@ Routes are tried in order. A network error or `5xx` marks the route unhealthy af
 - **Anonymity depends on your egress.** With `ALLOW_DIRECT_FALLBACK=false`, the gateway will return `503` rather than silently leak the host IP.
 - **Public proxies are not supported for inference egress.** Use explicit, authorized proxies only; they can see your traffic metadata and may be unstable.
 - **Do not expose the dashboard without TLS and strong credentials.** Use a reverse proxy, firewall, or private network.
-- **Respect upstream terms and applicable law.** This project is not affiliated with OpenCode, Anthropic, OpenAI, or Cloudflare.
+- **Respect upstream terms and applicable law.** This project is not affiliated with OpenCode, Anthropic, or OpenAI.
 - **No warranty.** See the MIT license.
 
 ---

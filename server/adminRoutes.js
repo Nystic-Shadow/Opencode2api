@@ -6,7 +6,6 @@ const discovery = require('./discovery');
 const updater = require('./updater');
 const notifications = require('./notifications');
 const proxy = require('./proxy');
-const warp = require('./warp');
 const egress = require('./egress');
 
 // In-memory admin sessions with 24-hour TTL (H4)
@@ -335,18 +334,11 @@ async function handleAdminRoute(req, res, pathname) {
         updates.upstream_zen_key = '';
       }
     }
-    if (body.warp_mode !== undefined) updates.warp_mode = body.warp_mode;
-    if (body.warp_host !== undefined) updates.warp_host = (body.warp_host || '127.0.0.1').trim();
-    if (body.warp_auto_switch !== undefined) updates.warp_auto_switch = !!body.warp_auto_switch;
-    // Automatic WARP rotation on auth/quota failures is deliberately not
-    // supported: it evades upstream limits and makes egress unstable.
-    updates.warp_rotate_on_unauth = false;
-    updates.warp_rotate_on_rate_limit = false;
-    if (body.warp_auto_rotate_minutes !== undefined) {
-      const parsed = parseInt(body.warp_auto_rotate_minutes, 10);
-      if (Number.isFinite(parsed)) updates.warp_auto_rotate_minutes = Math.max(0, parsed);
+    if (Object.keys(body).some(key => key.startsWith('warp_'))) {
+      // WARP was removed. Accepting these fields silently would leave an
+      // operator believing egress is tunneled when it is not.
+      return sendJson(res, 400, { error: 'WARP support has been removed. Configure PROXIES for egress.' });
     }
-    if (body.warp_port !== undefined) updates.warp_port = parseInt(body.warp_port, 10) || 40000;
     if (body.proxies !== undefined) {
       const existingProxies = Array.isArray(config.get('proxies')) ? config.get('proxies') : [];
       let incoming = [];
@@ -362,61 +354,11 @@ async function handleAdminRoute(req, res, pathname) {
     if (updates.admin_password) {
       sessions.clear();
     }
-    if (body.warp_auto_rotate_minutes !== undefined) {
-      warp.startAutoRotateCron();
-    }
     if (body.free_only !== undefined) {
       discovery.sync().catch(e => console.warn('[Discovery] Resync on free_only toggle:', e.message));
     }
     notifications.add('Settings Updated', 'System gateway settings were saved successfully.', 'info');
     return sendJson(res, 200, { success: true });
-  }
-
-  // Cloudflare WARP: Status
-  if (pathname === '/api/warp/status' && req.method === 'GET') {
-    const status = await warp.getStatus();
-    return sendJson(res, 200, status);
-  }
-
-  // Cloudflare WARP: Manual Key Rotation
-  if (pathname === '/api/warp/rotate' && req.method === 'POST') {
-    const ok = await warp.rotateKeys();
-    const status = await warp.getStatus();
-    if (ok) {
-      notifications.add('WARP Rotation Requested', 'WARP tunnel rotation completed or was accepted.', 'info');
-    } else {
-      notifications.add('WARP Rotation Skipped', 'WARP rotation is owned by the sidecar or could not be performed.', 'warning');
-    }
-    return sendJson(res, 200, { success: ok, ...status });
-  }
-
-  // Cloudflare WARP: Flush & Re-arm Account Pool
-  if (pathname === '/api/warp/refresh-pool' && req.method === 'POST') {
-    const ok = await warp.refreshPool();
-    const status = await warp.getStatus();
-    notifications.add(
-      ok ? 'WARP Pool Refreshed' : 'WARP Pool Refresh Failed',
-      ok ? 'Flushed old accounts and generated fresh Cloudflare WARP credentials.' : 'The WARP pool could not be refreshed.',
-      ok ? 'info' : 'warning'
-    );
-    return sendJson(res, 200, { success: ok, ...status });
-  }
-
-  // Cloudflare WARP: Connect & Configure Proxy Mode
-  if (pathname === '/api/warp/connect' && req.method === 'POST') {
-    let body = {};
-    try { body = await parseBody(req); } catch (e) { body = {}; }
-    warp.configureEndpoint(body.host, body.port);
-    const ok = await warp.autoBootstrap(true);
-    const status = await warp.getStatus();
-    return sendJson(res, 200, { success: ok, ...status });
-  }
-
-  // Cloudflare WARP: Auto-Install / Auto-Bootstrap
-  if (pathname === '/api/warp/install' && req.method === 'POST') {
-    const resInstall = await warp.triggerAutoInstall();
-    const status = await warp.getStatus();
-    return sendJson(res, 200, { ...resInstall, ...status });
   }
 
   // Explicit egress proxy pool: Status

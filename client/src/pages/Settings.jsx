@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FiSettings, FiShield, FiRefreshCw, FiCheck, FiSliders, FiCpu, FiZap, FiTerminal, FiCopy } from '../components/Icons';
+import { FiSettings, FiRefreshCw, FiCheck, FiSliders, FiCpu } from '../components/Icons';
 import CustomToggle from '../components/CustomToggle';
 import CustomSelect from '../components/CustomSelect';
 
@@ -12,15 +12,6 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [maxRetries, setMaxRetries] = useState(settings.max_retries ?? 2);
   const [upstreamZenKey, setUpstreamZenKey] = useState(settings.upstream_zen_key || '');
   const [proxies, setProxies] = useState(Array.isArray(settings.proxies) ? settings.proxies.join('\n') : (settings.proxies || ''));
-  const [warpMode, setWarpMode] = useState(settings.warp_mode || 'auto');
-  const [warpHost, setWarpHost] = useState(settings.warp_host || '127.0.0.1');
-  const [warpAutoRotateMinutes, setWarpAutoRotateMinutes] = useState(settings.warp_auto_rotate_minutes ?? 0);
-  const [warpPort, setWarpPort] = useState(settings.warp_port || 40000);
-  const [warpStatus, setWarpStatus] = useState(null);
-  const [isRotatingWarp, setIsRotatingWarp] = useState(false);
-  const [isInstallingWarp, setIsInstallingWarp] = useState(false);
-  const [copiedCmd, setCopiedCmd] = useState(false);
-  const [warpFeedback, setWarpFeedback] = useState(null);
   const [globalRpm, setGlobalRpm] = useState(settings.global_rpm_limit || 0);
   const [globalTpm, setGlobalTpm] = useState(settings.global_tpm_limit || 0);
   const [isSaving, setIsSaving] = useState(false);
@@ -31,18 +22,6 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [proxyFeedback, setProxyFeedback] = useState(null);
 
   useEffect(() => {
-    const fetchWarp = async () => {
-      try {
-        const token = localStorage.getItem('o2p_token');
-        const res = await fetch('/api/warp/status', {
-          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setWarpStatus(data);
-        }
-      } catch (e) {}
-    };
     const fetchProxies = async () => {
       try {
         const token = localStorage.getItem('o2p_token');
@@ -55,112 +34,10 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         }
       } catch (e) {}
     };
-    fetchWarp();
     fetchProxies();
     const proxyTimer = setInterval(fetchProxies, 5000);
     return () => clearInterval(proxyTimer);
   }, []);
-
-  const pollWarpProgress = () => {
-    const token = localStorage.getItem('o2p_token');
-    let polls = 0;
-    const interval = setInterval(async () => {
-      polls++;
-      try {
-        const res = await fetch('/api/warp/status', {
-          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setWarpStatus(data);
-          if (data.connected && (!data.progress || data.progress.percent >= 100)) {
-            clearInterval(interval);
-          }
-        }
-      } catch (e) {}
-      if (polls > 35) clearInterval(interval);
-    }, 400);
-    return interval;
-  };
-
-  const handleRotateWarp = async () => {
-    setIsRotatingWarp(true);
-    setWarpFeedback(null);
-    pollWarpProgress();
-    try {
-      const token = localStorage.getItem('o2p_token');
-      const res = await fetch('/api/warp/rotate', {
-        method: 'POST',
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setWarpStatus(data);
-        setWarpFeedback('Cloudflare WARP tunnel keys rotated! Fresh edge egress active.');
-      } else {
-        setWarpFeedback('Rotation error: ' + (data.error || 'Check WARP status'));
-      }
-      setTimeout(() => setWarpFeedback(null), 4000);
-    } catch (err) {
-      setWarpFeedback('Failed to rotate WARP: ' + err.message);
-    } finally {
-      setIsRotatingWarp(false);
-    }
-  };
-
-  const handleConnectWarp = async () => {
-    setIsInstallingWarp(true);
-    setWarpFeedback(null);
-    pollWarpProgress();
-    try {
-      const token = localStorage.getItem('o2p_token');
-      const res = await fetch('/api/warp/connect', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-        },
-        body: JSON.stringify({ host: warpHost.trim(), port: parseInt(warpPort, 10) || 40000 })
-      });
-      const data = await res.json();
-      setWarpStatus(data);
-      if (data.connected) {
-        setWarpFeedback('Cloudflare WARP connected successfully!');
-      } else {
-        setWarpFeedback(data.reason || 'Could not connect to WARP socket.');
-      }
-      setTimeout(() => setWarpFeedback(null), 4000);
-    } catch (e) {
-      setWarpFeedback('Connection error: ' + e.message);
-    } finally {
-      setIsInstallingWarp(false);
-    }
-  };
-
-  const handleInstallWarp = async () => {
-    setIsInstallingWarp(true);
-    setWarpFeedback(null);
-    pollWarpProgress();
-    try {
-      const token = localStorage.getItem('o2p_token');
-      const res = await fetch('/api/warp/install', {
-        method: 'POST',
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-      const data = await res.json();
-      setWarpStatus(data);
-      if (data.success || data.connected) {
-        setWarpFeedback('Cloudflare WARP auto-setup complete & connected successfully!');
-      } else {
-        setWarpFeedback(data.error || 'Please run the 1-line script below on your host server.');
-      }
-      setTimeout(() => setWarpFeedback(null), 5000);
-    } catch (e) {
-      setWarpFeedback('Failed to trigger auto-install: ' + e.message);
-    } finally {
-      setIsInstallingWarp(false);
-    }
-  };
 
   const handleRescanProxies = async () => {
     setIsRescanningProxies(true);
@@ -198,10 +75,6 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         max_retries: parseInt(maxRetries, 10) || 0,
         upstream_zen_key: upstreamZenKey.trim(),
         proxies: proxies.split('\n').map(p => p.trim()).filter(Boolean),
-        warp_mode: warpMode,
-        warp_host: warpHost.trim() || '127.0.0.1',
-        warp_auto_rotate_minutes: parseInt(warpAutoRotateMinutes, 10) || 0,
-        warp_port: parseInt(warpPort, 10) || 40000,
         global_rpm_limit: parseInt(globalRpm, 10),
         global_tpm_limit: parseInt(globalTpm, 10)
       });
@@ -279,287 +152,6 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
           />
         </div>
       </div>
-
-      {/* Cloudflare WARP Proxy & Unauth Auto-Switch Card */}
-      {settings.warp_engine && settings.warp_engine !== 'disabled' && (
-      <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
-              <FiShield size={18} style={{ color: 'var(--primary)' }} />
-              <h3 style={{ fontSize: '1rem', fontWeight: '700' }}>Cloudflare WARP Proxy & Auto-Switch</h3>
-              {warpStatus?.available ? (
-                warpStatus.connected ? (
-                  <span className="badge badge-success">
-                    WARP Connected ({warpStatus.engine ? `${warpStatus.engine} • ` : ''}{warpStatus.host || '127.0.0.1'}:{warpStatus.port}{warpStatus.egressIp ? ` • Egress: ${warpStatus.egressIp}${warpStatus.colo ? ` [${warpStatus.colo}]` : ''}` : ''})
-                  </span>
-                ) : (
-                  <span className="badge badge-warning">WARP Disconnected</span>
-                )
-              ) : (
-                <span className="badge badge-secondary">Not Installed</span>
-              )}
-            </div>
-            <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)' }}>
-              Routes through Cloudflare WARP only when the tunnel is verified with a `warp=on` trace. Direct egress and unverified SOCKS endpoints are refused.
-            </p>
-          </div>
-          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-            {!warpStatus?.connected && (
-              <button
-                type="button"
-                className="btn-primary"
-                onClick={handleInstallWarp}
-                disabled={isInstallingWarp}
-                title="Automatically configure and connect userspace Cloudflare WARP proxy"
-                style={{ fontSize: '0.8rem', padding: '0.4rem 0.75rem' }}
-              >
-                <FiZap size={13} />
-                <span>{isInstallingWarp ? 'Setting up...' : 'Auto-Setup WARP'}</span>
-              </button>
-            )}
-            {warpStatus?.available && !warpStatus.connected && (
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={handleConnectWarp}
-                style={{ fontSize: '0.8rem', padding: '0.4rem 0.75rem' }}
-              >
-                Connect WARP
-              </button>
-            )}
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={handleRotateWarp}
-              disabled={isRotatingWarp || !warpStatus?.available}
-              title="Rotate tunnel session keys for a fresh Cloudflare egress IP"
-              style={{ fontSize: '0.8rem', padding: '0.4rem 0.75rem' }}
-            >
-              <FiRefreshCw size={13} className={isRotatingWarp ? 'spin' : ''} />
-              <span>{isRotatingWarp ? 'Rotating...' : 'Rotate WARP Keys'}</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Real-time WARP Progress Bar */}
-        {(isInstallingWarp || isRotatingWarp || (warpStatus?.progress && warpStatus.progress.percent < 100) || warpStatus?.bootstrapping) && (
-          <div style={{
-            padding: '0.85rem 1rem',
-            backgroundColor: 'rgba(47, 188, 91, 0.08)',
-            border: '1px solid rgba(47, 188, 91, 0.3)',
-            borderRadius: 'var(--radius)',
-            marginBottom: '1rem',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '0.55rem'
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <FiRefreshCw size={13} className="spin" style={{ color: 'var(--primary)' }} />
-                <span style={{ fontSize: '0.82rem', fontWeight: '600', color: 'var(--foreground)' }}>
-                  {warpStatus?.progress?.message || (isRotatingWarp ? 'Rotating Cloudflare tunnel session...' : 'Bootstrapping userspace WARP tunnel...')}
-                </span>
-              </div>
-              <span className="badge badge-success" style={{ fontWeight: 700, fontSize: '0.78rem' }}>
-                {warpStatus?.progress?.percent || (isRotatingWarp ? 45 : 65)}%
-              </span>
-            </div>
-
-            {/* Glowing Gradient Progress Bar */}
-            <div style={{
-              width: '100%',
-              height: '8px',
-              backgroundColor: 'rgba(0, 0, 0, 0.35)',
-              borderRadius: '999px',
-              overflow: 'hidden',
-              position: 'relative'
-            }}>
-              <div style={{
-                height: '100%',
-                width: `${Math.min(100, Math.max(8, warpStatus?.progress?.percent || (isRotatingWarp ? 45 : 65)))}%`,
-                background: 'linear-gradient(90deg, #2fbc5b, #00d2ff)',
-                borderRadius: '999px',
-                boxShadow: '0 0 12px rgba(47, 188, 91, 0.6)',
-                transition: 'width 0.35s ease-out'
-              }} />
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>
-              <span>Curve25519 Handshake</span>
-              <span>WireProxy Userspace Engine</span>
-              <span>SOCKS5 127.0.0.1:40000</span>
-            </div>
-          </div>
-        )}
-
-        {!warpStatus?.connected && (
-          <div style={{
-            padding: '0.85rem 1rem',
-            backgroundColor: 'rgba(242, 153, 74, 0.08)',
-            border: '1px solid rgba(242, 153, 74, 0.25)',
-            borderRadius: 'var(--radius)',
-            fontSize: '0.82rem',
-            marginBottom: '1rem',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '0.45rem'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontWeight: '600', color: '#f2994a', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                <FiTerminal size={14} />
-                <span>Cloudflare WARP 1-Line Host Auto-Installer</span>
-              </span>
-              <button
-                type="button"
-                className="badge badge-muted"
-                style={{ cursor: 'pointer', background: 'transparent', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
-                onClick={() => {
-                  navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/Nystic-Shadow/Opencode2api/main/scripts/install-warp.sh | sudo bash');
-                  setCopiedCmd(true);
-                  setTimeout(() => setCopiedCmd(false), 2000);
-                }}
-              >
-                <FiCopy size={11} />
-                <span>{copiedCmd ? '✓ Copied' : 'Copy Command'}</span>
-              </button>
-            </div>
-            <code style={{
-              display: 'block',
-              padding: '0.45rem 0.65rem',
-              backgroundColor: 'var(--background)',
-              borderRadius: 'var(--radius)',
-              fontFamily: 'monospace',
-              fontSize: '0.78rem',
-              color: 'var(--foreground)',
-              overflowX: 'auto'
-            }}>
-              curl -fsSL https://raw.githubusercontent.com/Nystic-Shadow/Opencode2api/main/scripts/install-warp.sh | sudo bash
-            </code>
-            <div style={{ fontSize: '0.74rem', color: 'var(--muted-foreground)' }}>
-              Works across Debian, Ubuntu, CentOS, RHEL, Fedora, & Arch. If deployed via Docker Compose, the <code>warp</code> sidecar runs out-of-the-box!
-            </div>
-          </div>
-        )}
-
-        {warpFeedback && (
-          <div style={{
-            padding: '0.65rem',
-            backgroundColor: 'var(--muted)',
-            borderRadius: 'var(--radius)',
-            borderLeft: '3px solid var(--primary)',
-            fontSize: '0.8rem',
-            marginBottom: '1rem'
-          }}>
-            {warpFeedback}
-          </div>
-        )}
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
-          <div>
-            <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.35rem' }}>
-              WARP Routing Mode
-            </label>
-            <CustomSelect
-              value={warpMode}
-              onChange={setWarpMode}
-              options={[
-                { value: 'auto', label: 'Auto (Recommended)', description: 'Use verified WARP when ready; configured proxies follow. Direct is used only when ALLOW_DIRECT_FALLBACK permits it.' },
-                { value: 'always', label: 'Always WARP', description: 'Require verified WARP; no direct fallback' },
-                { value: 'disabled', label: 'Disabled', description: 'Do not use Cloudflare WARP' }
-              ]}
-            />
-          </div>
-
-          <div style={{ paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
-            <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>429 / 403 Handling</div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-              Automatic identity rotation on rate limits is intentionally disabled. A 429 is returned to the client with Retry-After; a 403 is treated as an upstream error. This avoids unstable egress and repeated upstream violations.
-            </div>
-          </div>
-
-          <div style={{ paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-              <div>
-                <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Scheduled Background Auto-Rotate (Cron Interval)</div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-                  Optional operator-controlled tunnel refresh (0 = disabled, server default: 0)
-                </div>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                <input
-                  type="number"
-                  min="0"
-                  max="1440"
-                  className="input-field"
-                  style={{ width: '75px', textAlign: 'center', fontWeight: '700' }}
-                  value={warpAutoRotateMinutes}
-                  onChange={e => setWarpAutoRotateMinutes(parseInt(e.target.value, 10) || 0)}
-                />
-                <span style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)' }}>min</span>
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-              {[0, 5, 10, 15, 30, 60].map(m => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setWarpAutoRotateMinutes(m)}
-                  style={{
-                    padding: '0.2rem 0.55rem',
-                    fontSize: '0.72rem',
-                    borderRadius: 'var(--radius)',
-                    border: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    fontWeight: warpAutoRotateMinutes === m ? '700' : '500',
-                    backgroundColor: warpAutoRotateMinutes === m ? 'var(--primary)' : 'var(--muted)',
-                    color: warpAutoRotateMinutes === m ? 'var(--primary-foreground)' : 'var(--foreground)'
-                  }}
-                >
-                  {m === 0 ? 'Off' : `${m}m`}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ paddingTop: '0.6rem', borderTop: '1px solid var(--border)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
-            <div>
-              <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
-                WARP Proxy Host
-              </label>
-              <input
-                type="text"
-                className="input-field"
-                style={{ width: '100%' }}
-                value={warpHost}
-                onChange={e => setWarpHost(e.target.value)}
-                placeholder="127.0.0.1"
-              />
-              <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)', display: 'block', marginTop: '0.25rem' }}>
-                <code>127.0.0.1</code> for container/host, or <code>warp</code> for Docker Compose sidecar.
-              </span>
-            </div>
-
-            <div>
-              <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
-                WARP SOCKS5 Port
-              </label>
-              <input
-                type="number"
-                className="input-field"
-                style={{ width: '100%' }}
-                value={warpPort}
-                onChange={e => setWarpPort(e.target.value)}
-                placeholder="40000"
-              />
-              <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)', display: 'block', marginTop: '0.25rem' }}>
-                <code>40000</code> (standalone) or <code>1080</code> (Compose sidecar).
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-      )}
 
       {/* Egress proxy pool card */}
       <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', border: '1px solid var(--border)' }}>
@@ -789,7 +381,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             onChange={e => setProxies(e.target.value)}
           />
           <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
-Explicit HTTP, HTTPS, or SOCKS5 proxies used in order after WARP. The gateway does not rotate identities on 429/403; a proxy is marked unhealthy only for transport/5xx failures.
+            Explicit HTTP, HTTPS, or SOCKS5 proxies used in order. The gateway does not rotate identities on 429/403; a proxy is marked unhealthy only for transport/5xx failures.
           </span>
         </div>
 

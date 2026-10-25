@@ -4,7 +4,6 @@ console.log('🧪 Starting OpenCode2API Reliability Verification Suite...\n');
 
 const config = require('../server/config');
 const egress = require('../server/egress');
-const warp = require('../server/warp');
 const requestQueue = require('../server/requestQueue');
 
 let passed = 0;
@@ -232,57 +231,37 @@ async function main() {
   });
 
   console.log('\n[Test 7] Egress candidate selection');
-  await test('orders WARP, user proxies, and never direct when fallback is disabled', async () => {
-    const originalReady = warp.isReady;
-    const originalBestPort = warp.getBestPort;
-    try {
-      await withConfig({
-        proxies: ['http://user:pass@proxy-a.example:8080', 'socks5://proxy-b.example:1080'],
-        egress_mode: 'auto',
-        allow_direct_fallback: false,
-        warp_engine: 'sidecar',
-        warp_mode: 'auto'
-      }, () => {
-        egress.reload();
-        warp.isReady = () => true;
-        warp.getBestPort = () => 40000;
-        const routes = egress.getCandidates();
-        assert.deepStrictEqual(routes.map(r => r.id), [
-          'warp:40000',
-          'http://proxy-a.example:8080',
-          'socks5://proxy-b.example:1080'
-        ]);
-        assert.ok(!routes.some(r => r.type === 'direct'));
-      });
-    } finally {
-      warp.isReady = originalReady;
-      warp.getBestPort = originalBestPort;
+  await test('uses configured proxies in order and never direct when fallback is disabled', async () => {
+    await withConfig({
+      proxies: ['http://user:pass@proxy-a.example:8080', 'socks5://proxy-b.example:1080'],
+      egress_mode: 'auto',
+      allow_direct_fallback: false
+    }, () => {
       egress.reload();
-    }
+      const routes = egress.getCandidates();
+      assert.deepStrictEqual(routes.map(r => r.id), [
+        'http://proxy-a.example:8080',
+        'socks5://proxy-b.example:1080'
+      ]);
+      assert.ok(!routes.some(r => r.type === 'direct'));
+    });
+    egress.reload();
   });
 
-  await test('exposes every ready WARP port as a candidate', async () => {
-    const originalCandidatePorts = warp.getCandidatePorts;
-    const originalReady = warp.isReady;
-    try {
-      await withConfig({
-        proxies: [],
-        egress_mode: 'auto',
-        allow_direct_fallback: false,
-        warp_engine: 'sidecar',
-        warp_mode: 'auto'
-      }, () => {
-        egress.reload();
-        warp.isReady = () => true;
-        warp.getCandidatePorts = () => [40000, 40001];
-        const routes = egress.getCandidates();
-        assert.deepStrictEqual(routes.map(r => r.id), ['warp:40000', 'warp:40001']);
-      });
-    } finally {
-      warp.getCandidatePorts = originalCandidatePorts;
-      warp.isReady = originalReady;
+  await test('includes direct last in auto mode only when explicitly allowed', async () => {
+    await withConfig({
+      proxies: ['http://proxy-a.example:8080'],
+      egress_mode: 'auto',
+      allow_direct_fallback: true
+    }, () => {
       egress.reload();
-    }
+      const routes = egress.getCandidates();
+      assert.deepStrictEqual(routes.map(r => r.id), [
+        'http://proxy-a.example:8080',
+        'direct'
+      ]);
+    });
+    egress.reload();
   });
 
   await test('keeps a quota-limited route in the candidate list', async () => {
@@ -391,84 +370,6 @@ async function main() {
       assert.strictEqual(queue.getStats().queued, 0);
       release();
     });
-  });
-
-  console.log('\n[Test 9] WARP engine selection and safety guards');
-  await test('maps engine aliases and auto-detects the transport', async () => {
-    const savedWireproxy = warp.wireproxyPath;
-    const savedCli = warp.cliPath;
-    try {
-      await withConfig({ warp_engine: 'external', warp_host: '127.0.0.1' }, () => {
-        assert.strictEqual(warp.getEngineMode(), 'sidecar');
-      });
-      await withConfig({ warp_engine: 'proxy' }, () => assert.strictEqual(warp.getEngineMode(), 'sidecar'));
-      await withConfig({ warp_engine: 'socks5' }, () => assert.strictEqual(warp.getEngineMode(), 'sidecar'));
-      await withConfig({ warp_engine: 'wireproxy' }, () => assert.strictEqual(warp.getEngineMode(), 'embedded'));
-      await withConfig({ warp_engine: 'warp-cli' }, () => assert.strictEqual(warp.getEngineMode(), 'cli'));
-      await withConfig({ warp_engine: 'off' }, () => assert.strictEqual(warp.getEngineMode(), 'disabled'));
-      await withConfig({ warp_engine: 'none' }, () => assert.strictEqual(warp.getEngineMode(), 'disabled'));
-      await withConfig({ warp_engine: 'SIDECAR' }, () => assert.strictEqual(warp.getEngineMode(), 'sidecar'));
-
-      await withConfig({ warp_engine: 'auto', warp_host: 'warp' }, () => {
-        assert.strictEqual(warp.getEngineMode(), 'sidecar');
-      });
-
-      await withConfig({ warp_engine: 'auto', warp_host: '127.0.0.1' }, () => {
-        warp.wireproxyPath = 'C:\\fake\\wireproxy.exe';
-        warp.cliPath = null;
-        assert.strictEqual(warp.getEngineMode(), 'embedded');
-
-        warp.wireproxyPath = null;
-        warp.cliPath = 'C:\\fake\\warp-cli.exe';
-        assert.strictEqual(warp.getEngineMode(), 'cli');
-
-        warp.wireproxyPath = null;
-        warp.cliPath = null;
-        assert.strictEqual(warp.getEngineMode(), 'sidecar');
-      });
-    } finally {
-      warp.wireproxyPath = savedWireproxy;
-      warp.cliPath = savedCli;
-    }
-  });
-
-  await test('resolves sidecar host and embedded loopback correctly', async () => {
-    await withConfig({ warp_engine: 'sidecar', warp_host: 'warp' }, () => {
-      assert.strictEqual(warp._resolveWarpHost(1080), 'warp');
-    });
-    await withConfig({ warp_engine: 'embedded', warp_host: 'warp' }, () => {
-      assert.strictEqual(warp._resolveWarpHost(40000), '127.0.0.1');
-      assert.strictEqual(warp._resolveWarpHost(1080), 'warp');
-    });
-  });
-
-  await test('never rotates keys while a sidecar owns the tunnel', async () => {
-    await withConfig({ warp_engine: 'sidecar' }, async () => {
-      assert.strictEqual(await warp.rotateKeys('test'), false);
-    });
-    await withConfig({ warp_engine: 'disabled' }, async () => {
-      assert.strictEqual(await warp.rotateKeys('test'), false);
-    });
-  });
-
-  await test('reports readiness for disabled and sidecar modes', async () => {
-    const savedSidecarReady = warp.sidecarReady;
-    const savedSocketAlive = warp.socketAlive;
-    try {
-      await withConfig({ warp_engine: 'disabled' }, () => {
-        assert.strictEqual(warp.isReady(), false);
-      });
-      await withConfig({ warp_engine: 'sidecar' }, () => {
-        warp.sidecarReady = true;
-        assert.strictEqual(warp.isReady(), true);
-        warp.sidecarReady = false;
-        warp.socketAlive = false;
-        assert.strictEqual(warp.isReady(), false);
-      });
-    } finally {
-      warp.sidecarReady = savedSidecarReady;
-      warp.socketAlive = savedSocketAlive;
-    }
   });
 
   console.log(`\n${failed === 0 ? '🎉' : '❌'} Reliability suite finished: ${passed} passed, ${failed} failed.\n`);

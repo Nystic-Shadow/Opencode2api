@@ -8,13 +8,11 @@ const tools = require('./tools');
 const discovery = require('./discovery');
 const keys = require('./keys');
 const metrics = require('./metrics');
-const warp = require('./warp');
 const egress = require('./egress');
 const requestQueue = require('./requestQueue');
 
 function routeLabel(route) {
   if (!route) return 'no egress route';
-  if (route.type === 'warp') return `WARP:${route.port}`;
   if (route.type === 'proxy') return `proxy:${route.id}`;
   return 'direct';
 }
@@ -155,67 +153,6 @@ const persistentSessions = {
 };
 
 egress.onRouteReset((routeId) => persistentSessions.invalidateRoute(routeId));
-
-// Adaptive Route Health & Intelligent Egress Router
-const routeHealth = {
-  directDegradedUntil: 0,
-  directConsecutiveFailures: 0,
-  directLastReason: '',
-  warpDegradedUntil: 0,
-  warpConsecutiveFailures: 0,
-  warpLastReason: '',
-
-  markDirectDegraded(reason = 'upstream error') {
-    // Keep degraded for 3 minutes so subsequent requests immediately route through WARP without long lockouts
-    this.directDegradedUntil = Date.now() + (3 * 60 * 1000);
-    this.directConsecutiveFailures++;
-    this.directLastReason = String(reason);
-    console.warn(`[RouteManager] Direct route degraded (${reason}). Auto-promoting Cloudflare WARP as primary egress...`);
-  },
-
-  markDirectHealthy() {
-    this.directDegradedUntil = 0;
-    this.directConsecutiveFailures = 0;
-  },
-
-  isDirectDegraded() {
-    return Date.now() < this.directDegradedUntil;
-  },
-
-  markWarpDegraded(reason = 'warp error') {
-    this.warpConsecutiveFailures++;
-    this.warpLastReason = String(reason);
-    const warpMode = config.get('warp_mode') || 'auto';
-    if (warpMode === 'always') return;
-    // Only failover to direct route if direct route is NOT currently degraded and we have 3+ failures
-    if (!this.isDirectDegraded() && this.warpConsecutiveFailures >= 3) {
-      this.warpDegradedUntil = Date.now() + 15000;
-      console.warn(`[RouteManager] Cloudflare WARP route degraded (${reason}). Auto-failing over to direct route for 15s...`);
-    }
-  },
-
-  markWarpHealthy() {
-    this.warpDegradedUntil = 0;
-    this.warpConsecutiveFailures = 0;
-  },
-
-  isWarpDegraded() {
-    const warpMode = config.get('warp_mode') || 'auto';
-    if (warpMode === 'always') return false;
-    return Date.now() < this.warpDegradedUntil;
-  },
-
-  shouldUseWarp(attempt = 1) {
-    const warpMode = config.get('warp_mode') || 'auto';
-    if (warpMode === 'disabled' || warpMode === 'never') return false;
-    if (warpMode === 'always') return warp.isReady();
-    // If direct route is degraded (e.g. VPS IP 429), ALWAYS use WARP
-    if (this.isDirectDegraded()) return true;
-    if (this.isWarpDegraded()) return false;
-    if (!warp.isReady()) return false;
-    return true;
-  }
-};
 
 /**
  * Clean & normalize chat completion request parameters for upstream compatibility.
@@ -359,7 +296,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       keyId: keyObj.id
     });
     sendJsonError(res, 503, 'no_egress_route',
-      'No egress route is available. WARP is not ready and direct fallback is disabled. Wait for the sidecar or configure PROXIES / ALLOW_DIRECT_FALLBACK.',
+      'No egress route is available. Configure PROXIES and wait for a healthy proxy, or set ALLOW_DIRECT_FALLBACK=true for local development.',
       { 'Retry-After': '5' });
     return;
   }
@@ -408,7 +345,6 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       break;
     }
 
-    const useWarp = activeRoute.type === 'warp';
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const routeKey = activeRoute.id;
 
@@ -533,11 +469,6 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       // the concurrency being bounded, not just header latency.
       upstreamRes.once('close', releaseSlot);
       egress.recordSuccess(activeRoute);
-      if (!useWarp) {
-        routeHealth.markDirectHealthy();
-      } else {
-        routeHealth.markWarpHealthy();
-      }
 
       // Set fallback headers if auto-failover occurred
       if (resolvedModel !== requestedModel) {
@@ -938,8 +869,6 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
     // Network / 5xx failure: degrade the route and try the next configured one.
     egress.recordFailure(activeRoute, 'retry');
-    if (activeRoute.type === 'warp') routeHealth.markWarpDegraded(bodyStr || `HTTP ${statusCode}`);
-    else if (activeRoute.type === 'direct') routeHealth.markDirectDegraded(bodyStr || `HTTP ${statusCode}`);
     console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for ${currentModel}: ${bodyStr.slice(0, 200)}`);
 
     if (attempt > maxRetries) break;
@@ -1122,7 +1051,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       keyId: keyObj.id
     });
     sendAnthropicError(res, 503, 'no_egress_route',
-      'No egress route is available. WARP is not ready and direct fallback is disabled. Wait for the sidecar or configure PROXIES / ALLOW_DIRECT_FALLBACK.',
+      'No egress route is available. Configure PROXIES and wait for a healthy proxy, or set ALLOW_DIRECT_FALLBACK=true for local development.',
       { 'Retry-After': '5' });
     return;
   }
@@ -1169,7 +1098,6 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       break;
     }
 
-    const useWarp = activeRoute.type === 'warp';
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const routeKey = activeRoute.id;
 
@@ -1295,11 +1223,6 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       // Hold the admission slot until the stream finishes or aborts.
       upstreamRes.once('close', releaseSlot);
       egress.recordSuccess(activeRoute);
-      if (!useWarp) {
-        routeHealth.markDirectHealthy();
-      } else {
-        routeHealth.markWarpHealthy();
-      }
 
       if (resolvedModel !== requestedModel) {
         res.setHeader('x-opencode2api-fallback', `${requestedModel} -> ${resolvedModel}`);
@@ -1795,8 +1718,6 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
     // Network / 5xx failure: degrade the route and try the next configured one.
     egress.recordFailure(activeRoute, 'retry');
-    if (activeRoute.type === 'warp') routeHealth.markWarpDegraded(bodyStr || `HTTP ${statusCode}`);
-    else if (activeRoute.type === 'direct') routeHealth.markDirectDegraded(bodyStr || `HTTP ${statusCode}`);
     console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for Anthropic model ${currentModel}: ${bodyStr.slice(0, 200)}`);
 
     if (attempt > maxRetries) break;
@@ -1829,6 +1750,5 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
 module.exports = {
   handleChatCompletions,
-  handleAnthropicMessages,
-  routeHealth
+  handleAnthropicMessages
 };

@@ -7,7 +7,6 @@ const config = require('./config');
 const keys = require('./keys');
 const discovery = require('./discovery');
 const proxy = require('./proxy');
-const warp = require('./warp');
 const egress = require('./egress');
 const requestQueue = require('./requestQueue');
 const adminRoutes = require('./adminRoutes');
@@ -234,8 +233,7 @@ const server = http.createServer(async (req, res) => {
         uptime_seconds: Math.round(process.uptime()),
         cli_version: config.get('client_version'),
         models_count: discovery.models.length,
-        egress_ready: egress.getCandidates().length > 0,
-        warp_ready: warp.isReady()
+        egress_ready: egress.getCandidates().length > 0
       }));
     }
 
@@ -249,12 +247,6 @@ const server = http.createServer(async (req, res) => {
         service: 'OpenCode2API',
         uptime_seconds: Math.round(process.uptime()),
         models_count: modelsCount,
-        warp: {
-          engine: warp.getEngineMode(),
-          ready: warp.isReady(),
-          host: config.get('warp_host'),
-          port: config.get('warp_port')
-        },
         egress: {
           mode: config.get('egress_mode'),
           ready_routes: routes.map(r => ({ id: r.id, type: r.type })),
@@ -399,9 +391,9 @@ const server = http.createServer(async (req, res) => {
 server.requestTimeout = 120000;
 server.headersTimeout = 30000;
 
-// Boot order: bind the HTTP port immediately, then establish WARP and sync
-// models in the background. A slow or restarting WARP sidecar must never make
-// the container fail its liveness probe or refuse to start.
+// Boot order: bind the HTTP port immediately, then sync models in the
+// background. Slow model discovery or proxy checks must never make the
+// container fail its liveness probe or refuse to start.
 function startHttpServer() {
   if (server.listening) return;
 
@@ -419,7 +411,7 @@ function startHttpServer() {
     console.log(`🌐 Anthropic Messages URL: http://127.0.0.1:${PORT}/v1/messages`);
     console.log(`✨ Discovered Models: ${discovery.models.length} (cached at boot; syncing in background)`);
     console.log(`⚡ OpenCode CLI Fingerprint: v${config.get('client_version')}`);
-    console.log(`🛡️  WARP Engine: ${warp.getEngineMode()} (ready: ${warp.isReady()})`);
+    console.log(`🛡️  Egress Mode: ${config.get('egress_mode')} (${egress.getCandidates().length} ready route(s))`);
     console.log(`✅ Readiness probe: http://127.0.0.1:${PORT}/readyz`);
     console.log(`=============================================================\n`);
   });
@@ -438,22 +430,7 @@ async function boot() {
     console.warn('[Boot] Proxy health checks could not start:', e.message);
   }
 
-  // WARP runs in the background so sidecar startup cannot delay the gateway.
-  warp.autoBootstrap()
-    .then((warpReady) => {
-      if (warpReady) {
-        console.log(`[Boot] WARP engine "${warp.getEngineMode()}" connected on port ${config.get('warp_port')} (warp=on)`);
-      } else if (warp.getEngineMode() === 'disabled') {
-        console.log('[Boot] WARP disabled; proxy egress owns inference traffic.');
-      } else {
-        console.warn(`[Boot] WARP engine "${warp.getEngineMode()}" is not ready yet; /readyz will report 503 until it is.`);
-      }
-    })
-    .catch((err) => {
-      console.warn('[Boot] WARP bootstrap notice:', err.message);
-    });
-
-  // Model discovery also runs in the background; cached models are served now.
+  // Model discovery runs in the background; cached models are served now.
   discovery.sync()
     .then(() => console.log(`[Boot] Model discovery complete: ${discovery.models.length} models.`))
     .catch((err) => console.warn('[Boot] Initial model discovery notice:', err.message));
@@ -473,7 +450,6 @@ function shutdown(signal) {
     try { keys.flush(); } catch (e) {}
     try { metrics.flush(); } catch (e) {}
     try { egress.stopHealthChecks(); } catch (e) {}
-    try { warp.shutdown(); } catch (e) {}
     clearTimeout(forceTimer);
     process.exit(0);
   });

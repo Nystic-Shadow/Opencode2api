@@ -7,7 +7,7 @@ RUN cd client && npm install
 COPY client/ ./client/
 RUN cd client && npm run build
 
-# Production runtime stage (proxy-only egress; no WARP sidecar/wireproxy)
+# Production runtime stage (proxy-only egress; no tunnel sidecar)
 FROM node:20-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production

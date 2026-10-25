@@ -11,9 +11,7 @@ services:
       - DASHBOARD_USER=${DASHBOARD_USER:-admin}
       # Required: set DASHBOARD_PASS in .env or your shell before starting.
       - DASHBOARD_PASS=${DASHBOARD_PASS:?Set DASHBOARD_PASS to a strong password}
-      # Proxy-only deployment: no WARP sidecar, no direct fallback.
-      - WARP_ENGINE=disabled
-      - WARP_MODE=disabled
+      # Proxy-only deployment: no tunnel sidecar, no direct fallback.
       - EGRESS_MODE=proxy_only
       - ALLOW_DIRECT_FALLBACK=false
       # Required: one or more explicit HTTP/HTTPS/SOCKS5 proxies.

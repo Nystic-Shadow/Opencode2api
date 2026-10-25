@@ -92,9 +92,55 @@ class OpenCodeCliUpdater {
     }
   }
 
-  queryLatestReleaseTag() {
+  async queryLatestReleaseTag() {
+    // Primary: Official npm registry for @opencode/cli (where OpenCode 2.x releases are published)
+    const npmVersion = await this.queryNpmVersion();
+    if (npmVersion) {
+      return npmVersion;
+    }
+
+    // Fallback: GitHub releases API for anomalyco/opencode
+    return this.queryGitHubVersion();
+  }
+
+  queryNpmVersion() {
     return new Promise((resolve) => {
-      // Primary: GitHub API for anomalyco/opencode
+      const options = {
+        hostname: 'registry.npmjs.org',
+        path: '/@opencode%2Fcli/latest',
+        method: 'GET',
+        headers: {
+          'User-Agent': 'OpenCode2API-Gateway-Agent',
+          'Accept': 'application/json'
+        },
+        timeout: 8000
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const json = JSON.parse(data);
+            if (json.version) {
+              return resolve(json.version);
+            }
+          } catch (e) {}
+          resolve(null);
+        });
+      });
+
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => {
+        req.destroy();
+        resolve(null);
+      });
+      req.end();
+    });
+  }
+
+  queryGitHubVersion() {
+    return new Promise((resolve) => {
       const options = {
         hostname: 'api.github.com',
         path: '/repos/anomalyco/opencode/releases/latest',
@@ -103,7 +149,7 @@ class OpenCodeCliUpdater {
           'User-Agent': 'OpenCode2API-Gateway-Agent',
           'Accept': 'application/vnd.github.v3+json'
         },
-        timeout: 10000
+        timeout: 8000
       };
 
       const req = https.request(options, (res) => {
@@ -118,45 +164,6 @@ class OpenCodeCliUpdater {
               }
             } catch (e) {}
           }
-          // Fallback: npm registry for opencode-ai
-          this.queryNpmVersion().then(resolve);
-        });
-      });
-
-      req.on('error', () => {
-        this.queryNpmVersion().then(resolve);
-      });
-      req.on('timeout', () => {
-        req.destroy();
-        this.queryNpmVersion().then(resolve);
-      });
-      req.end();
-    });
-  }
-
-  queryNpmVersion() {
-    return new Promise((resolve) => {
-      const options = {
-        hostname: 'registry.npmjs.org',
-        path: '/@opencode%2Fcli/latest',
-        method: 'GET',
-        headers: {
-          'User-Agent': 'OpenCode2API-Gateway-Agent',
-          'Accept': 'application/json'
-        },
-        timeout: 10000
-      };
-
-      const req = https.request(options, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          try {
-            const json = JSON.parse(data);
-            if (json.version) {
-              return resolve(json.version);
-            }
-          } catch (e) {}
           resolve(null);
         });
       });

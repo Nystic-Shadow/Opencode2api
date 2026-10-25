@@ -66,8 +66,16 @@ function serveStatic(req, res, pathname) {
   const cleanRelative = path.normalize(decoded).replace(/^([.][.][/\\])+/, '');
   let targetPath = path.resolve(DIST_DIR, '.' + path.sep + cleanRelative);
 
-  // Strict containment verification: targetPath MUST reside inside DIST_DIR
-  if (!targetPath.startsWith(DIST_DIR + path.sep) && targetPath !== path.join(DIST_DIR, 'index.html')) {
+  // Strict containment verification: targetPath MUST reside inside DIST_DIR.
+  // The distribution root itself is valid here; it is resolved to index.html
+  // by the directory fallback below.
+  const relativeToDist = path.relative(DIST_DIR, targetPath);
+  const insideDist = relativeToDist === '' || (
+    relativeToDist !== '..' &&
+    !relativeToDist.startsWith('..' + path.sep) &&
+    !path.isAbsolute(relativeToDist)
+  );
+  if (!insideDist) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ error: { message: 'Access denied: Path outside distribution root' } }));
   }

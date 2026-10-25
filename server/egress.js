@@ -183,12 +183,20 @@ class EgressManager {
     this.proxyChecksPromise = null;
     this.proxyChecksEnabled = false;
     this.proxyCheckTimer = null;
+    this.nextCheckAt = 0;
+    this.lastCheckAt = 0;
     this.maxProxyPool = 100;
     this.routeCursor = 0;
     this.lastReload = Date.now();
+    this.checkIntervalMs = this._checkIntervalMs();
 
     config.onChange(() => {
       this.reload();
+      const interval = this._checkIntervalMs();
+      if (interval !== this.checkIntervalMs) {
+        this.checkIntervalMs = interval;
+        this._scheduleNextCheck();
+      }
     });
   }
 
@@ -214,44 +222,93 @@ class EgressManager {
 
     const oldIds = new Set(this.proxyIds);
     const nextIds = new Set(nextProxies.map(p => p.id));
+    const removed = [...oldIds].filter(id => !nextIds.has(id));
+    const added = [...nextIds].filter(id => !oldIds.has(id));
 
     this.proxies = nextProxies;
     this.proxyIds = nextIds;
     this.proxyFingerprint = nextFingerprint;
-    this.proxyChecks.clear();
-    this.probeErrors.clear();
-    this.routeCursor = 0;
 
-    for (const id of new Set([...oldIds, ...nextIds])) {
+    // Keep health, check results, and keep-alive agents for routes that did
+    // not change. A settings save that only adds one proxy must not reset the
+    // verification state of the whole pool.
+    for (const id of new Set([...removed, ...added])) {
       this.health.delete(id);
+      this.proxyChecks.delete(id);
+      this.probeErrors.delete(id);
+      const agent = this.proxyAgents.get(id);
+      if (agent) {
+        try { agent.destroy(); } catch (e) {}
+        this.proxyAgents.delete(id);
+      }
+    }
+    for (const id of [...this.health.keys()]) {
+      if (!nextIds.has(id)) this.health.delete(id);
+    }
+    for (const id of [...this.proxyChecks.keys()]) {
+      if (!nextIds.has(id)) this.proxyChecks.delete(id);
+    }
+
+    this.routeCursor = 0;
+    this.lastReload = Date.now();
+
+    for (const id of [...removed, ...added]) {
       for (const fn of this.routeResetListeners) {
         try { fn(id, 'proxy_reload'); } catch (e) {}
       }
     }
 
-    for (const agent of this.proxyAgents.values()) {
-      try { agent.destroy(); } catch (e) {}
-    }
-    this.proxyAgents.clear();
-    this.lastReload = Date.now();
     if (this.proxyChecksEnabled) {
-      this.runProxyChecks().catch(err => console.warn('[Egress] Proxy health checks failed:', err.message));
+      this._runAndSchedule();
     }
+  }
+
+  _checkIntervalMs() {
+    const minutes = Number(config.get('proxy_check_interval_minutes'));
+    const safeMinutes = Number.isFinite(minutes) ? Math.min(1440, Math.max(1, minutes)) : 30;
+    return safeMinutes * 60 * 1000;
   }
 
   startHealthChecks() {
     this.proxyChecksEnabled = true;
-    this.runProxyChecks().catch(err => console.warn('[Egress] Proxy health checks failed:', err.message));
-    if (!this.proxyCheckTimer) {
-      this.proxyCheckTimer = setInterval(() => this.runProxyChecks(), 5 * 60 * 1000);
-      if (typeof this.proxyCheckTimer.unref === 'function') this.proxyCheckTimer.unref();
+    this.recheckNow();
+  }
+
+  recheckNow() {
+    this.proxyChecksEnabled = true;
+    return this._runAndSchedule();
+  }
+
+  async _runAndSchedule() {
+    try {
+      await this.runProxyChecks();
+    } catch (err) {
+      console.warn('[Egress] Proxy health checks failed:', err.message);
+    } finally {
+      this._scheduleNextCheck();
     }
+  }
+
+  _scheduleNextCheck(delayMs = null) {
+    if (!this.proxyChecksEnabled) return;
+    if (this.proxyCheckTimer) {
+      clearTimeout(this.proxyCheckTimer);
+      this.proxyCheckTimer = null;
+    }
+    const wait = delayMs === null ? this._checkIntervalMs() : delayMs;
+    this.nextCheckAt = Date.now() + wait;
+    this.proxyCheckTimer = setTimeout(() => {
+      this.proxyCheckTimer = null;
+      this._runAndSchedule();
+    }, wait);
+    if (typeof this.proxyCheckTimer.unref === 'function') this.proxyCheckTimer.unref();
   }
 
   stopHealthChecks() {
     this.proxyChecksEnabled = false;
+    this.nextCheckAt = 0;
     if (this.proxyCheckTimer) {
-      clearInterval(this.proxyCheckTimer);
+      clearTimeout(this.proxyCheckTimer);
       this.proxyCheckTimer = null;
     }
   }
@@ -272,6 +329,8 @@ class EgressManager {
       };
 
       await Promise.all(Array.from({ length: concurrency }, worker));
+      this.lastCheckAt = Date.now();
+      await this._pruneDeadProxies();
     })();
 
     try {
@@ -280,6 +339,72 @@ class EgressManager {
       this.proxyChecksRunning = false;
       this.proxyChecksPromise = null;
     }
+  }
+
+  /**
+   * Remove proxies that failed two consecutive full 5x sweeps. A proxy that
+   * fails a sweep is already excluded from routing by checkFailed; pruning
+   * only cleans the configured list. The pool is never emptied automatically:
+   * when every entry is dead, the last configured entry is kept so a later
+   * sweep can recover it without operator action.
+   */
+  async _pruneDeadProxies() {
+    if (process.env.O2P_CONFIG_READONLY === '1') return 0;
+    if (config.get('proxy_auto_prune_dead') === false) return 0;
+
+    const dead = this.proxies.filter(proxy => {
+      const check = this.proxyChecks.get(proxy.id);
+      const health = this.health.get(proxy.id);
+      return check && check.healthy === false && (health?.checkFailures || 0) >= 2;
+    });
+    if (dead.length === 0) return 0;
+    // Leave at least one configured entry for recovery when the whole pool is
+    // dead. Otherwise remove every dead entry and keep the healthy remainder.
+    const removable = dead.length >= this.proxies.length ? dead.slice(0, -1) : dead;
+    if (removable.length === 0) return 0;
+
+    const removed = this.removeProxies(new Set(removable.map(proxy => proxy.id)));
+    if (removed > 0) {
+      console.warn(`[Egress] Auto-removed ${removed} dead prox${removed === 1 ? 'y' : 'ies'} after two failed 5x checks.`);
+      try {
+        require('./notifications').add(
+          'Dead Proxies Removed',
+          `${removed} prox${removed === 1 ? 'y' : 'ies'} failed two consecutive 5x checks and ${removed === 1 ? 'was' : 'were'} removed from the configured pool.`,
+          'warning'
+        );
+      } catch (e) {}
+    }
+    return removed;
+  }
+
+  removeProxies(ids) {
+    const configured = config.get('proxies');
+    let raw = [];
+    if (Array.isArray(configured)) {
+      raw = [...configured];
+    } else if (typeof configured === 'string') {
+      raw = configured.split(/[\n,]/).map(value => value.trim()).filter(Boolean);
+    }
+    const remaining = raw.filter(entry => {
+      const parsed = parseProxyUrl(entry);
+      return !parsed || !ids.has(parsed.id);
+    });
+    const removed = raw.length - remaining.length;
+    if (removed > 0) config.update({ proxies: remaining });
+    return removed;
+  }
+
+  pruneFailed() {
+    const ids = new Set(
+      this.proxies
+        .filter(proxy => this.proxyChecks.get(proxy.id)?.healthy === false)
+        .map(proxy => proxy.id)
+    );
+    if (ids.size === 0) {
+      return { removed: 0, remaining: this.proxies.length };
+    }
+    const removed = this.removeProxies(ids);
+    return { removed, remaining: this.proxies.length };
   }
 
   async checkProxy(proxy) {
@@ -307,12 +432,16 @@ class EgressManager {
     if (healthy) {
       health.failures = 0;
       health.openUntil = 0;
+      health.checkFailed = false;
+      health.checkFailures = 0;
+      health.proxyFailures = 0;
       health.lastError = '';
       health.lastSuccess = Date.now();
       this.probeErrors.delete(route.id);
     } else {
-      health.failures = (health.failures || 0) + 1;
-      health.openUntil = Date.now() + (5 * 60 * 1000);
+      health.checkFailures = (health.checkFailures || 0) + 1;
+      health.checkFailed = true;
+      health.openUntil = 0;
       health.lastError = `Proxy health check failed (${passes}/${checks})${probeError ? `: ${probeError}` : ''}`;
       health.lastFailure = Date.now();
     }
@@ -323,6 +452,7 @@ class EgressManager {
       checks,
       latency,
       lastCheck: Date.now(),
+      failures: health.checkFailures || 0,
       error: healthy ? '' : health.lastError
     });
   }
@@ -393,32 +523,50 @@ class EgressManager {
       const check = this.proxyChecks.get(proxy.id);
       const available = this.isAvailable(route);
       const quotaRetryAfterMs = this.getQuotaRetryAfter(route);
+      const checkHealthy = check ? check.healthy : null;
+      let state = 'unverified';
+      if (health.checkFailed) state = 'failed';
+      else if (quotaRetryAfterMs > 0) state = 'quota';
+      else if (!available) state = 'cooling';
+      else if (checkHealthy === true) state = 'healthy';
+      else if (checkHealthy === false) state = 'failed';
       return {
         id: proxy.id,
         endpoint: proxy.url,
         available,
         routable: available && quotaRetryAfterMs === 0,
         quotaRetryAfterMs,
+        state,
         failures: health.failures || 0,
+        checkFailures: health.checkFailures || 0,
+        checkFailed: health.checkFailed === true,
         openUntil: health.openUntil || 0,
         lastError: health.lastError || '',
         passes: check?.passes || 0,
         checks: check?.checks || 5,
         latency: check?.latency || 0,
         lastCheck: check?.lastCheck || 0,
-        healthy: check ? check.healthy : null
+        healthy: checkHealthy
       };
     });
 
     const verified = entries.filter(entry => entry.available && entry.healthy === true);
     const routable = verified.filter(entry => entry.routable);
+    const failed = entries.filter(entry => entry.healthy === false);
     const fastest = [...routable].sort((a, b) => (a.latency || Infinity) - (b.latency || Infinity))[0] || null;
     return {
       configuredCount: this.proxies.length,
       maxPool: this.maxProxyPool,
       verifiedCount: verified.length,
       routableCount: routable.length,
+      failedCount: failed.length,
+      unverifiedCount: entries.filter(entry => entry.healthy === null).length,
+      checkIntervalMinutes: Math.round(this._checkIntervalMs() / 60000),
+      nextCheckAt: this.nextCheckAt || 0,
+      lastCheckAt: this.lastCheckAt || 0,
       isScanning: this.proxyChecksRunning,
+      autoPruneDead: config.get('proxy_auto_prune_dead') !== false,
+      configuredViaEnv: !!process.env.PROXIES,
       fastestProxy: fastest,
       topProxies: routable.slice(0, 10).map(entry => ({
         endpoint: entry.endpoint,
@@ -443,6 +591,9 @@ class EgressManager {
         failures: 0,
         openUntil: 0,
         retryAfterUntil: 0,
+        checkFailed: false,
+        checkFailures: 0,
+        proxyFailures: 0,
         lastError: '',
         lastSuccess: 0,
         lastFailure: 0
@@ -454,6 +605,7 @@ class EgressManager {
   isAvailable(route) {
     if (!route) return false;
     const health = this._health(route);
+    if (health.checkFailed) return false;
     return health.openUntil <= Date.now();
   }
 
@@ -599,6 +751,11 @@ class EgressManager {
         return;
       }
       called = true;
+      if (err && typeof err === 'object') {
+        // Lets the request path distinguish a broken proxy tunnel from an
+        // upstream response instead of only seeing a generic socket error.
+        try { err.proxyFailure = true; } catch (e) {}
+      }
       callback(err, socket);
     };
 
@@ -752,6 +909,9 @@ class EgressManager {
     health.failures = 0;
     health.openUntil = 0;
     health.retryAfterUntil = 0;
+    health.checkFailed = false;
+    health.checkFailures = 0;
+    health.proxyFailures = 0;
     health.lastError = '';
     health.lastSuccess = Date.now();
   }
@@ -765,6 +925,18 @@ class EgressManager {
     if (kind === 'quota') {
       health.retryAfterUntil = Math.max(health.retryAfterUntil, now + Math.max(1000, retryAfterMs || 0));
       health.lastError = 'upstream quota';
+      return;
+    }
+
+    if (kind === 'proxy_down') {
+      // A proxy-level connection failure is stronger evidence than an upstream
+      // 5xx. Pull the route out of rotation immediately and back off
+      // exponentially, capped at the configured sweep interval.
+      health.proxyFailures = (health.proxyFailures || 0) + 1;
+      const exponent = Math.min(health.proxyFailures - 1, 6);
+      const backoff = Math.min(this._checkIntervalMs(), 30000 * Math.pow(2, exponent));
+      health.openUntil = Math.max(health.openUntil, now + backoff);
+      health.lastError = 'proxy connection failed';
       return;
     }
 

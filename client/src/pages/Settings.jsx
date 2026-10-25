@@ -11,6 +11,8 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [freeOnly, setFreeOnly] = useState(settings.free_only !== false);
   const [maxRetries, setMaxRetries] = useState(settings.max_retries ?? 2);
   const [proxyQuotaFailovers, setProxyQuotaFailovers] = useState(settings.proxy_quota_failovers ?? 10);
+  const [proxyCheckInterval, setProxyCheckInterval] = useState(settings.proxy_check_interval_minutes ?? 30);
+  const [proxyAutoPrune, setProxyAutoPrune] = useState(settings.proxy_auto_prune_dead !== false);
   const [upstreamZenKey, setUpstreamZenKey] = useState(settings.upstream_zen_key || '');
   const [proxies, setProxies] = useState(Array.isArray(settings.proxies) ? settings.proxies.join('\n') : (settings.proxies || ''));
   const [globalRpm, setGlobalRpm] = useState(settings.global_rpm_limit || 0);
@@ -20,6 +22,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [updateMsg, setUpdateMsg] = useState(null);
   const [proxyStatus, setProxyStatus] = useState(null);
   const [isRescanningProxies, setIsRescanningProxies] = useState(false);
+  const [isPruningProxies, setIsPruningProxies] = useState(false);
   const [proxyFeedback, setProxyFeedback] = useState(null);
 
   useEffect(() => {
@@ -52,13 +55,35 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
       if (res.ok) {
         const data = await res.json();
         setProxyStatus(data);
-        setProxyFeedback('5x health checks running in background. Proxies that fail are quarantined for five minutes.');
+        setProxyFeedback('5x health checks running in background. Failed routes leave rotation until a later sweep passes; two failed sweeps remove them when auto-prune is on.');
       }
       setTimeout(() => setProxyFeedback(null), 5000);
     } catch (e) {
       setProxyFeedback('Proxy rescan error: ' + e.message);
     } finally {
       setIsRescanningProxies(false);
+    }
+  };
+
+  const handlePruneProxies = async () => {
+    setIsPruningProxies(true);
+    try {
+      const token = localStorage.getItem('o2p_token');
+      const res = await fetch('/api/proxies/prune', {
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to remove failed proxies');
+      setProxyStatus(data);
+      setProxyFeedback(data.removed > 0
+        ? `Removed ${data.removed} failed prox${data.removed === 1 ? 'y' : 'ies'} from the configured pool.`
+        : 'No failed proxies to remove.');
+      setTimeout(() => setProxyFeedback(null), 5000);
+    } catch (e) {
+      setProxyFeedback('Prune error: ' + e.message);
+    } finally {
+      setIsPruningProxies(false);
     }
   };
 
@@ -75,6 +100,8 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         free_only: freeOnly,
         max_retries: parseInt(maxRetries, 10) || 0,
         proxy_quota_failovers: Math.min(20, Math.max(0, parseInt(proxyQuotaFailovers, 10) || 0)),
+        proxy_check_interval_minutes: Math.min(1440, Math.max(1, parseInt(proxyCheckInterval, 10) || 30)),
+        proxy_auto_prune_dead: proxyAutoPrune,
         upstream_zen_key: upstreamZenKey.trim(),
         proxies: proxies.split('\n').map(p => p.trim()).filter(Boolean),
         global_rpm_limit: parseInt(globalRpm, 10),
@@ -164,11 +191,15 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                 Egress Proxy Pool
               </h3>
               <span className={`badge ${proxyStatus?.verifiedCount > 0 ? 'badge-active' : 'badge-idle'}`}>
-                {proxyStatus?.isScanning ? '5x health check...' : (proxyStatus?.verifiedCount > 0 ? `${proxyStatus.verifiedCount} healthy` : 'No healthy proxies')}
+                {proxyStatus?.isScanning
+                  ? '5x health check...'
+                  : (proxyStatus?.configuredCount === 0
+                    ? 'Not configured'
+                    : (proxyStatus?.verifiedCount > 0 ? `${proxyStatus.verifiedCount} healthy` : 'No usable proxies'))}
               </span>
             </div>
             <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', margin: 0 }}>
-              Explicit <code>PROXIES</code> only, maximum 100. Each proxy must pass five consecutive checks with a 5-second timeout; failures are quarantined for five minutes. Healthy proxies are used round-robin. An upstream 429 cools that route and fails over to the next routable proxy (bounded by <code>PROXY_QUOTA_FAILOVERS</code>). Proxies mitigate per-IP limits; they cannot remove account-wide quota.
+              Explicit <code>PROXIES</code> only, maximum 100, and no public-proxy scraping. Every proxy is swept in the background every {proxyStatus?.checkIntervalMinutes || 30} minutes with five consecutive 5-second probes. A failed route leaves rotation until a later sweep passes; two failed sweeps remove it when auto-prune is on (the last entry is kept). Requests use healthy proxies round-robin and fail over immediately if a tunnel dies. An upstream 429 cools that route and tries the next routable proxy (bounded by <code>PROXY_QUOTA_FAILOVERS</code>). Proxies mitigate per-IP limits; they cannot remove account-wide quota.
             </p>
           </div>
 
@@ -182,6 +213,24 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             <span>{isRescanningProxies || proxyStatus?.isScanning ? 'Checking 5x...' : 'Recheck Pool 5x'}</span>
           </button>
         </div>
+
+        {proxyStatus?.configuredCount === 0 && (
+          <div style={{
+            padding: '0.75rem',
+            backgroundColor: 'var(--muted)',
+            borderRadius: 'var(--radius)',
+            borderLeft: '3px solid #f0a500',
+            fontSize: '0.8rem',
+            lineHeight: 1.5
+          }}>
+            <strong>No proxies configured.</strong> Add one or more explicit HTTP, HTTPS, or SOCKS5 proxy URLs in the field below and click <em>Save Settings</em>. Nothing is scraped automatically.
+            {proxyStatus?.configuredViaEnv && (
+              <div style={{ marginTop: '0.35rem', color: 'var(--muted-foreground)' }}>
+                <code>PROXIES</code> is present in the environment, but no valid entries were loaded. Check the URL format and restart the gateway.
+              </div>
+            )}
+          </div>
+        )}
 
         {proxyFeedback && (
           <div style={{
@@ -214,6 +263,18 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Routable Now</div>
             <div style={{ fontSize: '1.1rem', fontWeight: '800', color: 'var(--foreground)' }}>
               {proxyStatus?.routableCount || 0}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Failed / Disabled</div>
+            <div style={{ fontSize: '1.1rem', fontWeight: '800', color: (proxyStatus?.failedCount || 0) > 0 ? '#e05555' : 'var(--foreground)' }}>
+              {proxyStatus?.failedCount || 0}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Auto Recheck</div>
+            <div style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--foreground)' }}>
+              Every {proxyStatus?.checkIntervalMinutes || 30} min
             </div>
           </div>
           <div>
@@ -265,9 +326,50 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             </div>
           </div>
         )}
-      </div>
 
-      {/* Settings Form */}
+        {proxyStatus?.proxies?.some(p => p.healthy === false) && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
+              <div style={{ fontSize: '0.75rem', fontWeight: '600', color: 'var(--muted-foreground)' }}>
+                Failed / Out of rotation:
+              </div>
+              <button
+                type="button"
+                onClick={handlePruneProxies}
+                disabled={isPruningProxies}
+                className="btn btn-secondary"
+                style={{ fontSize: '0.7rem', padding: '0.25rem 0.55rem' }}
+              >
+                {isPruningProxies ? 'Removing...' : 'Remove failed'}
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+              {proxyStatus.proxies.filter(p => p.healthy === false).map(p => (
+                <div
+                  key={p.id}
+                  style={{
+                    padding: '0.35rem 0.55rem',
+                    backgroundColor: 'var(--muted)',
+                    borderRadius: 'var(--radius)',
+                    borderLeft: '3px solid #e05555',
+                    fontSize: '0.72rem',
+                    fontFamily: 'monospace',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: '0.75rem',
+                    flexWrap: 'wrap'
+                  }}
+                >
+                  <span style={{ color: 'var(--foreground)' }}>{p.endpoint}</span>
+                  <span style={{ color: 'var(--muted-foreground)' }}>
+                    {p.passes}/{p.checks} passes · {p.lastError || 'check failed'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
       <form onSubmit={handleSubmit} className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
         <h3 style={{ fontSize: '1rem', fontWeight: '700', borderBottom: '1px solid var(--border)', paddingBottom: '0.5rem' }}>
           Gateway Configuration
@@ -409,8 +511,40 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             onChange={e => setProxies(e.target.value)}
           />
           <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
-            Explicit HTTP, HTTPS, or SOCKS5 proxies (maximum 100). Entries may share host:port when their credentials select different egress IPs. Requests use the pool round-robin; an upstream 429 cools that route and tries the next within the quota budget. Proxies cannot remove account-wide quota.
+            Explicit HTTP, HTTPS, or SOCKS5 proxies (maximum 100). Entries may share host:port when their credentials select different egress IPs. The pool is swept automatically; failed routes leave rotation until a later sweep passes. Requests use healthy proxies round-robin and fail over immediately when a tunnel dies. An upstream 429 cools that route and tries the next within the quota budget. No public proxies are scraped.
           </span>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.75rem' }}>
+            <div>
+              <label style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', display: 'block', marginBottom: '0.25rem' }}>
+                Pool Recheck Interval (Minutes)
+              </label>
+              <input
+                type="number"
+                className="input-field"
+                style={{ width: '100%' }}
+                value={proxyCheckInterval}
+                onChange={e => setProxyCheckInterval(e.target.value)}
+                min="1"
+                max="1440"
+                required
+              />
+              <span style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)' }}>
+                Default 30. Every configured proxy is checked in the background at this interval, even with no traffic.
+              </span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
+              <div>
+                <div style={{ fontSize: '0.75rem', fontWeight: '600' }}>Auto-Remove Dead Proxies</div>
+                <div style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)', lineHeight: 1.4 }}>
+                  After two consecutive failed 5x sweeps. The last remaining entry is kept so the pool can recover.
+                </div>
+              </div>
+              <CustomToggle
+                checked={proxyAutoPrune}
+                onChange={setProxyAutoPrune}
+              />
+            </div>
+          </div>
         </div>
 
         {/* Global Rate Limits */}

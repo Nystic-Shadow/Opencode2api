@@ -3,8 +3,9 @@
  * Verify the configured egress proxy pool.
  *
  * Every proxy must survive 5 sequential CONNECT + TLS probes to the configured
- * upstream host, with a 5-second timeout per probe. Unhealthy proxies are
- * quarantined by the gateway for five minutes.
+ * upstream host, with a 5-second timeout per probe. A proxy that fails a sweep
+ * is kept out of rotation by the gateway until a later sweep passes. This CLI
+ * is read-only: it never prunes or rewrites the configured pool.
  *
  * Usage: npm run check:proxies
  */
@@ -13,7 +14,10 @@ const config = require('../server/config');
 const egress = require('../server/egress');
 
 async function main() {
-  const proxies = Array.isArray(config.get('proxies')) ? config.get('proxies') : [];
+  const configured = config.get('proxies');
+  const proxies = Array.isArray(configured)
+    ? configured
+    : (typeof configured === 'string' ? configured.split(/[\n,]/).map(value => value.trim()).filter(Boolean) : []);
   if (proxies.length === 0) {
     console.error('No proxies configured.');
     console.error('Set PROXIES in .env, for example:');
@@ -65,7 +69,7 @@ async function main() {
     console.error('\nNo proxy passed the health check. The gateway will report no_egress_route.');
     process.exitCode = 1;
   } else if (healthy < status.configuredCount) {
-    console.warn('\nSome proxies failed and are quarantined for five minutes. Traffic uses the healthy remainder.');
+    console.warn('\nSome proxies failed this sweep and stay out of rotation until a later sweep passes. Traffic uses the healthy remainder.');
   }
 }
 

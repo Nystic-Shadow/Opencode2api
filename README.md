@@ -24,10 +24,12 @@ OpenCode2API exposes OpenCode Zen models through standard **OpenAI** and **Anthr
 It is designed for **maximum best-effort availability** within upstream limits. Free-tier capacity is controlled upstream. The gateway therefore:
 
 - spreads requests round-robin across the healthy proxies you configure,
+- rechecks the full pool in the background every 30 minutes by default, even while idle,
 - cools a proxy briefly when it returns `429`, then tries the next routable proxy (bounded by `PROXY_QUOTA_FAILOVERS`),
 - rotates the anonymous session identity on retries so a per-session limit does not pin one request forever,
 - never scrapes public proxy lists,
-- fails over between routes on network errors and `5xx`,
+- fails over immediately when a proxy tunnel dies and keeps dead routes out of rotation until a later sweep passes,
+- auto-removes proxies after two consecutive failed sweeps (configurable, never the last entry),
 - exposes `/readyz` so a scheduler or load balancer can stop sending traffic when no route or model is available.
 
 > **Best effort, not a capacity guarantee.** Proxies change the egress IP; they cannot manufacture upstream quota. If OpenCode meters the free tier per account/key rather than per IP (or the limit applies globally), every proxy can still receive `429`. In that case the gateway returns `429` with the earliest real `Retry-After` after exhausting the pool. For predictable capacity, use an upstream Zen key or a provider you are authorized to use.
@@ -58,7 +60,9 @@ It is designed for **maximum best-effort availability** within upstream limits. 
 - Maximum 100 configured proxies; no public proxy scraping or ambient proxy fallback
 - Credential-only variants on the same host:port are treated as distinct routes
 - Five consecutive health checks per proxy, each with a 5-second timeout
-- Failed proxies are quarantined for five minutes and re-probed automatically
+- Full-pool rechecks every 30 minutes by default (`PROXY_CHECK_INTERVAL_MINUTES`, `1–1440`)
+- Failed proxies leave rotation until a later sweep passes; two failed sweeps auto-remove them (`PROXY_AUTO_PRUNE_DEAD`, never the last entry)
+- Immediate route quarantine on a broken proxy tunnel, with exponential backoff
 - Round-robin selection across healthy proxies, weighted toward verified endpoints
 - Quota-aware failover: a `429` cools that proxy and retries the next routable one before returning a limit
 - Route health tracking and circuit breaking on repeated network/`5xx` failures
@@ -107,6 +111,9 @@ Key properties:
 | :--- | :--- |
 | Retry budget | `MAX_RETRIES=2` by default, hard-capped at `3` |
 | Quota failover budget | `PROXY_QUOTA_FAILOVERS=10` by default, bounded `0–20` |
+| Background recheck | Full pool every `30` minutes by default (`PROXY_CHECK_INTERVAL_MINUTES`, `1–1440`) |
+| Failed sweep | Route stays out of rotation until a later 5x sweep passes |
+| Dead-entry pruning | After two failed sweeps when `PROXY_AUTO_PRUNE_DEAD=true`; the last entry is kept |
 | Request timeout | `30s` per attempt by default |
 | Overall deadline | `90s` by default |
 | Queue | `8` concurrent globally, `4` per key, `100` waiting, `15s` wait |
@@ -121,7 +128,7 @@ Key properties:
 
 - **Node.js 20+** for local runs (the Docker image uses `node:20-bookworm-slim`)
 - **Docker + Docker Compose v2** for the recommended deployment
-- **One or more explicit HTTP, HTTPS, or SOCKS5 proxies** for inference egress
+- **One or more explicit HTTP, HTTPS, or SOCKS5 proxies** for inference egress. The dashboard shows `0 / 0` and `Not configured` until you add them; nothing is scraped automatically.
 - No tunnel sidecar or `NET_ADMIN` capability is required in proxy-only mode
 
 ---
@@ -157,7 +164,9 @@ PROXIES=socks5://user:pass@proxy.example:1080,http://user:pass@proxy-b.example:8
 
 Only explicitly configured proxies are used for inference egress. Public proxy lists are never scraped, ambient `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` variables are ignored, and direct fallback is disabled by Compose. Up to 100 proxies are accepted; each proxy must pass five consecutive health checks with a 5-second timeout. Entries may share the same host and port when different credentials select different egress IPs; they are tracked as separate routes.
 
-Healthy proxies are used round-robin. When one returns upstream quota, the gateway cools that route and retries the next routable proxy up to `PROXY_QUOTA_FAILOVERS` times before returning `429` with the earliest retry hint. This is best effort: if quota is tied to the account/key rather than the proxy IP, the whole pool can still be limited.
+The full pool is rechecked in the background every 30 minutes by default, even when there is no traffic. A route that fails a sweep stays out of rotation until a later sweep passes; after two consecutive failed sweeps it is removed automatically when `PROXY_AUTO_PRUNE_DEAD=true`, unless it is the only entry left. You can also remove failed entries immediately from Settings or with `POST /api/proxies/prune`. Pruning updates the saved pool; entries supplied through the `PROXIES` environment variable return on the next restart because environment configuration is authoritative.
+
+Healthy proxies are used round-robin. If a proxy tunnel dies between requests, the gateway marks that route down immediately, continues the request on another routable proxy, and backs the failed route off exponentially. When a route returns upstream quota, the gateway cools it and retries the next routable proxy up to `PROXY_QUOTA_FAILOVERS` times before returning `429` with the earliest retry hint. This is best effort: if quota is tied to the account/key rather than the proxy IP, the whole pool can still be limited.
 
 ### 3. Start
 
@@ -187,7 +196,7 @@ If it stays `503`:
 docker compose logs -f gateway
 ```
 
-Check that at least one configured proxy is healthy and that the gateway can reach `https://opencode.ai`. A proxy that fails five checks is quarantined for five minutes.
+Check that at least one configured proxy is healthy and that the gateway can reach `https://opencode.ai`. A proxy that fails a 5x sweep stays out of rotation until a later sweep passes; two consecutive failed sweeps auto-remove it unless it is the last entry. With an empty pool, the dashboard shows `0 / 0` and `Not configured` — add explicit proxy URLs in Settings or `.env`.
 
 ### 5. Read the generated credentials
 
@@ -254,6 +263,8 @@ Compose sets `EGRESS_MODE=proxy_only` and `ALLOW_DIRECT_FALLBACK=false`. `PROXIE
 | `UPSTREAM_INFERENCE_URL` | OpenCode Zen URL | Override the upstream chat endpoint (local testing or compatible mirrors; plain HTTP requires direct egress) |
 | `PROXIES` | empty | Comma-separated explicit `http://`, `https://`, or `socks5://` proxies; required by Compose; maximum 100; ambient proxy env vars are ignored |
 | `PROXY_QUOTA_FAILOVERS` | `10` | Additional proxies tried after an upstream quota response; bounded `0–20` |
+| `PROXY_CHECK_INTERVAL_MINUTES` | `30` | Full-pool background sweep interval in minutes; bounded `1–1440` |
+| `PROXY_AUTO_PRUNE_DEAD` | `true` | Remove proxies after two consecutive failed sweeps; the last entry is kept |
 | `EGRESS_MODE` | `proxy_only` | `auto`, `proxy_only`, `direct` |
 | `ALLOW_DIRECT_FALLBACK` | `false` | `true`/`false` direct-egress policy |
 | `MAX_RETRIES` | `2` | Retries per request, capped at `3` |
@@ -386,7 +397,7 @@ docker compose config    # validate compose interpolation
 node --check server/proxy.js
 ```
 
-The reliability suite covers proxy parsing (including IPv6), SOCKS5 response parsing, retry classification, quota cooldown, round-robin selection, quota failover, direct-fallback preference, health-check quarantine, and admission queue limits. It does not require network access.
+The reliability suite covers proxy parsing (including IPv6), SOCKS5 response parsing, retry classification, quota cooldown, round-robin selection, quota failover, direct-fallback preference, 5x health-check gating, failed-sweep persistence, immediate tunnel-failure backoff, interval clamping, manual pruning, and admission queue limits. It does not require network access.
 
 A live smoke test after deployment:
 
@@ -405,7 +416,7 @@ Verify the proxy pool:
 npm run check:proxies
 ```
 
-This runs the same five-probe, 5-second health check used at startup and prints pass/fail, probe count, latency, and the failure reason for each endpoint. It exits non-zero when no proxy is healthy. The dashboard Settings page also shows healthy/configured/routable counts, 5x pass status, latency, and quarantine state.
+This runs the same five-probe, 5-second health check used at startup and prints pass/fail, probe count, latency, and the failure reason for each endpoint. It is read-only and never rewrites the configured pool. It exits non-zero when no proxy is healthy. The dashboard Settings page also shows healthy/configured/routable/failed counts, the automatic sweep interval, 5x pass status, latency, and the failed-route list with a manual remove button.
 
 ---
 
@@ -437,7 +448,9 @@ Create a new scoped key in the dashboard, or edit `data/keys.json` while the gat
 
 ### Proxy failover
 
-Healthy proxies are selected round-robin, with freshly verified proxies preferred. A network error or repeated `5xx` opens a 30-second circuit for that route. An upstream `429` marks a quota cooldown but keeps the route in `/readyz`; the request then tries the next routable proxy within `PROXY_QUOTA_FAILOVERS`. When every route is cooling, the gateway returns `429` with the earliest retry hint instead of hammering the upstream. Explicit proxies are checked five times with a 5-second timeout; a failed proxy is quarantined for five minutes and re-probed automatically. There is no public-proxy scraper.
+Healthy proxies are selected round-robin, with freshly verified proxies preferred. A proxy tunnel failure pulls that route out of rotation immediately with exponential backoff (30 seconds, doubling, capped at the sweep interval), and the request continues on the next routable proxy. A network error or repeated `5xx` also rotates to the next route. An upstream `429` marks a quota cooldown but keeps the route in `/readyz`; the request then tries the next routable proxy within `PROXY_QUOTA_FAILOVERS`. When every route is cooling, the gateway returns `429` with the earliest retry hint instead of hammering the upstream.
+
+The full pool is swept every 30 minutes by default (`PROXY_CHECK_INTERVAL_MINUTES`). Each proxy gets five sequential probes with a 5-second timeout; all five must pass. A failed sweep keeps the route out of rotation until a later sweep passes. With `PROXY_AUTO_PRUNE_DEAD=true` (default), two consecutive failed sweeps remove the entry from the saved pool, but the last remaining entry is never auto-removed. Settings exposes the interval, auto-prune toggle, failed-route list, and a manual remove button; `POST /api/proxies/prune` does the same over the API. Proxies injected through the `PROXIES` environment variable reappear after a restart even if pruned from `data/config.json`. There is no public-proxy scraper.
 
 Because quota attribution is controlled by the upstream, proxy rotation is a best-effort mitigation, not a guarantee. If the free tier is limited per account/key, no proxy pool can remove the limit.
 

@@ -23,6 +23,25 @@ function configInt(key, fallback, min = 0) {
   return Math.max(min, parsed);
 }
 
+const PROXY_TRANSPORT_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENOTFOUND',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'EPIPE'
+]);
+
+// A tunnel failure is not upstream capacity. Pull the route out of rotation
+// immediately so the same request can move to the next proxy without waiting
+// for three generic retry failures.
+function isProxyTransportError(err, route) {
+  if (!err || !route || route.type !== 'proxy') return false;
+  if (err.proxyFailure === true) return true;
+  return PROXY_TRANSPORT_CODES.has(err.code);
+}
+
 const DEFAULT_UPSTREAM_URL = 'https://opencode.ai/inference/v1/chat/completions';
 
 // Resolve the upstream endpoint once per attempt. The default is the real
@@ -436,6 +455,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
                 success: false,
                 statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
                 headers: upstreamRes.headers,
+                proxyFailure: !isValidContentType && activeRoute.type === 'proxy',
                 body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
               });
             });
@@ -461,6 +481,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           resolve({
             success: false,
             statusCode: (isTimedOut || deadlineExceeded) ? 504 : 502,
+            proxyFailure: isProxyTransportError(err, activeRoute),
             body: deadlineExceeded ? 'Request deadline exceeded' : err.message
           });
         });
@@ -470,7 +491,13 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         upstreamReq.end();
       });
     } catch (err) {
-      attemptResult = { success: false, statusCode: 502, headers: {}, body: err.message };
+      attemptResult = {
+        success: false,
+        statusCode: 502,
+        headers: {},
+        proxyFailure: isProxyTransportError(err, activeRoute),
+        body: err.message
+      };
     }
 
     if (attemptResult.success) {
@@ -520,6 +547,12 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           if (streamFailed) return;
           streamFailed = true;
           releaseSlot();
+          // The client already has a partial response, so this request cannot
+          // be replayed. Quarantine the proxy briefly so the next request does
+          // not reuse a tunnel that died mid-stream.
+          if (!deadlineExceeded && !res.destroyed && activeRoute.type === 'proxy') {
+            egress.recordFailure(activeRoute, 'proxy_down');
+          }
           const status = deadlineExceeded ? 504 : 502;
           const type = deadlineExceeded ? 'upstream_timeout' : 'upstream_stream_error';
           const message = deadlineExceeded
@@ -888,7 +921,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     }
 
     // Network / 5xx failure: degrade the route and try the next configured one.
-    egress.recordFailure(activeRoute, 'retry');
+    const degradeKind = attemptResult.proxyFailure ? 'proxy_down' : 'retry';
+    egress.recordFailure(activeRoute, degradeKind);
     networkFailures++;
     console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for ${currentModel}: ${bodyStr.slice(0, 200)}`);
 
@@ -1213,6 +1247,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
                 success: false,
                 statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
                 headers: upstreamRes.headers,
+                proxyFailure: !isValidContentType && activeRoute.type === 'proxy',
                 body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
               });
             });
@@ -1237,6 +1272,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           resolve({
             success: false,
             statusCode: (isTimedOut || deadlineExceeded) ? 504 : 502,
+            proxyFailure: isProxyTransportError(err, activeRoute),
             body: deadlineExceeded ? 'Request deadline exceeded' : err.message
           });
         });
@@ -1245,7 +1281,13 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         upstreamReq.end();
       });
     } catch (err) {
-      attemptResult = { success: false, statusCode: 502, headers: {}, body: err.message };
+      attemptResult = {
+        success: false,
+        statusCode: 502,
+        headers: {},
+        proxyFailure: isProxyTransportError(err, activeRoute),
+        body: err.message
+      };
     }
 
     // The success path keeps the slot until the response closes. Failure paths
@@ -1317,6 +1359,12 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           if (streamFailed) return;
           streamFailed = true;
           releaseSlot();
+          // The client already has a partial response, so this request cannot
+          // be replayed. Quarantine the proxy briefly so the next request does
+          // not reuse a tunnel that died mid-stream.
+          if (!deadlineExceeded && !res.destroyed && activeRoute.type === 'proxy') {
+            egress.recordFailure(activeRoute, 'proxy_down');
+          }
           const status = deadlineExceeded ? 504 : 502;
           const message = deadlineExceeded
             ? 'Upstream request deadline exceeded.'
@@ -1762,7 +1810,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     }
 
     // Network / 5xx failure: degrade the route and try the next configured one.
-    egress.recordFailure(activeRoute, 'retry');
+    const degradeKind = attemptResult.proxyFailure ? 'proxy_down' : 'retry';
+    egress.recordFailure(activeRoute, degradeKind);
     networkFailures++;
     console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for Anthropic model ${currentModel}: ${bodyStr.slice(0, 200)}`);
 

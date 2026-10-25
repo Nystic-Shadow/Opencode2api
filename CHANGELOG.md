@@ -17,13 +17,18 @@ All notable changes to this project are documented in this file.
 - **Anonymous by default in Compose**: `EGRESS_MODE=proxy_only` and `ALLOW_DIRECT_FALLBACK=false`. The gateway returns `503 no_egress_route` instead of silently leaking the host IP.
 - **Required dashboard password**: `docker-compose.yml` requires `DASHBOARD_PASS`. Known defaults such as `admin123` and passwords shorter than 12 characters are ignored; a random password is generated and written to `data/admin-password.txt`.
 - **Explicit environment wins**: shell and container variables take precedence over `.env` values.
+- **Scheduled full-pool rechecks**: every configured proxy is swept in the background every 30 minutes by default (`PROXY_CHECK_INTERVAL_MINUTES`, bounded `1–1440`), even with no traffic. Each proxy must pass five sequential 5-second probes.
+- **Failed routes stay out of rotation**: a failed 5x sweep now keeps the route unavailable until a later sweep passes. The previous five-minute quarantine is gone, so a dead proxy is not retried just because time elapsed.
+- **Immediate tunnel-failure failover**: a broken proxy connection or interrupted proxy stream marks that route `proxy_down` immediately, backs it off exponentially (30 seconds doubling, capped at the sweep interval), and continues the request on another routable proxy.
+- **Dead-proxy pruning**: with `PROXY_AUTO_PRUNE_DEAD=true` (default), two consecutive failed sweeps remove an entry from the saved pool, but the last remaining entry is always kept. Settings exposes the recheck interval, auto-prune toggle, failed-route list, and a manual remove button; `POST /api/proxies/prune` provides the same manual action. Proxies injected through the `PROXIES` environment variable return after a restart.
 - **Configurable upstream endpoint**: `UPSTREAM_INFERENCE_URL` is now honored (defaults to the real OpenCode Zen inference URL) for local test upstreams and compatible mirrors.
 
 ### Reliability
 
 - Egress manager with round-robin route selection (**verified proxies first; direct only if allowed and no proxy is routable**), route health tracking, circuit breaking on network/`5xx` failures, and quota cooldowns that keep a route in `/readyz`.
 - Quota-aware candidate selection: cooling routes are skipped, unchecked-but-available proxies remain available for failover, and `PROXY_QUOTA_FAILOVERS` is tracked separately from the network retry budget.
-- Explicit proxy pool capped at 100, with five consecutive health probes per proxy and a 5-second timeout per probe. Failed proxies are quarantined for five minutes. Probes target the configured upstream host.
+- Explicit proxy pool capped at 100. Background sweeps run every 30 minutes by default with five sequential 5-second probes per proxy. A failed sweep keeps the route out of rotation until a later pass; two failed sweeps auto-prune it when enabled (never the last entry). Probes target the configured upstream host.
+- Proxy tunnel failures (`ECONNREFUSED`, resets, non-API proxy payloads, interrupted proxy streams) open an immediate exponential circuit instead of waiting for three generic retries.
 - IPv6 proxy hosts are parsed correctly (`net`/`tls` receive a bare address; display IDs keep brackets).
 - Bounded global and per-key admission queue with zero-value support (`QUEUE_MAX_SIZE=0`, `QUEUE_WAIT_MS=0` fail fast).
 - Per-attempt timeout, overall request deadline, retries capped at `3` (default `2`), and fail-fast `429 queue_full` when saturated.
@@ -33,9 +38,10 @@ All notable changes to this project are documented in this file.
 
 ### Testing
 
-- `npm test` runs the security suite plus the reliability suite covering proxy parsing (including IPv6), SOCKS5 frames, retry classification, quota cooldown, round-robin selection, quota failover, direct-fallback preference, health-check quarantine, and queue limits/timeouts.
+- `npm test` runs the security suite plus the reliability suite covering proxy parsing (including IPv6), SOCKS5 frames, retry classification, quota cooldown, round-robin selection, quota failover, direct-fallback preference, 5x health-check gating, failed-sweep persistence, immediate tunnel-failure backoff, interval clamping, manual pruning, and queue limits/timeouts.
 - `npm run check:proxies` runs the real five-probe, 5-second verification and exits non-zero when no proxy is healthy.
 - Verified round-robin quota failover against a local mock 429 upstream through both an HTTP CONNECT proxy and a SOCKS5 proxy: two upstream attempts, `429` with `Retry-After`, then an immediate `429` with no extra upstream hits while both routes were cooling, then fresh attempts after the cooldown.
+- Verified pool lifecycle against local HTTP CONNECT and SOCKS5 proxies plus a mock SSE upstream: both routes passed the 5x sweep, killing the HTTP proxy mid-run left traffic on SOCKS5, the dead route entered `proxy_down`, and two failed sweeps auto-pruned it while the saved config kept only the survivor.
 - Verified OpenAI non-stream, OpenAI stream, Anthropic non-stream, and Anthropic stream against a local mock upstream.
 - Verified `/healthz` liveness, `/readyz` gating, legacy-key rejection, and `503 no_egress_route` with `Retry-After`.
 

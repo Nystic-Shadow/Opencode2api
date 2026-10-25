@@ -263,6 +263,42 @@ async function main() {
     assert.strictEqual(egress.isAvailable(route), true);
   });
 
+  await test('proxy transport failure opens the circuit immediately and backs off', () => {
+    const route = { type: 'proxy', id: 'test://proxy-down-route' };
+    egress.recordSuccess(route);
+    egress.recordFailure(route, 'proxy_down');
+    const first = egress._health(route).openUntil - Date.now();
+    assert.ok(first > 25000 && first <= 31000, `unexpected first backoff: ${first}`);
+    assert.strictEqual(egress.isAvailable(route), false);
+
+    egress.recordFailure(route, 'proxy_down');
+    const second = egress._health(route).openUntil - Date.now();
+    assert.ok(second > 55000 && second <= 61000, `unexpected second backoff: ${second}`);
+    egress.recordSuccess(route);
+    assert.strictEqual(egress.isAvailable(route), true);
+  });
+
+  await test('clamps the background check interval and schedules the next sweep', async () => {
+    await withConfig({ proxy_check_interval_minutes: 0 }, () => {
+      assert.strictEqual(egress._checkIntervalMs(), 60 * 1000);
+    });
+    await withConfig({ proxy_check_interval_minutes: 9999 }, () => {
+      assert.strictEqual(egress._checkIntervalMs(), 1440 * 60 * 1000);
+    });
+    await withConfig({ proxy_check_interval_minutes: 30 }, () => {
+      assert.strictEqual(egress._checkIntervalMs(), 30 * 60 * 1000);
+    });
+    await withConfig({ proxy_check_interval_minutes: 1 }, () => {
+      egress.stopHealthChecks();
+      egress.proxyChecksEnabled = true;
+      egress._scheduleNextCheck();
+      assert.ok(egress.nextCheckAt > Date.now(), 'next sweep was not scheduled');
+      assert.ok(egress.nextCheckAt <= Date.now() + 61 * 1000, 'next sweep exceeds the configured interval');
+      egress.stopHealthChecks();
+      assert.strictEqual(egress.nextCheckAt, 0);
+    });
+  });
+
   await test('fatal failures are recorded without opening the circuit', () => {
     const route = { type: 'proxy', id: 'test://fatal-route' };
     egress.recordFailure(route, 'fatal');
@@ -413,29 +449,105 @@ async function main() {
   });
 
   await test('health-check failures quarantine and successes verify', async () => {
-    const proxy = { type: 'http', host: 'health.example', port: 8080, id: 'http://health.example:8080' };
-    const route = { type: 'proxy', proxyType: 'http', id: proxy.id };
-    const originalProbe = egress.probeProxy;
-    try {
-      egress.probeProxy = async () => false;
-      await egress.checkProxy(proxy);
-      const failed = egress.proxyChecks.get(proxy.id);
-      assert.strictEqual(failed.healthy, false);
-      assert.strictEqual(failed.passes, 0);
-      assert.strictEqual(egress.isAvailable(route), false);
-      assert.match(egress._health(route).lastError, /health check failed/i);
+    await withConfig({ proxies: ['http://health.example:8080'] }, async () => {
+      egress.reload();
+      const proxy = egress.proxies[0];
+      const route = { type: 'proxy', proxyType: 'http', id: proxy.id };
+      const originalProbe = egress.probeProxy;
+      try {
+        egress.probeProxy = async () => false;
+        await egress.checkProxy(proxy);
+        const failed = egress.proxyChecks.get(proxy.id);
+        assert.strictEqual(failed.healthy, false);
+        assert.strictEqual(failed.passes, 0);
+        assert.strictEqual(egress.isAvailable(route), false);
+        assert.match(egress._health(route).lastError, /health check failed/i);
 
-      egress.probeProxy = async () => true;
-      await egress.checkProxy(proxy);
-      const passed = egress.proxyChecks.get(proxy.id);
-      assert.strictEqual(passed.healthy, true);
-      assert.strictEqual(passed.passes, 5);
-      assert.strictEqual(egress.isAvailable(route), true);
-    } finally {
-      egress.probeProxy = originalProbe;
-      egress.resetRoute(route, 'test');
-      egress.proxyChecks.delete(proxy.id);
-    }
+        // A failed sweep must keep the route out of rotation even after the
+        // legacy five-minute quarantine timer would have expired.
+        egress._health(route).openUntil = Date.now() - 1;
+        assert.strictEqual(egress.isAvailable(route), false);
+        assert.strictEqual(egress.getProxyStatus().failedCount, 1);
+
+        egress.probeProxy = async () => true;
+        await egress.checkProxy(proxy);
+        const passed = egress.proxyChecks.get(proxy.id);
+        assert.strictEqual(passed.healthy, true);
+        assert.strictEqual(passed.passes, 5);
+        assert.strictEqual(egress.isAvailable(route), true);
+        assert.strictEqual(egress.getProxyStatus().failedCount, 0);
+      } finally {
+        egress.probeProxy = originalProbe;
+        egress.resetRoute(route, 'test');
+        egress.proxyChecks.delete(proxy.id);
+      }
+    });
+    egress.reload();
+  });
+
+  await test('manual prune removes only failed entries', async () => {
+    await withConfig({
+      proxies: ['http://prune-a.example:8080', 'http://prune-b.example:8080'],
+      proxy_auto_prune_dead: false
+    }, () => {
+      egress.reload();
+      const failedRoute = egress.getCandidates()[0];
+      egress.proxyChecks.set(failedRoute.id, {
+        healthy: false, passes: 0, checks: 5, latency: 0, lastCheck: Date.now(), error: 'test failure'
+      });
+      egress._health(failedRoute).checkFailed = true;
+
+      const originalUpdate = config.update;
+      let update = null;
+      config.update = (values) => {
+        update = values;
+        config.config = { ...config.config, ...values };
+      };
+      try {
+        const result = egress.pruneFailed();
+        assert.strictEqual(result.removed, 1);
+        assert.ok(Array.isArray(update.proxies));
+        assert.strictEqual(update.proxies.length, 1);
+        assert.strictEqual(update.proxies[0], 'http://prune-b.example:8080');
+      } finally {
+        config.update = originalUpdate;
+      }
+    });
+    egress.reload();
+  });
+
+  await test('auto-prune removes dead entries but keeps one for recovery', async () => {
+    await withConfig({
+      proxies: ['http://auto-a.example:8080', 'http://auto-b.example:8080'],
+      proxy_auto_prune_dead: true
+    }, async () => {
+      egress.reload();
+      for (const proxy of egress.proxies) {
+        egress.proxyChecks.set(proxy.id, {
+          healthy: false, passes: 0, checks: 5, latency: 0, lastCheck: Date.now(), error: 'dead'
+        });
+        const health = egress._health({ ...proxy, type: 'proxy', proxyType: proxy.type, id: proxy.id });
+        health.checkFailures = 2;
+        health.checkFailed = true;
+      }
+
+      const originalUpdate = config.update;
+      const updates = [];
+      config.update = (values) => {
+        updates.push(values);
+        config.config = { ...config.config, ...values };
+      };
+      try {
+        const removed = await egress._pruneDeadProxies();
+        assert.strictEqual(removed, 1);
+        assert.strictEqual(updates.length, 1);
+        // Config order is preserved and the last entry is retained.
+        assert.deepStrictEqual(updates[0].proxies, ['http://auto-b.example:8080']);
+      } finally {
+        config.update = originalUpdate;
+      }
+    });
+    egress.reload();
   });
 
   console.log('\n[Test 9] Bounded admission queue');

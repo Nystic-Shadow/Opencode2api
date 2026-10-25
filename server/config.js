@@ -97,6 +97,8 @@ const DEFAULT_CONFIG = {
   smart_fallback: process.env.SMART_FALLBACK !== 'false',
   max_retries: parseInt(process.env.MAX_RETRIES, 10) || 2, // hard-capped at 3 below
   proxy_quota_failovers: parseInt(process.env.PROXY_QUOTA_FAILOVERS, 10) || 10,
+  proxy_check_interval_minutes: parseInt(process.env.PROXY_CHECK_INTERVAL_MINUTES, 10) || 30,
+  proxy_auto_prune_dead: process.env.PROXY_AUTO_PRUNE_DEAD !== 'false',
   request_timeout_ms: parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 30000,
   request_deadline_ms: parseInt(process.env.REQUEST_DEADLINE_MS, 10) || 90000,
   queue_max_concurrent: parseInt(process.env.QUEUE_MAX_CONCURRENT, 10) || 8,
@@ -213,6 +215,13 @@ class ConfigManager {
         20,
         envOrConfigInt('PROXY_QUOTA_FAILOVERS', this.config.proxy_quota_failovers, 10, 0)
       );
+      this.config.proxy_check_interval_minutes = Math.min(
+        1440,
+        Math.max(1, envOrConfigInt('PROXY_CHECK_INTERVAL_MINUTES', this.config.proxy_check_interval_minutes, 30, 1))
+      );
+      this.config.proxy_auto_prune_dead = process.env.PROXY_AUTO_PRUNE_DEAD !== undefined
+        ? process.env.PROXY_AUTO_PRUNE_DEAD !== 'false'
+        : this.config.proxy_auto_prune_dead !== false;
 
       this.config.request_timeout_ms = Math.max(
         5000,

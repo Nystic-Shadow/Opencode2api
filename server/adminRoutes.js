@@ -343,6 +343,13 @@ async function handleAdminRoute(req, res, pathname) {
       const parsed = parseInt(body.proxy_quota_failovers, 10);
       if (Number.isFinite(parsed)) updates.proxy_quota_failovers = Math.min(Math.max(0, parsed), 20);
     }
+    if (body.proxy_check_interval_minutes !== undefined) {
+      const parsed = parseInt(body.proxy_check_interval_minutes, 10);
+      if (Number.isFinite(parsed)) updates.proxy_check_interval_minutes = Math.min(Math.max(1, parsed), 1440);
+    }
+    if (body.proxy_auto_prune_dead !== undefined) {
+      updates.proxy_auto_prune_dead = body.proxy_auto_prune_dead === true || body.proxy_auto_prune_dead === 'true';
+    }
     if (body.global_rpm_limit !== undefined) updates.global_rpm_limit = parseInt(body.global_rpm_limit, 10) || 0;
     if (body.global_tpm_limit !== undefined) updates.global_tpm_limit = parseInt(body.global_tpm_limit, 10) || 0;
     if (body.upstream_zen_key !== undefined) {
@@ -402,10 +409,26 @@ async function handleAdminRoute(req, res, pathname) {
 
   // Explicit egress proxy pool: Re-run 5x health checks
   if (pathname === '/api/proxies/recheck' && req.method === 'POST') {
-    egress.startHealthChecks();
-    egress.runProxyChecks().catch(() => {});
+    egress.recheckNow().catch(err => console.warn('[Admin] Proxy recheck failed:', err.message));
     notifications.add('Proxy Health Sweep Started', '5x health checks initiated for the configured egress proxy pool.', 'info');
     return sendJson(res, 200, { success: true, message: 'Proxy health checks started', ...egress.getProxyStatus() });
+  }
+
+  // Explicit egress proxy pool: remove proxies whose latest 5x check failed
+  if (pathname === '/api/proxies/prune' && req.method === 'POST') {
+    const result = egress.pruneFailed();
+    if (result.removed > 0) {
+      notifications.add(
+        'Dead Proxies Removed',
+        `${result.removed} failed prox${result.removed === 1 ? 'y was' : 'ies were'} removed from the configured pool.`,
+        'warning'
+      );
+    }
+    return sendJson(res, 200, {
+      success: true,
+      ...result,
+      ...egress.getProxyStatus()
+    });
   }
 
   // Settings: Check CLI Update

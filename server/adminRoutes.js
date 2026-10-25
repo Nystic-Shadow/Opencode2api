@@ -7,7 +7,7 @@ const updater = require('./updater');
 const notifications = require('./notifications');
 const proxy = require('./proxy');
 const warp = require('./warp');
-const proxyScraper = require('./proxyScraper');
+const egress = require('./egress');
 
 // In-memory admin sessions with 24-hour TTL (H4)
 const sessions = new Map(); // token -> { createdAt, lastActive, username }
@@ -419,16 +419,17 @@ async function handleAdminRoute(req, res, pathname) {
     return sendJson(res, 200, { ...resInstall, ...status });
   }
 
-  // Inbuilt Scraped Proxies: Pool Status
+  // Explicit egress proxy pool: Status
   if (pathname === '/api/proxies/status' && req.method === 'GET') {
-    return sendJson(res, 200, proxyScraper.getStatus());
+    return sendJson(res, 200, egress.getProxyStatus());
   }
 
-  // Inbuilt Scraped Proxies: Trigger Fast Re-scan
-  if (pathname === '/api/proxies/rescan' && req.method === 'POST') {
-    proxyScraper.runScrapeAndVerify().catch(() => {});
-    notifications.add('Proxy Sweep Started', 'Strict 5x verification sweep initiated for scraped proxy pool.', 'info');
-    return sendJson(res, 200, { success: true, message: 'Strict proxy sweep started in background', ...proxyScraper.getStatus() });
+  // Explicit egress proxy pool: Re-run 5x health checks
+  if (pathname === '/api/proxies/recheck' && req.method === 'POST') {
+    egress.startHealthChecks();
+    egress.runProxyChecks().catch(() => {});
+    notifications.add('Proxy Health Sweep Started', '5x health checks initiated for the configured egress proxy pool.', 'info');
+    return sendJson(res, 200, { success: true, message: 'Proxy health checks started', ...egress.getProxyStatus() });
   }
 
   // Settings: Check CLI Update

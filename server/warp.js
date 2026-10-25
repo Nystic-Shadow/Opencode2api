@@ -93,10 +93,13 @@ class CloudflareWarpManager {
       message: 'WARP Engine Idle'
     };
 
-    // Fast initial background probe so socketAlive state is immediately populated
-    this.probeSocks5().catch(() => {});
-    this.startAutoRotateCron();
-    this.startPortHealthMonitor();
+    // Fast initial background probe so socketAlive state is immediately populated.
+    // Do not touch any local port when WARP is disabled.
+    if (this.getEngineMode() !== 'disabled') {
+      this.probeSocks5().catch(() => {});
+      this.startAutoRotateCron();
+      this.startPortHealthMonitor();
+    }
   }
 
   onRouteChange(fn) {
@@ -1060,6 +1063,7 @@ BindAddress = ${bindHost}:${port}
       this.setProgress(0, 'idle', 'WARP is disabled by configuration');
       return false;
     }
+    this.startPortHealthMonitor();
     if (engine === 'sidecar') {
       try {
         return await this.bootstrapSidecar();
@@ -1260,6 +1264,23 @@ BindAddress = ${bindHost}:${port}
 
   async getStatus() {
     const now = Date.now();
+    if (this.getEngineMode() === 'disabled') {
+      return {
+        available: false,
+        installed: false,
+        status: 'Disabled',
+        connected: false,
+        running: false,
+        mode: 'none',
+        engine_mode: 'disabled',
+        host: config.get('warp_host') || '127.0.0.1',
+        port: this.getActivePort(),
+        socketAlive: false,
+        reason: 'WARP is disabled; proxy egress is active',
+        bootstrapping: false,
+        progress: this.progress
+      };
+    }
     if (this.statusCache && (now - this.lastStatusCheck < 3000)) {
       return this.statusCache;
     }

@@ -57,6 +57,8 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
     };
     fetchWarp();
     fetchProxies();
+    const proxyTimer = setInterval(fetchProxies, 5000);
+    return () => clearInterval(proxyTimer);
   }, []);
 
   const pollWarpProgress = () => {
@@ -165,14 +167,14 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
     setProxyFeedback('Proxy sweep initiated! Checking candidate endpoints directly against opencode.ai with strict 5x tests...');
     try {
       const token = localStorage.getItem('o2p_token');
-      const res = await fetch('/api/proxies/rescan', {
+      const res = await fetch('/api/proxies/recheck', {
         method: 'POST',
         headers: token ? { 'Authorization': `Bearer ${token}` } : {}
       });
       if (res.ok) {
         const data = await res.json();
         setProxyStatus(data);
-        setProxyFeedback('5x strict verification sweep running in background. High-speed (<3s) proxies auto-added to clean pool.');
+        setProxyFeedback('5x health checks running in background. Proxies that fail are quarantined for five minutes.');
       }
       setTimeout(() => setProxyFeedback(null), 5000);
     } catch (e) {
@@ -279,6 +281,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
       </div>
 
       {/* Cloudflare WARP Proxy & Unauth Auto-Switch Card */}
+      {settings.warp_engine && settings.warp_engine !== 'disabled' && (
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
           <div>
@@ -556,21 +559,22 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
           </div>
         </div>
       </div>
+      )}
 
-      {/* Inbuilt Scraped Proxy Engine Card */}
+      {/* Egress proxy pool card */}
       <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', border: '1px solid var(--border)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
               <h3 style={{ fontSize: '1rem', fontWeight: '700', margin: 0 }}>
-                Inbuilt Scraped Proxy Pool
+                Egress Proxy Pool
               </h3>
               <span className={`badge ${proxyStatus?.verifiedCount > 0 ? 'badge-active' : 'badge-idle'}`}>
-                {proxyStatus?.isScanning ? '⚡ 5x Probing Sweep...' : (proxyStatus?.verifiedCount > 0 ? `● ${proxyStatus.verifiedCount} Verified Live (<3s)` : '○ Standby')}
+                {proxyStatus?.isScanning ? '5x health check...' : (proxyStatus?.verifiedCount > 0 ? `${proxyStatus.verifiedCount} healthy` : 'No healthy proxies')}
               </span>
             </div>
             <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', margin: 0 }}>
-              Diagnostics only. The scraped proxy pool is not connected to inference egress and does not provide failover; production routing uses only explicitly configured <code>PROXIES</code>.
+              Explicit <code>PROXIES</code> only, maximum 100. Each proxy must pass five consecutive checks with a 5-second timeout. Failed proxies are quarantined for five minutes. A 429 is treated as upstream quota, not proxy death.
             </p>
           </div>
 
@@ -581,7 +585,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             className="btn btn-secondary"
             style={{ fontSize: '0.78rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
           >
-            <span>{isRescanningProxies || proxyStatus?.isScanning ? '⏳ Sweeping & Verifying...' : '🔄 Rescan & Verify 5x Now'}</span>
+            <span>{isRescanningProxies || proxyStatus?.isScanning ? 'Checking 5x...' : 'Recheck Pool 5x'}</span>
           </button>
         </div>
 
@@ -607,27 +611,27 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
           border: '1px solid var(--border)'
         }}>
           <div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Active Clean Pool</div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Healthy / Configured</div>
             <div style={{ fontSize: '1.1rem', fontWeight: '800', color: '#2fbc5b' }}>
-              {proxyStatus?.verifiedCount || 0} <span style={{ fontSize: '0.75rem', fontWeight: '500' }}>proxies</span>
+              {proxyStatus?.verifiedCount || 0} / {proxyStatus?.configuredCount || 0}
             </div>
           </div>
           <div>
             <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Fastest Proxy Latency</div>
             <div style={{ fontSize: '1.1rem', fontWeight: '800', color: 'var(--foreground)' }}>
-              {proxyStatus?.fastestProxy ? `${proxyStatus.fastestProxy.latency}ms` : 'Scanning...'}
+              {proxyStatus?.fastestProxy ? `${proxyStatus.fastestProxy.latency}ms` : 'None'}
             </div>
           </div>
           <div>
             <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Validation Strictness</div>
             <div style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--foreground)' }}>
-              5x Consecutive Passes (&le;3s)
+              5x Passes, 5s Timeout
             </div>
           </div>
           <div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Target Egress Target</div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Pool Limit</div>
             <div style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--foreground)' }}>
-              Direct <code>opencode.ai:443</code>
+              {proxyStatus?.maxPool || 100} explicit proxies
             </div>
           </div>
         </div>
@@ -635,7 +639,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         {proxyStatus?.topProxies && proxyStatus.topProxies.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
             <div style={{ fontSize: '0.75rem', fontWeight: '600', color: 'var(--muted-foreground)' }}>
-              Top Verified High-Speed Proxies (Ready for Instant Egress Failover):
+              Healthy Egress Proxies (transport failover only):
             </div>
             <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
               {proxyStatus.topProxies.map((p, idx) => (

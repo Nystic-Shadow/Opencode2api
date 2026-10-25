@@ -6,11 +6,11 @@
 
 ### OpenAI + Anthropic compatible gateway for OpenCode Zen models
 
-> **Stable, observable egress through Cloudflare WARP or your own proxies. No IP rotation to evade upstream quotas.**
+> **Proxy-only egress: explicit HTTP, HTTPS, or SOCKS5 proxies with strict health checks. No public proxy scraping, no 429 identity rotation.**
 
 [![Node.js](https://img.shields.io/badge/Node.js-20-339933.svg?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Docker Compose](https://img.shields.io/badge/Docker_Compose-Ready-2496ED.svg?style=for-the-badge&logo=docker&logoColor=white)](docker-compose.yml)
-[![Cloudflare WARP](https://img.shields.io/badge/Egress-Cloudflare_WARP-F38020.svg?style=for-the-badge&logo=cloudflare&logoColor=white)](https://1.1.1.1/)
+[![Proxy Egress](https://img.shields.io/badge/Egress-Explicit_Proxies-2496ED.svg?style=for-the-badge&logo=cloudflare&logoColor=white)](https://github.com/Nystic-Shadow/Opencode2api)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
 
 </div>
@@ -19,13 +19,13 @@
 
 ## What this is
 
-OpenCode2API exposes OpenCode Zen models through standard **OpenAI** and **Anthropic** APIs. It adds authentication, model discovery, tool/function calling, vision, reasoning streams, bounded concurrency, and health-checked egress through Cloudflare WARP or user-owned proxies.
+OpenCode2API exposes OpenCode Zen models through standard **OpenAI** and **Anthropic** APIs. It adds authentication, model discovery, tool/function calling, vision, reasoning streams, bounded concurrency, and health-checked egress through explicit user-owned proxies.
 
 It is designed for **stable operation**, not for defeating provider limits. Free-tier capacity is controlled upstream. The gateway therefore:
 
 - fails fast on upstream quota (`429`) with a real `Retry-After`,
-- never rotates WARP keys or switches IPs to evade `401`/`429`,
-- never scrapes public proxy lists in the request path,
+- never rotates proxy identities or switches IPs to evade `401`/`429`,
+- never scrapes public proxy lists,
 - only fails over between routes on network errors and `5xx` responses,
 - exposes `/readyz` so a scheduler or load balancer can stop sending traffic when no route or model is available.
 
@@ -53,14 +53,15 @@ It is designed for **stable operation**, not for defeating provider limits. Free
 
 ### Egress and reliability
 
-- **Cloudflare WARP** in four explicit modes: `sidecar`, `embedded`, `cli`, `disabled`
-- **User-owned proxies:** HTTP, HTTPS, and SOCKS5 with optional authentication
-- Deterministic route order: **WARP → user proxies → direct (only if allowed)**
+- **Explicit proxy pool:** HTTP, HTTPS, and SOCKS5 with optional authentication
+- Maximum 100 configured proxies; no public proxy scraping
+- Five consecutive health checks per proxy, each with a 5-second timeout
+- Failed proxies are quarantined for five minutes and re-probed automatically
 - Route health tracking, circuit breaking on repeated network/`5xx` failures, and route failover
 - Provider-quota cooldown that fails fast with `429` + `Retry-After` while keeping the route ready
 - Bounded global/per-key admission queue, request deadline, and capped retries
 - `/healthz` liveness and `/readyz` readiness endpoints
-- Docker Compose sidecar deployment with direct fallback disabled by default
+- Proxy-only Compose deployment with direct fallback disabled by default
 
 ### Control plane
 
@@ -86,7 +87,7 @@ quota cooldown? ──► 429 + Retry-After (no IP rotation)
 admission queue ──► 429 queue_full + Retry-After when saturated
     │
     ▼
-select egress route: WARP → user proxies → direct (if allowed)
+select egress route: healthy explicit proxies (WARP only if explicitly enabled)
     │
     ▼
 upstream request with timeout and overall deadline
@@ -116,8 +117,8 @@ Key properties:
 
 - **Node.js 20+** for local runs (the Docker image uses `node:20-bookworm-slim`)
 - **Docker + Docker Compose v2** for the recommended deployment
-- **Cloudflare WARP sidecar** (provided by the compose file) or your own SOCKS5/HTTP proxies
-- Linux host for the WARP sidecar (`NET_ADMIN` capability is required)
+- **One or more explicit HTTP, HTTPS, or SOCKS5 proxies** for inference egress
+- No WARP sidecar or `NET_ADMIN` capability is required in proxy-only mode
 
 ---
 
@@ -144,13 +145,13 @@ openssl rand -base64 24
 
 `DASHBOARD_PASS` is required by `docker-compose.yml`. Known defaults such as `admin123` and passwords shorter than 12 characters are ignored; the gateway generates a random password and writes it to `data/admin-password.txt`.
 
-### 2. Optional: add your own proxies
+### 2. Configure proxies (required)
 
 ```dotenv
-PROXIES=socks5://user:pass@proxy.example:1080,http://proxy.example:8080
+PROXIES=socks5://user:pass@proxy.example:1080,http://user:pass@proxy-b.example:8080
 ```
 
-Proxies are used after WARP and before direct egress. They are never scraped from public lists.
+Only explicitly configured proxies are used for inference egress. Public proxy lists are never scraped, and direct fallback is disabled by Compose. Up to 100 proxies are accepted; each proxy must pass five consecutive health checks with a 5-second timeout.
 
 ### 3. Start
 
@@ -162,9 +163,8 @@ docker compose ps
 The stack contains:
 
 - `gateway` — the Node.js API gateway on port `8080`
-- `warp` — `caomingjun/warp`, providing a SOCKS5 endpoint at `warp:1080`
 
-The gateway binds HTTP immediately. WARP and model discovery run in the background, so a slow sidecar cannot make the container fail its liveness probe.
+WARP is disabled in the default Compose deployment. The gateway binds HTTP immediately; model discovery and proxy health checks run in the background.
 
 ### 4. Verify
 
@@ -178,11 +178,10 @@ curl -fsS http://127.0.0.1:8080/readyz
 If it stays `503`:
 
 ```bash
-docker compose logs -f warp
 docker compose logs -f gateway
 ```
 
-Check that the sidecar answers SOCKS5 on `warp:1080` and that the gateway can reach `https://opencode.ai`.
+Check that at least one configured proxy is healthy and that the gateway can reach `https://opencode.ai`. A proxy that fails five checks is quarantined for five minutes.
 
 ### 5. Read the generated credentials
 
@@ -215,18 +214,20 @@ Open <http://127.0.0.1:8080/>. The API base URL is `http://127.0.0.1:8080/v1`.
 
 For anonymous egress locally, use one of:
 
-- **Embedded WARP:** install `wireproxy` and set `WARP_ENGINE=embedded` (the Docker image ships it; a local Windows build can use `wireproxy.exe` in the repository root).
-- **WARP CLI:** install Cloudflare WARP and set `WARP_ENGINE=cli`.
-- **Sidecar:** run a SOCKS5 WARP container and set `WARP_ENGINE=sidecar`, `WARP_HOST`, `WARP_PORT`.
-- **Your proxy:** set `PROXIES=...`.
+- **Your proxy (recommended):** set `PROXIES=...` and `EGRESS_MODE=proxy_only`.
+- **Legacy embedded WARP:** install `wireproxy` and set `WARP_ENGINE=embedded`.
+- **Legacy WARP CLI:** install Cloudflare WARP and set `WARP_ENGINE=cli`.
+- **Legacy WARP sidecar:** run a SOCKS5 WARP container and set `WARP_ENGINE=sidecar`, `WARP_HOST`, `WARP_PORT`.
 
 If you intentionally want direct egress for local development, set `WARP_ENGINE=disabled` and `ALLOW_DIRECT_FALLBACK=true`. This exposes your host IP to the upstream and is not anonymous.
 
 ---
 
-## WARP engine modes
+## Legacy optional: WARP engine modes
 
-`WARP_ENGINE` controls who owns the tunnel:
+WARP support remains in the codebase for operators who explicitly configure it, but the default Compose deployment is **proxy-only** and sets `WARP_ENGINE=disabled`. The service does not require WARP, `NET_ADMIN`, or a WARP sidecar.
+
+`WARP_ENGINE` controls who owns the tunnel when WARP is explicitly enabled:
 
 | Mode | Behavior | Use when |
 | :--- | :--- | :--- |
@@ -251,16 +252,15 @@ Aliases: `external`, `proxy`, and `socks5` map to `sidecar`; `wireproxy` maps to
 
 | `EGRESS_MODE` | Route order |
 | :--- | :--- |
-| `auto` / `hybrid` (default) | WARP → user proxies → direct only if `ALLOW_DIRECT_FALLBACK=true` |
+| `auto` / `hybrid` | WARP (if enabled) → user proxies → direct only if `ALLOW_DIRECT_FALLBACK=true` |
 | `warp_only` | WARP only |
-| `proxy_only` | User proxies only |
+| `proxy_only` (Compose default) | Explicit user proxies only |
 | `direct` | Direct only (not anonymous) |
 
 `ALLOW_DIRECT_FALLBACK`:
 
-- `false` — never use direct egress. Recommended for anonymous deployments.
-- `true` — allow direct egress as the last route.
-- unset — direct is allowed only when no proxy is configured and `WARP_MODE` is not `always`.
+- `false` (default) — never use direct egress. Recommended for anonymous deployments.
+- `true` — allow direct egress as the last route. This leaks the host IP and is not anonymous.
 
 `WARP_MODE`:
 
@@ -268,7 +268,7 @@ Aliases: `external`, `proxy`, and `socks5` map to `sidecar`; `wireproxy` maps to
 - `disabled` / `never` — disable WARP.
 - `auto` — default.
 
-Compose sets `WARP_ENGINE=sidecar`, `WARP_MODE=always`, and `ALLOW_DIRECT_FALLBACK=false`.
+Compose sets `WARP_ENGINE=disabled`, `WARP_MODE=disabled`, `EGRESS_MODE=proxy_only`, and `ALLOW_DIRECT_FALLBACK=false`. `PROXIES` is required.
 
 ---
 
@@ -281,14 +281,14 @@ Compose sets `WARP_ENGINE=sidecar`, `WARP_MODE=always`, and `ALLOW_DIRECT_FALLBA
 | `DASHBOARD_PASS` | generated | Dashboard password; 12+ characters, required by compose |
 | `OPENCODE_ZEN_KEY` | empty | Upstream Zen key for paid models |
 | `UPSTREAM_INFERENCE_URL` | OpenCode Zen URL | Override the upstream chat endpoint (local testing or compatible mirrors; plain HTTP requires direct egress) |
-| `PROXIES` | empty | Comma-separated `http://`, `https://`, or `socks5://` proxies |
-| `WARP_ENGINE` | `auto` | `auto`, `sidecar`, `embedded`, `cli`, `disabled` |
-| `WARP_MODE` | `auto` | `auto`, `always`, `disabled`/`never` |
-| `WARP_HOST` | `127.0.0.1` | WARP SOCKS5 host |
-| `WARP_PORT` | `40000` | WARP SOCKS5 port (compose uses `1080`) |
-| `WARP_AUTO_ROTATE_MINUTES` | `0` | Periodic key rotation; `0` disables it |
-| `EGRESS_MODE` | `auto` | `auto`, `warp_only`, `proxy_only`, `direct` |
-| `ALLOW_DIRECT_FALLBACK` | unset | `true`/`false` direct-egress policy |
+| `PROXIES` | empty | Comma-separated explicit `http://`, `https://`, or `socks5://` proxies; required by Compose; maximum 100 |
+| `WARP_ENGINE` | `disabled` | Legacy optional WARP engine |
+| `WARP_MODE` | `disabled` | Legacy optional WARP mode |
+| `WARP_HOST` | `127.0.0.1` | Legacy WARP SOCKS5 host |
+| `WARP_PORT` | `40000` | Legacy WARP SOCKS5 port |
+| `WARP_AUTO_ROTATE_MINUTES` | `0` | Legacy WARP rotation; `0` disables it |
+| `EGRESS_MODE` | `proxy_only` | `auto`, `warp_only`, `proxy_only`, `direct` |
+| `ALLOW_DIRECT_FALLBACK` | `false` | `true`/`false` direct-egress policy |
 | `MAX_RETRIES` | `2` | Retries per request, capped at `3` |
 | `REQUEST_TIMEOUT_MS` | `30000` | Per-attempt timeout |
 | `REQUEST_DEADLINE_MS` | `90000` | Overall request deadline |
@@ -296,7 +296,6 @@ Compose sets `WARP_ENGINE=sidecar`, `WARP_MODE=always`, and `ALLOW_DIRECT_FALLBA
 | `QUEUE_MAX_PER_KEY` | `4` | Concurrent upstream requests per API key |
 | `QUEUE_MAX_SIZE` | `100` | Maximum queued requests |
 | `QUEUE_WAIT_MS` | `15000` | Maximum queue wait before `429` |
-| `PROXY_SCRAPER_ENABLED` | `false` | Diagnostics only; never used for request egress |
 
 Explicit environment variables override cached values in `data/config.json`. `data/config.json` is rewritten on startup with normalized defaults.
 
@@ -371,7 +370,7 @@ Always `200` while the Node process is alive. Used by the image `HEALTHCHECK`.
   "uptime_seconds": 42,
   "models_count": 8,
   "egress_ready": true,
-  "warp_ready": true
+  "warp_ready": false
 }
 ```
 
@@ -383,18 +382,18 @@ Always `200` while the Node process is alive. Used by the image `HEALTHCHECK`.
 {
   "status": "ready",
   "models_count": 8,
-  "warp": { "engine": "sidecar", "ready": true, "host": "warp", "port": 1080 },
+  "warp": { "engine": "disabled", "ready": false, "host": "127.0.0.1", "port": 40000 },
   "egress": {
-    "mode": "auto",
-    "ready_routes": [{ "id": "warp:1080", "type": "warp" }],
-    "proxies_configured": 0,
+    "mode": "proxy_only",
+    "ready_routes": [{ "id": "socks5://proxy.example:1080", "type": "proxy" }],
+    "proxies_configured": 1,
     "allow_direct": false
   },
   "queue": { "active": 0, "queued": 0, "limits": { "maxConcurrent": 8, "maxPerKey": 4, "maxQueue": 100, "maxWaitMs": 15000 } }
 }
 ```
 
-Compose uses `/readyz` for its healthcheck. The Docker image itself uses `/healthz` so a temporary WARP outage does not restart a healthy process.
+Compose uses `/readyz` for its healthcheck. The Docker image itself uses `/healthz` so a temporary proxy outage does not restart a healthy process.
 
 ---
 
@@ -435,11 +434,13 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"deepseek-v4.1-flash","stream":false,"messages":[{"role":"user","content":"Reply with OK."}]}'
 ```
 
-Verify WARP egress from the sidecar:
+Verify the proxy pool:
 
 ```bash
-docker compose exec warp curl -s https://cloudflare.com/cdn-cgi/trace | grep -E 'ip=|warp='
+curl -fsS http://127.0.0.1:8080/readyz
 ```
+
+The dashboard Settings page shows healthy/configured proxies, 5x pass status, latency, and quarantine state.
 
 ---
 
@@ -452,7 +453,7 @@ docker compose exec warp curl -s https://cloudflare.com/cdn-cgi/trace | grep -E 
 - `config.json` — normalized runtime configuration
 - `keys.json` — API keys (master key included)
 - `admin-password.txt` — generated dashboard password
-- `warp_account.json`, `warp_pool.json`, `wireproxy_*.conf` — embedded WARP state (when used)
+- `warp_account.json`, `warp_pool.json`, `wireproxy_*.conf` — legacy optional WARP state (only if explicitly enabled)
 
 Back up `keys.json` and `config.json`. Treat the whole directory as a secret.
 
@@ -472,14 +473,14 @@ Create a new scoped key in the dashboard, or edit `data/keys.json` while the gat
 
 ### Proxy failover
 
-Routes are tried in order. A network error or `5xx` marks the route unhealthy after repeated failures; `429` marks a quota cooldown but keeps the route ready. There is no background public-proxy scanner in the request path.
+Routes are tried in order. A network error or `5xx` marks the route unhealthy after repeated failures; `429` marks a quota cooldown but keeps the route ready. Explicit proxies are checked five times with a 5-second timeout; a failed proxy is quarantined for five minutes and re-probed automatically. There is no public-proxy scraper.
 
 ### Docker resilience
 
-- `restart: unless-stopped` on both services
-- `depends_on` for startup order, with `/readyz` as the real readiness gate
-- Persistent `data/` and `warp-data/` volumes
-- Sidecar restart does not require recreating the gateway
+- `restart: unless-stopped`
+- `/readyz` as the real readiness gate
+- Persistent `data/` volume
+- No WARP sidecar or `NET_ADMIN` capability required
 
 ---
 
@@ -487,7 +488,7 @@ Routes are tried in order. A network error or `5xx` marks the route unhealthy af
 
 - **Free-tier capacity is upstream-controlled.** No gateway can guarantee 99% availability without authorized upstream capacity.
 - **Anonymity depends on your egress.** With `ALLOW_DIRECT_FALLBACK=false`, the gateway will return `503` rather than silently leak the host IP.
-- **WARP sidecar image is not pinned.** `caomingjun/warp:latest` can change. Pin a digest or version for reproducible deployments.
+- **Public proxies are not supported for inference egress.** Use explicit, authorized proxies only; they can see your traffic metadata and may be unstable.
 - **Do not expose the dashboard without TLS and strong credentials.** Use a reverse proxy, firewall, or private network.
 - **Respect upstream terms and applicable law.** This project is not affiliated with OpenCode, Anthropic, OpenAI, or Cloudflare.
 - **No warranty.** See the MIT license.

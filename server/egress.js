@@ -61,6 +61,7 @@ function parseProxyList() {
     if (!proxy || seen.has(proxy.id)) continue;
     seen.add(proxy.id);
     result.push(proxy);
+    if (result.length >= 100) break;
   }
   return result;
 }
@@ -139,6 +140,12 @@ class EgressManager {
     this.proxyIds = new Set(this.proxies.map(p => p.id));
     this.proxyFingerprint = JSON.stringify(this.proxies);
     this.routeResetListeners = [];
+    this.proxyChecks = new Map();
+    this.proxyChecksRunning = false;
+    this.proxyChecksPromise = null;
+    this.proxyChecksEnabled = false;
+    this.proxyCheckTimer = null;
+    this.maxProxyPool = 100;
     this.lastReload = Date.now();
 
     config.onChange(() => {
@@ -178,6 +185,7 @@ class EgressManager {
     this.proxies = nextProxies;
     this.proxyIds = nextIds;
     this.proxyFingerprint = nextFingerprint;
+    this.proxyChecks.clear();
 
     for (const id of new Set([...oldIds, ...nextIds])) {
       this.health.delete(id);
@@ -191,6 +199,175 @@ class EgressManager {
     }
     this.proxyAgents.clear();
     this.lastReload = Date.now();
+    if (this.proxyChecksEnabled) this.runProxyChecks();
+  }
+
+  startHealthChecks() {
+    this.proxyChecksEnabled = true;
+    this.runProxyChecks();
+    if (!this.proxyCheckTimer) {
+      this.proxyCheckTimer = setInterval(() => this.runProxyChecks(), 5 * 60 * 1000);
+      if (typeof this.proxyCheckTimer.unref === 'function') this.proxyCheckTimer.unref();
+    }
+  }
+
+  stopHealthChecks() {
+    this.proxyChecksEnabled = false;
+    if (this.proxyCheckTimer) {
+      clearInterval(this.proxyCheckTimer);
+      this.proxyCheckTimer = null;
+    }
+  }
+
+  async runProxyChecks() {
+    if (this.proxyChecksRunning) return this.proxyChecksPromise;
+    this.proxyChecksRunning = true;
+    this.proxyChecksPromise = (async () => {
+      const proxies = [...this.proxies].slice(0, this.maxProxyPool);
+      let index = 0;
+      const concurrency = Math.min(5, proxies.length || 1);
+
+      const worker = async () => {
+        while (index < proxies.length) {
+          const proxy = proxies[index++];
+          await this.checkProxy(proxy);
+        }
+      };
+
+      await Promise.all(Array.from({ length: concurrency }, worker));
+    })();
+
+    try {
+      return await this.proxyChecksPromise;
+    } finally {
+      this.proxyChecksRunning = false;
+      this.proxyChecksPromise = null;
+    }
+  }
+
+  async checkProxy(proxy) {
+    const route = {
+      ...proxy,
+      type: 'proxy',
+      proxyType: proxy.type,
+      id: proxy.id
+    };
+    const checks = 5;
+    const timeoutMs = 5000;
+    const started = Date.now();
+    const results = [];
+    // Sequential probes avoid false failures on proxies that allow only one
+    // concurrent CONNECT. Each probe is still capped at 5 seconds.
+    for (let i = 0; i < checks; i++) {
+      results.push(await this.probeProxy(route, timeoutMs));
+    }
+    const passes = results.filter(Boolean).length;
+    const healthy = passes === checks;
+    const latency = Math.round((Date.now() - started) / checks);
+    const health = this._health(route);
+
+    if (healthy) {
+      health.failures = 0;
+      health.openUntil = 0;
+      health.lastError = '';
+      health.lastSuccess = Date.now();
+    } else {
+      health.failures = (health.failures || 0) + 1;
+      health.openUntil = Date.now() + (5 * 60 * 1000);
+      health.lastError = `Proxy health check failed (${passes}/${checks})`;
+      health.lastFailure = Date.now();
+    }
+
+    this.proxyChecks.set(proxy.id, {
+      healthy,
+      passes,
+      checks,
+      latency,
+      lastCheck: Date.now(),
+      error: healthy ? '' : health.lastError
+    });
+  }
+
+  probeProxy(route, timeoutMs = 5000) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let socket = null;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        if (socket) {
+          try { socket.destroy(); } catch (e) {}
+        }
+        resolve(false);
+      }, timeoutMs);
+      if (typeof timer.unref === 'function') timer.unref();
+
+      const done = (err, stream) => {
+        if (settled) {
+          if (stream) {
+            try { stream.destroy(); } catch (e) {}
+          }
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        socket = stream || null;
+        if (err || !stream) {
+          if (stream) {
+            try { stream.destroy(); } catch (e) {}
+          }
+          resolve(false);
+          return;
+        }
+        try { stream.destroy(); } catch (e) {}
+        resolve(true);
+      };
+
+      this._connectViaProxy(route, {
+        host: 'opencode.ai',
+        port: 443,
+        servername: 'opencode.ai'
+      }, done);
+    });
+  }
+
+  getProxyStatus() {
+    const entries = this.proxies.map(proxy => {
+      const route = { ...proxy, type: 'proxy', proxyType: proxy.type, id: proxy.id };
+      const health = this._health(route);
+      const check = this.proxyChecks.get(proxy.id);
+      return {
+        id: proxy.id,
+        endpoint: `${proxy.type}://${proxy.host}:${proxy.port}`,
+        available: this.isAvailable(route),
+        quotaRetryAfterMs: this.getQuotaRetryAfter(route),
+        failures: health.failures || 0,
+        openUntil: health.openUntil || 0,
+        lastError: health.lastError || '',
+        passes: check?.passes || 0,
+        checks: check?.checks || 5,
+        latency: check?.latency || 0,
+        lastCheck: check?.lastCheck || 0,
+        healthy: check ? check.healthy : null
+      };
+    });
+
+    const healthy = entries.filter(entry => entry.available && entry.healthy === true);
+    const fastest = [...healthy].sort((a, b) => (a.latency || Infinity) - (b.latency || Infinity))[0] || null;
+    return {
+      configuredCount: this.proxies.length,
+      maxPool: this.maxProxyPool,
+      verifiedCount: healthy.length,
+      isScanning: this.proxyChecksRunning,
+      fastestProxy: fastest,
+      topProxies: healthy.slice(0, 10).map(entry => ({
+        endpoint: entry.endpoint,
+        latency: entry.latency,
+        passes: entry.passes,
+        checks: entry.checks
+      })),
+      proxies: entries
+    };
   }
 
   _healthKey(route) {

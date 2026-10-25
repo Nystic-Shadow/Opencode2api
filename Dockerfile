@@ -7,39 +7,30 @@ RUN cd client && npm install
 COPY client/ ./client/
 RUN cd client && npm run build
 
-# Production runtime stage with integrated userspace Cloudflare WARP engine (wireproxy)
+# Production runtime stage (proxy-only egress; no WARP sidecar/wireproxy)
 FROM node:20-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install dependencies, ca-certificates, curl, and wireproxy (userspace WireGuard + SOCKS5 client)
-ARG TARGETARCH
+# Minimal runtime: curl for healthchecks and CA roots for HTTPS proxies/upstreams.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
-    procps \
-    psmisc \
-    && ARCH="${TARGETARCH:-amd64}" \
-    && curl -fsSL "https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_linux_${ARCH}.tar.gz" -o /tmp/wireproxy.tar.gz \
-    && tar -xzf /tmp/wireproxy.tar.gz -C /usr/local/bin/ wireproxy \
-    && chmod +x /usr/local/bin/wireproxy \
-    && rm -f /tmp/wireproxy.tar.gz \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
 COPY server/ ./server/
-COPY scripts/ ./scripts/
 COPY --from=builder /app/dist ./dist
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh scripts/*.sh && mkdir -p /app/data
+RUN chmod +x /entrypoint.sh && mkdir -p /app/data
 
 EXPOSE 8080
 
 VOLUME ["/app/data"]
 
-# Liveness only: the image must stay healthy even when WARP is unavailable.
+# Liveness only: the image must stay healthy even when all proxies are unavailable.
 # docker-compose overrides this with /readyz for deployment readiness.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS "http://127.0.0.1:${PORT:-8080}/healthz" || exit 1

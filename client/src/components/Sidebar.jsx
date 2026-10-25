@@ -95,9 +95,9 @@ export default function Sidebar({ activeTab, setActiveTab, cliVersion }) {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.25rem' }}>
           <FiShield size={12} color="var(--primary)" />
-          <span style={{ fontWeight: '600', color: 'var(--sidebar-foreground)' }}>Zen Gate Protocol</span>
+          <span style={{ fontWeight: '600', color: 'var(--sidebar-foreground)' }}>Proxy Egress</span>
         </div>
-        <div>100% Free Anonymous Lane</div>
+        <div>Explicit pool, fail-closed routing</div>
       </div>
     </aside>
   );

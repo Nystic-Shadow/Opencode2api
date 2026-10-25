@@ -433,11 +433,18 @@ async function boot() {
   // Bind first. The dashboard and /healthz are available immediately.
   startHttpServer();
 
+  // Explicit proxy pool health checks (5 probes per configured proxy, 5s cap).
+  try { egress.startHealthChecks(); } catch (e) {
+    console.warn('[Boot] Proxy health checks could not start:', e.message);
+  }
+
   // WARP runs in the background so sidecar startup cannot delay the gateway.
   warp.autoBootstrap()
     .then((warpReady) => {
       if (warpReady) {
         console.log(`[Boot] WARP engine "${warp.getEngineMode()}" connected on port ${config.get('warp_port')} (warp=on)`);
+      } else if (warp.getEngineMode() === 'disabled') {
+        console.log('[Boot] WARP disabled; proxy egress owns inference traffic.');
       } else {
         console.warn(`[Boot] WARP engine "${warp.getEngineMode()}" is not ready yet; /readyz will report 503 until it is.`);
       }
@@ -465,6 +472,7 @@ function shutdown(signal) {
   server.close(() => {
     try { keys.flush(); } catch (e) {}
     try { metrics.flush(); } catch (e) {}
+    try { egress.stopHealthChecks(); } catch (e) {}
     try { warp.shutdown(); } catch (e) {}
     clearTimeout(forceTimer);
     process.exit(0);

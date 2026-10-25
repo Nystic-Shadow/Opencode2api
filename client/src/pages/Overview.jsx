@@ -137,7 +137,7 @@ export default function Overview({ stats, onRefresh }) {
               OpenCode2API High-Performance Gateway Active
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-              100% Free Anonymous Lane with Auto Model Discovery & CLI Fingerprint Sync
+Explicit proxy egress with health-checked routes, auto model discovery, and CLI fingerprint sync
             </div>
           </div>
         </div>

@@ -104,21 +104,16 @@ const DEFAULT_CONFIG = {
   queue_wait_ms: parseInt(process.env.QUEUE_WAIT_MS, 10) || 15000,
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
   proxies: process.env.PROXIES ? process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean) : [],
-  warp_mode: process.env.WARP_MODE || 'auto', // 'auto' | 'always' | 'disabled'
-  warp_engine: process.env.WARP_ENGINE || 'auto', // 'auto' | 'sidecar' | 'embedded' | 'cli' | 'disabled'
+  warp_mode: process.env.WARP_MODE || 'disabled', // opt-in legacy WARP
+  warp_engine: process.env.WARP_ENGINE || 'disabled', // opt-in legacy WARP
   warp_host: process.env.WARP_HOST || '127.0.0.1',
   warp_auto_switch: process.env.WARP_AUTO_SWITCH !== 'false',
   warp_rotate_on_unauth: false,
   warp_rotate_on_rate_limit: false,
   warp_auto_rotate_minutes: parseInt(process.env.WARP_AUTO_ROTATE_MINUTES, 10) || 0, // 0 = stable egress
   warp_port: parseInt(process.env.WARP_PORT, 10) || 40000,
-  egress_mode: process.env.EGRESS_MODE || 'auto', // 'auto' | 'warp_only' | 'proxy_only' | 'direct'
-  allow_direct_fallback: process.env.ALLOW_DIRECT_FALLBACK === 'true'
-    ? true
-    : (process.env.ALLOW_DIRECT_FALLBACK === 'false' ? false : null),
-  proxy_scraper_enabled: process.env.PROXY_SCRAPER_ENABLED === 'true', // opt-in only
-  proxy_scraper_strict_passes: parseInt(process.env.PROXY_SCRAPER_STRICT_PASSES, 10) || 5,
-  proxy_scraper_max_latency_ms: parseInt(process.env.PROXY_SCRAPER_MAX_LATENCY_MS, 10) || 3000,
+  egress_mode: process.env.EGRESS_MODE || 'proxy_only',
+  allow_direct_fallback: process.env.ALLOW_DIRECT_FALLBACK === 'true',
   upstream_models_url: 'https://opencode.ai/zen/v1/models',
   upstream_metadata_url: 'https://models.opencode.ai/api.json',
   upstream_inference_url: process.env.UPSTREAM_INFERENCE_URL || DEFAULT_UPSTREAM_INFERENCE_URL
@@ -230,14 +225,6 @@ class ConfigManager {
       this.config.queue_max_per_key = envOrConfigInt('QUEUE_MAX_PER_KEY', this.config.queue_max_per_key, 4, 1);
       this.config.queue_max_size = envOrConfigInt('QUEUE_MAX_SIZE', this.config.queue_max_size, 100, 0);
       this.config.queue_wait_ms = envOrConfigInt('QUEUE_WAIT_MS', this.config.queue_wait_ms, 15000, 0);
-
-      // Public proxy scraping is no longer part of the request path. It stays
-      // opt-in for diagnostics only; the gateway uses explicit PROXIES instead.
-      if (process.env.PROXY_SCRAPER_ENABLED !== undefined) {
-        this.config.proxy_scraper_enabled = process.env.PROXY_SCRAPER_ENABLED === 'true';
-      } else {
-        this.config.proxy_scraper_enabled = false;
-      }
 
       // Stable egress is more reliable than periodic WARP key churn. Rotation
       // remains possible through an explicit env override, never through 401/429.

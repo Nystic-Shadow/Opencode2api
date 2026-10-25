@@ -19,16 +19,11 @@ const PROXY_SOURCES = [
   { url: 'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=2500&country=all&ssl=all&anonymity=all', type: 'http' }
 ];
 
-// Pre-verified fast proxies tested directly against opencode.ai:443 (<3000ms latency, 5x strict check)
+// Pre-verified fast proxies tested directly against opencode.ai:443 (<3000ms latency, genuine TLS cert, 5x strict check)
 const DEFAULT_SEED_PROXIES = [
-  { host: '47.129.105.10', port: 12698, type: 'http', latency: 344, successCount: 5, lastChecked: Date.now() },
-  { host: '47.129.130.0', port: 1142, type: 'http', latency: 369, successCount: 5, lastChecked: Date.now() },
-  { host: '43.207.113.167', port: 8998, type: 'http', latency: 601, successCount: 5, lastChecked: Date.now() },
-  { host: '15.152.38.117', port: 53281, type: 'http', latency: 647, successCount: 5, lastChecked: Date.now() },
-  { host: '43.198.78.37', port: 12149, type: 'http', latency: 653, successCount: 5, lastChecked: Date.now() },
-  { host: '183.106.215.208', port: 1080, type: 'socks5', latency: 719, successCount: 5, lastChecked: Date.now() },
-  { host: '206.220.175.2', port: 4145, type: 'socks5', latency: 1200, successCount: 5, lastChecked: Date.now() },
-  { host: '74.119.147.209', port: 4145, type: 'socks5', latency: 1795, successCount: 5, lastChecked: Date.now() }
+  { host: '101.36.104.239', port: 10808, type: 'socks5', latency: 680, successCount: 5, lastChecked: Date.now() },
+  { host: '123.58.219.171', port: 10808, type: 'socks5', latency: 710, successCount: 5, lastChecked: Date.now() },
+  { host: '183.106.215.208', port: 1080, type: 'socks5', latency: 719, successCount: 5, lastChecked: Date.now() }
 ];
 
 class ProxyScraperService {
@@ -160,7 +155,7 @@ class ProxyScraperService {
           const tlsSocket = tls.connect({
             socket,
             servername: 'opencode.ai',
-            rejectUnauthorized: false
+            rejectUnauthorized: true
           }, () => {
             // Fast HTTP/1.1 ping
             tlsSocket.write('GET /cdn-cgi/trace HTTP/1.1\r\nHost: opencode.ai\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n');
@@ -169,9 +164,9 @@ class ProxyScraperService {
           let traceBody = '';
           tlsSocket.on('data', chunk => traceBody += chunk.toString());
           tlsSocket.on('end', () => {
-            const hasTrace = traceBody.includes('ip=') || traceBody.includes('404') || traceBody.includes('HTTP/');
+            const hasTrace = traceBody.includes('h=opencode.ai') && traceBody.includes('visit_scheme=https');
             tlsSocket.destroy();
-            done(hasTrace, hasTrace ? null : 'invalid trace');
+            done(hasTrace, hasTrace ? null : 'invalid trace (not opencode.ai)');
           });
           tlsSocket.on('error', err => {
             tlsSocket.destroy();
@@ -223,7 +218,7 @@ class ProxyScraperService {
         const tlsSocket = tls.connect({
           socket,
           servername: 'opencode.ai',
-          rejectUnauthorized: false
+          rejectUnauthorized: true
         }, () => {
           tlsSocket.write('GET /cdn-cgi/trace HTTP/1.1\r\nHost: opencode.ai\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n');
         });
@@ -231,9 +226,9 @@ class ProxyScraperService {
         let traceBody = '';
         tlsSocket.on('data', chunk => traceBody += chunk.toString());
         tlsSocket.on('end', () => {
-          const hasTrace = traceBody.includes('ip=') || traceBody.includes('404') || traceBody.includes('HTTP/');
+          const hasTrace = traceBody.includes('h=opencode.ai') && traceBody.includes('visit_scheme=https');
           tlsSocket.destroy();
-          done(hasTrace, hasTrace ? null : 'invalid trace');
+          done(hasTrace, hasTrace ? null : 'invalid trace (not opencode.ai)');
         });
         tlsSocket.on('error', err => {
           tlsSocket.destroy();
@@ -456,7 +451,7 @@ class ProxyScraperService {
             const tlsSocket = tls.connect({
               socket,
               servername: options.servername || destHost,
-              rejectUnauthorized: false
+              rejectUnauthorized: true
             }, () => {
               callback(null, tlsSocket);
             });
@@ -492,7 +487,7 @@ class ProxyScraperService {
           const tlsSocket = tls.connect({
             socket,
             servername: options.servername || destHost,
-            rejectUnauthorized: false
+            rejectUnauthorized: true
           }, () => {
             callback(null, tlsSocket);
           });

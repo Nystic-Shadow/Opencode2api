@@ -491,16 +491,19 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         agent: getUpstreamAgent(attempt, activeRoute.type, activeRoute.type === 'warp' ? currentWarpPort : activeRoute.proxy),
         timeout: requestTimeout
       }, (upstreamRes) => {
-        // If upstream error (non-200), buffer body to inspect retryability
-        if (upstreamRes.statusCode !== 200) {
+        const contentType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
+        const isValidContentType = contentType.includes('event-stream') || contentType.includes('application/json');
+
+        // If upstream error (non-200) or bogus proxy payload (non-API content-type)
+        if (upstreamRes.statusCode !== 200 || !isValidContentType) {
           let errBody = '';
           upstreamRes.on('data', chunk => errBody += chunk.toString());
           upstreamRes.on('end', () => {
             const routeDesc = activeRoute.type === 'warp'
               ? `WARP:${currentWarpPort}`
               : (activeRoute.type === 'scraped' && activeRoute.proxy ? `Proxy:${activeRoute.proxy.host}` : 'Direct');
-            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${routeDesc}): ${errBody}`);
-            if (upstreamRes.statusCode === 429 || upstreamRes.statusCode === 403) {
+            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${routeDesc}) [CT: ${contentType}]: ${errBody.slice(0, 300)}`);
+            if (upstreamRes.statusCode === 429 || upstreamRes.statusCode === 403 || !isValidContentType) {
               if (activeRoute.type === 'warp' && typeof warp.clearAgent === 'function') {
                 warp.clearAgent(currentWarpPort);
               }
@@ -511,9 +514,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
             }
             resolve({
               success: false,
-              statusCode: upstreamRes.statusCode,
+              statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
               headers: upstreamRes.headers,
-              body: errBody
+              body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
             });
           });
           return;
@@ -1161,15 +1164,18 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         agent: getUpstreamAgent(attempt, activeRoute.type, activeRoute.type === 'warp' ? currentWarpPort : activeRoute.proxy),
         timeout: requestTimeout
       }, (upstreamRes) => {
-        if (upstreamRes.statusCode !== 200) {
+        const contentType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
+        const isValidContentType = contentType.includes('event-stream') || contentType.includes('application/json');
+
+        if (upstreamRes.statusCode !== 200 || !isValidContentType) {
           let errBody = '';
           upstreamRes.on('data', chunk => errBody += chunk.toString());
           upstreamRes.on('end', () => {
             const routeDesc = activeRoute.type === 'warp'
               ? `WARP:${currentWarpPort}`
               : (activeRoute.type === 'scraped' && activeRoute.proxy ? `Proxy:${activeRoute.proxy.host}` : 'Direct');
-            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for Anthropic model ${currentModel} (${routeDesc}): ${errBody}`);
-            if (upstreamRes.statusCode === 429 || upstreamRes.statusCode === 403) {
+            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for Anthropic model ${currentModel} (${routeDesc}) [CT: ${contentType}]: ${errBody.slice(0, 300)}`);
+            if (upstreamRes.statusCode === 429 || upstreamRes.statusCode === 403 || !isValidContentType) {
               if (activeRoute.type === 'warp' && typeof warp.clearAgent === 'function') {
                 warp.clearAgent(currentWarpPort);
               }
@@ -1180,9 +1186,9 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             }
             resolve({
               success: false,
-              statusCode: upstreamRes.statusCode,
+              statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
               headers: upstreamRes.headers,
-              body: errBody
+              body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
             });
           });
           return;

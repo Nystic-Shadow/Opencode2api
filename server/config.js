@@ -96,6 +96,7 @@ const DEFAULT_CONFIG = {
   global_tpm_limit: 0, // 0 = unlimited
   smart_fallback: process.env.SMART_FALLBACK !== 'false',
   max_retries: parseInt(process.env.MAX_RETRIES, 10) || 2, // hard-capped at 3 below
+  proxy_quota_failovers: parseInt(process.env.PROXY_QUOTA_FAILOVERS, 10) || 10,
   request_timeout_ms: parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 30000,
   request_deadline_ms: parseInt(process.env.REQUEST_DEADLINE_MS, 10) || 90000,
   queue_max_concurrent: parseInt(process.env.QUEUE_MAX_CONCURRENT, 10) || 8,
@@ -112,7 +113,8 @@ const DEFAULT_CONFIG = {
 };
 
 class ConfigManager {
-  constructor() {
+  constructor({ persist = true } = {}) {
+    this.persist = persist;
     this.config = { ...DEFAULT_CONFIG };
     this.listeners = [];
     this.load();
@@ -124,7 +126,9 @@ class ConfigManager {
     this.config.admin_password = generated;
     this.config._admin_password_generated = true;
     try {
-      fs.writeFileSync(path.join(DATA_DIR, 'admin-password.txt'), generated + '\n', { mode: 0o600 });
+      if (this.persist !== false) {
+        fs.writeFileSync(path.join(DATA_DIR, 'admin-password.txt'), generated + '\n', { mode: 0o600 });
+      }
     } catch (e) {}
     console.warn('[Config] Generated a random admin password. Set DASHBOARD_PASS to choose your own; the generated value is in data/admin-password.txt.');
   }
@@ -205,6 +209,10 @@ class ConfigManager {
         this.config.max_retries = 2;
       }
       this.config.max_retries = Math.min(Math.max(0, parseInt(this.config.max_retries, 10) || 0), 3);
+      this.config.proxy_quota_failovers = Math.min(
+        20,
+        envOrConfigInt('PROXY_QUOTA_FAILOVERS', this.config.proxy_quota_failovers, 10, 0)
+      );
 
       this.config.request_timeout_ms = Math.max(
         5000,
@@ -243,6 +251,7 @@ class ConfigManager {
   }
 
   save() {
+    if (this.persist === false) return;
     try {
       atomicWriteJson(CONFIG_FILE, this.config);
     } catch (err) {
@@ -289,4 +298,8 @@ class ConfigManager {
   }
 }
 
-module.exports = new ConfigManager();
+module.exports = new ConfigManager({
+  // The proxy verification CLI must be able to inspect an env-supplied pool
+  // without persisting those temporary values into data/config.json.
+  persist: process.env.O2P_CONFIG_READONLY !== '1'
+});

@@ -10,6 +10,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [autoUpdateCli, setAutoUpdateCli] = useState(settings.auto_update_cli !== false);
   const [freeOnly, setFreeOnly] = useState(settings.free_only !== false);
   const [maxRetries, setMaxRetries] = useState(settings.max_retries ?? 2);
+  const [proxyQuotaFailovers, setProxyQuotaFailovers] = useState(settings.proxy_quota_failovers ?? 10);
   const [upstreamZenKey, setUpstreamZenKey] = useState(settings.upstream_zen_key || '');
   const [proxies, setProxies] = useState(Array.isArray(settings.proxies) ? settings.proxies.join('\n') : (settings.proxies || ''));
   const [globalRpm, setGlobalRpm] = useState(settings.global_rpm_limit || 0);
@@ -73,6 +74,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         auto_update_cli: autoUpdateCli,
         free_only: freeOnly,
         max_retries: parseInt(maxRetries, 10) || 0,
+        proxy_quota_failovers: Math.min(20, Math.max(0, parseInt(proxyQuotaFailovers, 10) || 0)),
         upstream_zen_key: upstreamZenKey.trim(),
         proxies: proxies.split('\n').map(p => p.trim()).filter(Boolean),
         global_rpm_limit: parseInt(globalRpm, 10),
@@ -166,7 +168,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               </span>
             </div>
             <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', margin: 0 }}>
-              Explicit <code>PROXIES</code> only, maximum 100. Each proxy must pass five consecutive checks with a 5-second timeout. Failed proxies are quarantined for five minutes. A 429 is treated as upstream quota, not proxy death.
+              Explicit <code>PROXIES</code> only, maximum 100. Each proxy must pass five consecutive checks with a 5-second timeout; failures are quarantined for five minutes. Healthy proxies are used round-robin. An upstream 429 cools that route and fails over to the next routable proxy (bounded by <code>PROXY_QUOTA_FAILOVERS</code>). Proxies mitigate per-IP limits; they cannot remove account-wide quota.
             </p>
           </div>
 
@@ -209,6 +211,12 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             </div>
           </div>
           <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Routable Now</div>
+            <div style={{ fontSize: '1.1rem', fontWeight: '800', color: 'var(--foreground)' }}>
+              {proxyStatus?.routableCount || 0}
+            </div>
+          </div>
+          <div>
             <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Fastest Proxy Latency</div>
             <div style={{ fontSize: '1.1rem', fontWeight: '800', color: 'var(--foreground)' }}>
               {proxyStatus?.fastestProxy ? `${proxyStatus.fastestProxy.latency}ms` : 'None'}
@@ -231,7 +239,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         {proxyStatus?.topProxies && proxyStatus.topProxies.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
             <div style={{ fontSize: '0.75rem', fontWeight: '600', color: 'var(--muted-foreground)' }}>
-              Healthy Egress Proxies (transport failover only):
+              Healthy Egress Proxies (round-robin):
             </div>
             <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
               {proxyStatus.topProxies.map((p, idx) => (
@@ -330,24 +338,44 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
           />
         </div>
 
-        {/* Max Retries */}
-        <div>
-          <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.35rem' }}>
-            Max Automatic Failover Attempts
-          </label>
-          <input
-            type="number"
-            className="input-field"
-            style={{ width: '100%' }}
-            value={maxRetries}
-            onChange={e => setMaxRetries(e.target.value)}
-            min="0"
-            max="3"
-            required
-          />
-          <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
-            Number of transparent upstream retry and fallback hops before returning an error.
-          </span>
+        {/* Retry and quota-failover budgets */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.35rem' }}>
+              Max Network Failover Attempts
+            </label>
+            <input
+              type="number"
+              className="input-field"
+              style={{ width: '100%' }}
+              value={maxRetries}
+              onChange={e => setMaxRetries(e.target.value)}
+              min="0"
+              max="3"
+              required
+            />
+            <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
+              Retries for connection errors and 5xx responses. Hard-capped at 3.
+            </span>
+          </div>
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.35rem' }}>
+              Quota Failovers per Request
+            </label>
+            <input
+              type="number"
+              className="input-field"
+              style={{ width: '100%' }}
+              value={proxyQuotaFailovers}
+              onChange={e => setProxyQuotaFailovers(e.target.value)}
+              min="0"
+              max="20"
+              required
+            />
+            <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
+              Extra proxies tried after an upstream 429 before returning the limit. Bounded 0–20; 0 disables quota failover.
+            </span>
+          </div>
         </div>
 
         {/* Upstream Zen Key (Optional) */}
@@ -359,12 +387,12 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             type="text"
             className="input-field"
             style={{ width: '100%', fontFamily: 'monospace' }}
-            placeholder="Leave empty for 100% Free Anonymous Lane"
+            placeholder="Leave empty to use the free lane"
             value={upstreamZenKey}
             onChange={e => setUpstreamZenKey(e.target.value)}
           />
           <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
-            Bypasses anonymous IP quotas completely when provided. Leave blank to stay 100% anonymous & free.
+            Uses paid upstream capacity when provided and bypasses anonymous free-tier limits. Leave blank to stay on the free lane.
           </span>
         </div>
 
@@ -381,7 +409,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             onChange={e => setProxies(e.target.value)}
           />
           <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
-            Explicit HTTP, HTTPS, or SOCKS5 proxies used in order. The gateway does not rotate identities on 429/403; a proxy is marked unhealthy only for transport/5xx failures.
+            Explicit HTTP, HTTPS, or SOCKS5 proxies (maximum 100). Entries may share host:port when their credentials select different egress IPs. Requests use the pool round-robin; an upstream 429 cools that route and tries the next within the quota budget. Proxies cannot remove account-wide quota.
           </span>
         </div>
 

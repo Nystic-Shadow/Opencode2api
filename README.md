@@ -6,7 +6,7 @@
 
 ### OpenAI + Anthropic compatible gateway for OpenCode Zen models
 
-> **Proxy-only egress: explicit HTTP, HTTPS, or SOCKS5 proxies with strict health checks. No public proxy scraping, no 429 identity rotation.**
+> **Proxy-only egress: explicit HTTP, HTTPS, or SOCKS5 proxies with strict health checks and round-robin quota failover. No public proxy scraping.**
 
 [![Node.js](https://img.shields.io/badge/Node.js-20-339933.svg?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Docker Compose](https://img.shields.io/badge/Docker_Compose-Ready-2496ED.svg?style=for-the-badge&logo=docker&logoColor=white)](docker-compose.yml)
@@ -21,15 +21,16 @@
 
 OpenCode2API exposes OpenCode Zen models through standard **OpenAI** and **Anthropic** APIs. It adds authentication, model discovery, tool/function calling, vision, reasoning streams, bounded concurrency, and health-checked egress through explicit user-owned proxies.
 
-It is designed for **stable operation**, not for defeating provider limits. Free-tier capacity is controlled upstream. The gateway therefore:
+It is designed for **maximum best-effort availability** within upstream limits. Free-tier capacity is controlled upstream. The gateway therefore:
 
-- fails fast on upstream quota (`429`) with a real `Retry-After`,
-- never rotates proxy identities or switches IPs to evade `401`/`429`,
+- spreads requests round-robin across the healthy proxies you configure,
+- cools a proxy briefly when it returns `429`, then tries the next routable proxy (bounded by `PROXY_QUOTA_FAILOVERS`),
+- rotates the anonymous session identity on retries so a per-session limit does not pin one request forever,
 - never scrapes public proxy lists,
-- only fails over between routes on network errors and `5xx` responses,
+- fails over between routes on network errors and `5xx`,
 - exposes `/readyz` so a scheduler or load balancer can stop sending traffic when no route or model is available.
 
-> **There is no 99% or 100% availability guarantee.** If the upstream free tier is exhausted, the gateway returns `429`; it does not manufacture capacity. For predictable capacity, use an upstream Zen key or a provider you are authorized to use.
+> **Best effort, not a capacity guarantee.** Proxies change the egress IP; they cannot manufacture upstream quota. If OpenCode meters the free tier per account/key rather than per IP (or the limit applies globally), every proxy can still receive `429`. In that case the gateway returns `429` with the earliest real `Retry-After` after exhausting the pool. For predictable capacity, use an upstream Zen key or a provider you are authorized to use.
 
 ---
 
@@ -54,11 +55,13 @@ It is designed for **stable operation**, not for defeating provider limits. Free
 ### Egress and reliability
 
 - **Explicit proxy pool:** HTTP, HTTPS, and SOCKS5 with optional authentication
-- Maximum 100 configured proxies; no public proxy scraping
+- Maximum 100 configured proxies; no public proxy scraping or ambient proxy fallback
+- Credential-only variants on the same host:port are treated as distinct routes
 - Five consecutive health checks per proxy, each with a 5-second timeout
 - Failed proxies are quarantined for five minutes and re-probed automatically
-- Route health tracking, circuit breaking on repeated network/`5xx` failures, and route failover
-- Provider-quota cooldown that fails fast with `429` + `Retry-After` while keeping the route ready
+- Round-robin selection across healthy proxies, weighted toward verified endpoints
+- Quota-aware failover: a `429` cools that proxy and retries the next routable one before returning a limit
+- Route health tracking and circuit breaking on repeated network/`5xx` failures
 - Bounded global/per-key admission queue, request deadline, and capped retries
 - `/healthz` liveness and `/readyz` readiness endpoints
 - Proxy-only Compose deployment with direct fallback disabled by default
@@ -81,19 +84,19 @@ client request
 API key auth ──► 401 on invalid/expired key
     │
     ▼
-quota cooldown? ──► 429 + Retry-After (no IP rotation)
+quota cooldown? ──► skip cooling routes, pick next healthy proxy
     │
     ▼
 admission queue ──► 429 queue_full + Retry-After when saturated
     │
     ▼
-select egress route: healthy explicit proxies, then direct only if allowed
+select egress route: round-robin over healthy explicit proxies; direct only if allowed
     │
     ▼
 upstream request with timeout and overall deadline
     │
     ├── 2xx ──► stream/non-stream response (slot held until close)
-    ├── 429 / quota 403 ──► 429 + Retry-After (fail fast)
+    ├── 429 / quota 403 ──► cool route, try next routable proxy (bounded), else 429
     ├── network / 5xx ──► next route or retry, then 502/504
     └── fatal 4xx ──► return the upstream error
 ```
@@ -103,12 +106,13 @@ Key properties:
 | Behavior | Implementation |
 | :--- | :--- |
 | Retry budget | `MAX_RETRIES=2` by default, hard-capped at `3` |
+| Quota failover budget | `PROXY_QUOTA_FAILOVERS=10` by default, bounded `0–20` |
 | Request timeout | `30s` per attempt by default |
 | Overall deadline | `90s` by default |
 | Queue | `8` concurrent globally, `4` per key, `100` waiting, `15s` wait |
 | Stream admission | Slot held for the full response, not released when headers arrive |
-| Quota | `429` with `Retry-After`; route remains in `/readyz` |
-| Route failover | Network errors and `5xx` only |
+| Quota | Cooling route is skipped; next routable proxy is tried; `429` only after the pool is exhausted |
+| Route failover | Round-robin for routing; network errors and `5xx` rotate to the next route |
 | Direct egress | Disabled by compose (`ALLOW_DIRECT_FALLBACK=false`) |
 
 ---
@@ -151,7 +155,9 @@ openssl rand -base64 24
 PROXIES=socks5://user:pass@proxy.example:1080,http://user:pass@proxy-b.example:8080
 ```
 
-Only explicitly configured proxies are used for inference egress. Public proxy lists are never scraped, and direct fallback is disabled by Compose. Up to 100 proxies are accepted; each proxy must pass five consecutive health checks with a 5-second timeout.
+Only explicitly configured proxies are used for inference egress. Public proxy lists are never scraped, ambient `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` variables are ignored, and direct fallback is disabled by Compose. Up to 100 proxies are accepted; each proxy must pass five consecutive health checks with a 5-second timeout. Entries may share the same host and port when different credentials select different egress IPs; they are tracked as separate routes.
+
+Healthy proxies are used round-robin. When one returns upstream quota, the gateway cools that route and retries the next routable proxy up to `PROXY_QUOTA_FAILOVERS` times before returning `429` with the earliest retry hint. This is best effort: if quota is tied to the account/key rather than the proxy IP, the whole pool can still be limited.
 
 ### 3. Start
 
@@ -246,7 +252,8 @@ Compose sets `EGRESS_MODE=proxy_only` and `ALLOW_DIRECT_FALLBACK=false`. `PROXIE
 | `DASHBOARD_PASS` | generated | Dashboard password; 12+ characters, required by compose |
 | `OPENCODE_ZEN_KEY` | empty | Upstream Zen key for paid models |
 | `UPSTREAM_INFERENCE_URL` | OpenCode Zen URL | Override the upstream chat endpoint (local testing or compatible mirrors; plain HTTP requires direct egress) |
-| `PROXIES` | empty | Comma-separated explicit `http://`, `https://`, or `socks5://` proxies; required by Compose; maximum 100 |
+| `PROXIES` | empty | Comma-separated explicit `http://`, `https://`, or `socks5://` proxies; required by Compose; maximum 100; ambient proxy env vars are ignored |
+| `PROXY_QUOTA_FAILOVERS` | `10` | Additional proxies tried after an upstream quota response; bounded `0–20` |
 | `EGRESS_MODE` | `proxy_only` | `auto`, `proxy_only`, `direct` |
 | `ALLOW_DIRECT_FALLBACK` | `false` | `true`/`false` direct-egress policy |
 | `MAX_RETRIES` | `2` | Retries per request, capped at `3` |
@@ -360,13 +367,13 @@ Compose uses `/readyz` for its healthcheck. The Docker image itself uses `/healt
 | Status | Type | Meaning |
 | :--- | :--- | :--- |
 | `401` | authentication | Missing/invalid API key, expired key, or paid model without a Zen key |
-| `429` | `free_tier_rate_limit` | Upstream quota/capacity; honor `Retry-After` |
+| `429` | `free_tier_rate_limit` | Upstream quota/capacity on every routable proxy; honor `Retry-After` |
 | `429` | `queue_full` | Gateway concurrency limit; retry shortly |
 | `502` | upstream/stream | Upstream connection or stream failed |
 | `503` | `no_egress_route` | No healthy proxy route and direct fallback disabled |
 | `504` | deadline | Overall request deadline exceeded |
 
-The gateway does not retry `429` on another IP. It returns the limit to the caller so clients can back off honestly.
+On upstream quota, the gateway cools that route and retries the next routable proxy within the `PROXY_QUOTA_FAILOVERS` budget. It returns `429` only when no routable proxy remains (or the budget/deadline is exhausted), using the earliest real `Retry-After`. Proxies cannot create quota when the upstream limit is account- or key-global.
 
 ---
 
@@ -379,7 +386,7 @@ docker compose config    # validate compose interpolation
 node --check server/proxy.js
 ```
 
-The reliability suite covers proxy parsing, SOCKS5 response parsing, retry classification, quota cooldown, route ordering, and admission queue limits. It does not require network access.
+The reliability suite covers proxy parsing (including IPv6), SOCKS5 response parsing, retry classification, quota cooldown, round-robin selection, quota failover, direct-fallback preference, health-check quarantine, and admission queue limits. It does not require network access.
 
 A live smoke test after deployment:
 
@@ -395,10 +402,10 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 Verify the proxy pool:
 
 ```bash
-curl -fsS http://127.0.0.1:8080/readyz
+npm run check:proxies
 ```
 
-The dashboard Settings page shows healthy/configured proxies, 5x pass status, latency, and quarantine state.
+This runs the same five-probe, 5-second health check used at startup and prints pass/fail, probe count, latency, and the failure reason for each endpoint. It exits non-zero when no proxy is healthy. The dashboard Settings page also shows healthy/configured/routable counts, 5x pass status, latency, and quarantine state.
 
 ---
 
@@ -430,7 +437,9 @@ Create a new scoped key in the dashboard, or edit `data/keys.json` while the gat
 
 ### Proxy failover
 
-Routes are tried in order. A network error or `5xx` marks the route unhealthy after repeated failures; `429` marks a quota cooldown but keeps the route ready. Explicit proxies are checked five times with a 5-second timeout; a failed proxy is quarantined for five minutes and re-probed automatically. There is no public-proxy scraper.
+Healthy proxies are selected round-robin, with freshly verified proxies preferred. A network error or repeated `5xx` opens a 30-second circuit for that route. An upstream `429` marks a quota cooldown but keeps the route in `/readyz`; the request then tries the next routable proxy within `PROXY_QUOTA_FAILOVERS`. When every route is cooling, the gateway returns `429` with the earliest retry hint instead of hammering the upstream. Explicit proxies are checked five times with a 5-second timeout; a failed proxy is quarantined for five minutes and re-probed automatically. There is no public-proxy scraper.
+
+Because quota attribution is controlled by the upstream, proxy rotation is a best-effort mitigation, not a guarantee. If the free tier is limited per account/key, no proxy pool can remove the limit.
 
 ### Docker resilience
 
@@ -443,7 +452,7 @@ Routes are tried in order. A network error or `5xx` marks the route unhealthy af
 
 ## Limitations and security notes
 
-- **Free-tier capacity is upstream-controlled.** No gateway can guarantee 99% availability without authorized upstream capacity.
+- **Free-tier capacity is upstream-controlled.** No gateway can guarantee zero `429` responses. Round-robin and quota failover reduce them when the limit is per-IP; if it is per account/key, the pool cannot help. There is no 99%/100% availability guarantee without authorized upstream capacity.
 - **Anonymity depends on your egress.** With `ALLOW_DIRECT_FALLBACK=false`, the gateway will return `503` rather than silently leak the host IP.
 - **Public proxies are not supported for inference egress.** Use explicit, authorized proxies only; they can see your traffic metadata and may be unstable.
 - **Do not expose the dashboard without TLS and strong credentials.** Use a reverse proxy, firewall, or private network.

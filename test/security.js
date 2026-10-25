@@ -82,18 +82,36 @@ const adminRoutes = require('../server/adminRoutes');
   // We can test the handler directly
   const conf = config.getAll();
   assert.ok(conf.upstream_zen_key.length > 0);
-  
+
+  const { maskProxy, restoreMaskedProxies } = adminRoutes._test;
+  const existing = [
+    'http://session-a:secret@gateway.example:7000',
+    'http://session-b:secret@gateway.example:7000'
+  ];
+  const masked = existing.map(maskProxy);
+  assert.ok(masked.every(entry => entry.includes('***') && !entry.includes('secret')));
+  assert.deepStrictEqual(restoreMaskedProxies(masked, existing), existing);
+  assert.strictEqual(maskProxy('http://user:pass@bad host:8080'), '[invalid proxy]');
+  assert.deepStrictEqual(
+    restoreMaskedProxies(['http://***:***@new.example:8080'], existing),
+    ['http://***:***@new.example:8080']
+  );
+
   // Clean up
   config.config.upstream_zen_key = '';
   console.log('  ✅ Secret masking logic verified');
 }
 
-// 4. Hardened Reliability Defaults (no quota-evasion rotation)
+// 4. Hardened Reliability Defaults (bounded retries and proxy failover)
 console.log('\n[Test 4] Hardened Reliability Defaults (H3)');
 {
   const maxRetries = config.get('max_retries');
   assert.ok(Number.isInteger(maxRetries) && maxRetries >= 0 && maxRetries <= 3,
     `max_retries must be capped at 3, got ${maxRetries}`);
+
+  const quotaFailovers = config.get('proxy_quota_failovers');
+  assert.ok(Number.isInteger(quotaFailovers) && quotaFailovers >= 0 && quotaFailovers <= 20,
+    `proxy_quota_failovers must be bounded between 0 and 20, got ${quotaFailovers}`);
 
   const timeout = config.get('request_timeout_ms');
   const deadline = config.get('request_deadline_ms');

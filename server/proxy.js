@@ -285,8 +285,24 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const deadline = startTime + Math.max(requestTimeout, configInt('request_deadline_ms', 90000, requestTimeout));
   const queueWaitMs = configInt('queue_wait_ms', 15000, 0);
 
-  let activeRoute = egress.getCandidates()[0] || null;
+  let activeRoute = egress.selectRoute();
   if (!activeRoute) {
+    const quotaMs = egress.getEarliestQuotaRetryAfter();
+    if (quotaMs > 0) {
+      const retryAfterSec = Math.max(1, Math.ceil(quotaMs / 1000));
+      metrics.recordRequest({
+        model: requestedModel,
+        status: 429,
+        tokens: {},
+        latencyMs: Date.now() - startTime,
+        stream: isClientStream,
+        keyId: keyObj.id
+      });
+      sendJsonError(res, 429, 'free_tier_rate_limit',
+        'OpenCode Free Tier capacity limit reached on every available proxy route. Retry after the indicated delay, add more proxies, or configure an upstream Zen key.',
+        { 'Retry-After': String(retryAfterSec) });
+      return;
+    }
     metrics.recordRequest({
       model: requestedModel,
       status: 503,
@@ -301,16 +317,11 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     return;
   }
 
-  // Quota is a provider window, not a broken route: fail fast with the real
-  // reset hint instead of rotating egress to evade the limit.
-  const initialQuotaMs = egress.getQuotaRetryAfter(activeRoute);
-  if (initialQuotaMs > 0) {
-    const retryAfterSec = Math.max(1, Math.ceil(initialQuotaMs / 1000));
-    sendJsonError(res, 429, 'free_tier_rate_limit',
-      'OpenCode Free Tier capacity limit reached for this egress. The gateway fails fast instead of rotating IPs. Retry after the indicated delay, or configure an upstream Zen key or a user-owned proxy.',
-      { 'Retry-After': String(retryAfterSec) });
-    return;
-  }
+  const attemptedRoutes = new Set([activeRoute.id]);
+  const quotaFailoverLimit = Math.min(20, configInt('proxy_quota_failovers', 10));
+  let quotaFailovers = 0;
+  let networkFailures = 0;
+  const maxAttempts = maxRetries + 1 + quotaFailoverLimit;
 
   let lastStatus = 0;
   let lastBody = '';
@@ -336,7 +347,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     }
   });
 
-  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (!activeRoute) break;
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
@@ -825,8 +836,17 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     if (failureKind === 'quota') {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
-      const retryAfterSec = Math.max(1, Math.ceil((retryAfterMs || 60000) / 1000));
-      console.warn(`[Proxy] Upstream quota/capacity limit on ${routeLabel(activeRoute)} for ${currentModel}. Failing fast (Retry-After ${retryAfterSec}s).`);
+      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes);
+      if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
+        quotaFailovers++;
+        const failedRoute = activeRoute;
+        activeRoute = nextRoute;
+        attemptedRoutes.add(activeRoute.id);
+        console.warn(`[Proxy] Upstream quota on ${routeLabel(failedRoute)} for ${currentModel}; trying ${routeLabel(activeRoute)} (${quotaFailovers}/${quotaFailoverLimit}).`);
+        continue;
+      }
+      const retryAfterSec = Math.max(1, Math.ceil((retryAfterMs || egress.getEarliestQuotaRetryAfter() || 60000) / 1000));
+      console.warn(`[Proxy] Upstream quota on ${routeLabel(activeRoute)} for ${currentModel}; all routable proxies are exhausted (Retry-After ${retryAfterSec}s).`);
       metrics.recordRequest({
         model: requestedModel,
         status: 429,
@@ -836,7 +856,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         keyId: keyObj.id
       });
       sendJsonError(res, 429, 'free_tier_rate_limit',
-        'OpenCode Free Tier capacity limit reached for this egress. The gateway fails fast instead of rotating IPs. Retry after the indicated delay, or configure an upstream Zen key or a user-owned proxy.',
+        'OpenCode Free Tier capacity limit reached on every available proxy route. Retry after the indicated delay, add more proxies, or configure an upstream Zen key.',
         { 'Retry-After': String(retryAfterSec) });
       return;
     }
@@ -869,16 +889,19 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
     // Network / 5xx failure: degrade the route and try the next configured one.
     egress.recordFailure(activeRoute, 'retry');
+    networkFailures++;
     console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for ${currentModel}: ${bodyStr.slice(0, 200)}`);
 
-    if (attempt > maxRetries) break;
+    if (networkFailures >= maxRetries + 1) break;
 
-    const nextRoute = egress.nextRoute(activeRoute, egress.getCandidates());
+    const nextRoute = egress.getNextRoutableRoute(attemptedRoutes);
     if (nextRoute) {
       activeRoute = nextRoute;
-      console.log(`[Proxy] Retrying on ${routeLabel(activeRoute)} (attempt ${attempt + 1}/${maxRetries + 1})...`);
+      attemptedRoutes.add(activeRoute.id);
+      console.log(`[Proxy] Retrying on ${routeLabel(activeRoute)} (attempt ${attempt + 1}/${maxAttempts})...`);
     } else {
-      const backoffMs = Math.min(250 * Math.pow(2, attempt - 1) + Math.random() * 200, 1500);
+      if (!egress.isAvailable(activeRoute)) break;
+      const backoffMs = Math.min(250 * Math.pow(2, networkFailures - 1) + Math.random() * 200, 1500);
       await new Promise(r => setTimeout(r, backoffMs));
     }
   }
@@ -1040,8 +1063,24 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const deadline = startTime + Math.max(requestTimeout, configInt('request_deadline_ms', 90000, requestTimeout));
   const queueWaitMs = configInt('queue_wait_ms', 15000, 0);
 
-  let activeRoute = egress.getCandidates()[0] || null;
+  let activeRoute = egress.selectRoute();
   if (!activeRoute) {
+    const quotaMs = egress.getEarliestQuotaRetryAfter();
+    if (quotaMs > 0) {
+      const retryAfterSec = Math.max(1, Math.ceil(quotaMs / 1000));
+      metrics.recordRequest({
+        model: requestedModel,
+        status: 429,
+        tokens: {},
+        latencyMs: Date.now() - startTime,
+        stream: isClientStream,
+        keyId: keyObj.id
+      });
+      sendAnthropicError(res, 429, 'rate_limit_error',
+        'OpenCode Free Tier capacity limit reached on every available proxy route. Retry after the indicated delay, add more proxies, or configure an upstream Zen key.',
+        { 'Retry-After': String(retryAfterSec) });
+      return;
+    }
     metrics.recordRequest({
       model: requestedModel,
       status: 503,
@@ -1056,14 +1095,11 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     return;
   }
 
-  const initialQuotaMs = egress.getQuotaRetryAfter(activeRoute);
-  if (initialQuotaMs > 0) {
-    const retryAfterSec = Math.max(1, Math.ceil(initialQuotaMs / 1000));
-    sendAnthropicError(res, 429, 'rate_limit_error',
-      'OpenCode Free Tier capacity limit reached for this egress. The gateway fails fast instead of rotating IPs. Retry after the indicated delay, or configure an upstream Zen key or a user-owned proxy.',
-      { 'Retry-After': String(retryAfterSec) });
-    return;
-  }
+  const attemptedRoutes = new Set([activeRoute.id]);
+  const quotaFailoverLimit = Math.min(20, configInt('proxy_quota_failovers', 10));
+  let quotaFailovers = 0;
+  let networkFailures = 0;
+  const maxAttempts = maxRetries + 1 + quotaFailoverLimit;
 
   let lastStatus = 0;
   let lastBody = '';
@@ -1089,7 +1125,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     }
   });
 
-  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (!activeRoute) break;
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
@@ -1674,8 +1710,17 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     if (failureKind === 'quota') {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
-      const retryAfterSec = Math.max(1, Math.ceil((retryAfterMs || 60000) / 1000));
-      console.warn(`[Proxy] Upstream quota/capacity limit on ${routeLabel(activeRoute)} for ${currentModel}. Failing fast (Retry-After ${retryAfterSec}s).`);
+      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes);
+      if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
+        quotaFailovers++;
+        const failedRoute = activeRoute;
+        activeRoute = nextRoute;
+        attemptedRoutes.add(activeRoute.id);
+        console.warn(`[Proxy] Upstream quota on ${routeLabel(failedRoute)} for Anthropic model ${currentModel}; trying ${routeLabel(activeRoute)} (${quotaFailovers}/${quotaFailoverLimit}).`);
+        continue;
+      }
+      const retryAfterSec = Math.max(1, Math.ceil((retryAfterMs || egress.getEarliestQuotaRetryAfter() || 60000) / 1000));
+      console.warn(`[Proxy] Upstream quota on ${routeLabel(activeRoute)} for Anthropic model ${currentModel}; all routable proxies are exhausted (Retry-After ${retryAfterSec}s).`);
       metrics.recordRequest({
         model: requestedModel,
         status: 429,
@@ -1685,7 +1730,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         keyId: keyObj.id
       });
       sendAnthropicError(res, 429, 'rate_limit_error',
-        'OpenCode Free Tier capacity limit reached for this egress. The gateway fails fast instead of rotating IPs. Retry after the indicated delay, or configure an upstream Zen key or a user-owned proxy.',
+        'OpenCode Free Tier capacity limit reached on every available proxy route. Retry after the indicated delay, add more proxies, or configure an upstream Zen key.',
         { 'Retry-After': String(retryAfterSec) });
       return;
     }
@@ -1718,16 +1763,19 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
     // Network / 5xx failure: degrade the route and try the next configured one.
     egress.recordFailure(activeRoute, 'retry');
+    networkFailures++;
     console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for Anthropic model ${currentModel}: ${bodyStr.slice(0, 200)}`);
 
-    if (attempt > maxRetries) break;
+    if (networkFailures >= maxRetries + 1) break;
 
-    const nextRoute = egress.nextRoute(activeRoute, egress.getCandidates());
+    const nextRoute = egress.getNextRoutableRoute(attemptedRoutes);
     if (nextRoute) {
       activeRoute = nextRoute;
-      console.log(`[Proxy] Retrying Anthropic request on ${routeLabel(activeRoute)} (attempt ${attempt + 1}/${maxRetries + 1})...`);
+      attemptedRoutes.add(activeRoute.id);
+      console.log(`[Proxy] Retrying Anthropic request on ${routeLabel(activeRoute)} (attempt ${attempt + 1}/${maxAttempts})...`);
     } else {
-      const backoffMs = Math.min(250 * Math.pow(2, attempt - 1) + Math.random() * 200, 1500);
+      if (!egress.isAvailable(activeRoute)) break;
+      const backoffMs = Math.min(250 * Math.pow(2, networkFailures - 1) + Math.random() * 200, 1500);
       await new Promise(r => setTimeout(r, backoffMs));
     }
   }

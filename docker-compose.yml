@@ -16,6 +16,8 @@ services:
       - ALLOW_DIRECT_FALLBACK=false
       # Required: one or more explicit HTTP/HTTPS/SOCKS5 proxies.
       - PROXIES=${PROXIES:?Set PROXIES to a comma-separated proxy list}
+      # Extra proxies tried after an upstream quota response (0-20).
+      - PROXY_QUOTA_FAILOVERS=${PROXY_QUOTA_FAILOVERS:-10}
       - MAX_RETRIES=${MAX_RETRIES:-2}
       - REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS:-30000}
       - REQUEST_DEADLINE_MS=${REQUEST_DEADLINE_MS:-90000}

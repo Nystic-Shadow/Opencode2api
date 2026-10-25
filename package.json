@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server/index.js",
     "test": "node test/security.js && node test/reliability.js",
+    "check:proxies": "node scripts/check-proxies.js",
     "build": "npm --prefix client run build",
     "dev:client": "npm --prefix client run dev"
   },

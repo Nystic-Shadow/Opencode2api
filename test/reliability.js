@@ -50,17 +50,25 @@ async function main() {
   console.log('[Test 1] Proxy URL parsing');
   await test('parses HTTP proxy credentials and default ports', () => {
     const proxy = helpers.parseProxyUrl('http://user:p%40ss@proxy.example:8080');
-    assert.deepStrictEqual(proxy, {
-      type: 'http',
-      host: 'proxy.example',
-      port: 8080,
-      username: 'user',
-      password: 'p@ss',
-      url: 'http://proxy.example:8080',
-      id: 'http://proxy.example:8080'
-    });
+    assert.strictEqual(proxy.type, 'http');
+    assert.strictEqual(proxy.host, 'proxy.example');
+    assert.strictEqual(proxy.port, 8080);
+    assert.strictEqual(proxy.username, 'user');
+    assert.strictEqual(proxy.password, 'p@ss');
+    assert.strictEqual(proxy.url, 'http://proxy.example:8080');
+    assert.match(proxy.id, /^http:\/\/proxy\.example:8080#[0-9a-f]{10}$/);
     assert.strictEqual(helpers.parseProxyUrl('proxy.example:3128').port, 3128);
     assert.strictEqual(helpers.parseProxyUrl('proxy.example:3128').type, 'http');
+  });
+
+  await test('keeps credential-only variants as distinct routes', () => {
+    const first = helpers.parseProxyUrl('http://session-a:secret@gateway.example:7000');
+    const second = helpers.parseProxyUrl('http://session-b:secret@gateway.example:7000');
+    const repeat = helpers.parseProxyUrl('http://session-a:secret@gateway.example:7000');
+
+    assert.strictEqual(first.url, second.url);
+    assert.notStrictEqual(first.id, second.id);
+    assert.strictEqual(first.id, repeat.id);
   });
 
   await test('normalizes SOCKS5 aliases and HTTPS defaults', () => {
@@ -74,12 +82,26 @@ async function main() {
     assert.strictEqual(secure.port, 443);
   });
 
+  await test('keeps IPv6 hosts bare for sockets and bracketed in IDs', () => {
+    const socks = helpers.parseProxyUrl('socks5://[2001:db8::1]:1080');
+    assert.strictEqual(socks.host, '2001:db8::1');
+    assert.strictEqual(socks.port, 1080);
+    assert.strictEqual(socks.id, 'socks5://[2001:db8::1]:1080');
+
+    const loopback = helpers.parseProxyUrl('http://[::1]:8080');
+    assert.strictEqual(loopback.host, '::1');
+    assert.strictEqual(loopback.id, 'http://[::1]:8080');
+  });
+
   await test('rejects malformed or unsupported proxy URLs', () => {
     assert.strictEqual(helpers.parseProxyUrl(''), null);
     assert.strictEqual(helpers.parseProxyUrl(null), null);
     assert.strictEqual(helpers.parseProxyUrl(42), null);
     assert.strictEqual(helpers.parseProxyUrl('ftp://proxy.example:21'), null);
     assert.strictEqual(helpers.parseProxyUrl('http://'), null);
+    assert.strictEqual(helpers.parseProxyUrl('http://proxy.example:0'), null);
+    assert.strictEqual(helpers.parseProxyUrl('http://user:%E0%A4%A@proxy.example:8080'), null);
+    assert.strictEqual(helpers.parseProxyUrl(`socks5://${'u'.repeat(256)}:pass@proxy.example:1080`), null);
   });
 
   console.log('\n[Test 2] Proxy list parsing');
@@ -100,7 +122,28 @@ async function main() {
     });
   });
 
-  await test('falls back to standard proxy environment variables', async () => {
+  await test('retains credential-only variants and accepts newline strings', async () => {
+    await withConfig({
+      proxies: [
+        'http://session-a:pw@gateway.example:7000',
+        'http://session-b:pw@gateway.example:7000',
+        'http://session-a:pw@gateway.example:7000'
+      ]
+    }, () => {
+      assert.strictEqual(helpers.parseProxyList().length, 2);
+    });
+
+    await withConfig({
+      proxies: 'http://one.example:8080\nhttp://two.example:8080'
+    }, () => {
+      assert.deepStrictEqual(helpers.parseProxyList().map(p => p.url), [
+        'http://one.example:8080',
+        'http://two.example:8080'
+      ]);
+    });
+  });
+
+  await test('does not use ambient proxy environment variables', async () => {
     const saved = {
       HTTPS_PROXY: process.env.HTTPS_PROXY,
       HTTP_PROXY: process.env.HTTP_PROXY,
@@ -112,9 +155,7 @@ async function main() {
     try {
       await withConfig({ proxies: [] }, () => {
         process.env.HTTPS_PROXY = 'http://env-proxy.example:9000';
-        const list = helpers.parseProxyList();
-        assert.strictEqual(list.length, 1);
-        assert.strictEqual(list[0].id, 'http://env-proxy.example:9000');
+        assert.deepStrictEqual(helpers.parseProxyList(), []);
       });
     } finally {
       for (const [key, value] of Object.entries(saved)) {
@@ -231,7 +272,7 @@ async function main() {
   });
 
   console.log('\n[Test 7] Egress candidate selection');
-  await test('uses configured proxies in order and never direct when fallback is disabled', async () => {
+  await test('keeps configured proxies and never direct when fallback is disabled', async () => {
     await withConfig({
       proxies: ['http://user:pass@proxy-a.example:8080', 'socks5://proxy-b.example:1080'],
       egress_mode: 'auto',
@@ -239,10 +280,11 @@ async function main() {
     }, () => {
       egress.reload();
       const routes = egress.getCandidates();
-      assert.deepStrictEqual(routes.map(r => r.id), [
+      assert.deepStrictEqual(routes.map(r => r.url), [
         'http://proxy-a.example:8080',
         'socks5://proxy-b.example:1080'
       ]);
+      assert.strictEqual(new Set(routes.map(r => r.id)).size, 2);
       assert.ok(!routes.some(r => r.type === 'direct'));
     });
     egress.reload();
@@ -288,7 +330,115 @@ async function main() {
     egress.reload();
   });
 
-  console.log('\n[Test 8] Bounded admission queue');
+  console.log('\n[Test 8] Round-robin and quota failover');
+  await test('round-robins across routable proxy routes', async () => {
+    await withConfig({
+      proxies: ['http://rr-a.example:8080', 'http://rr-b.example:8080', 'http://rr-c.example:8080'],
+      egress_mode: 'proxy_only',
+      allow_direct_fallback: false
+    }, () => {
+      egress.reload();
+      egress.routeCursor = 0;
+      const order = [];
+      for (let i = 0; i < 6; i++) order.push(egress.selectRoute().id);
+      assert.deepStrictEqual(order, [
+        'http://rr-a.example:8080',
+        'http://rr-b.example:8080',
+        'http://rr-c.example:8080',
+        'http://rr-a.example:8080',
+        'http://rr-b.example:8080',
+        'http://rr-c.example:8080'
+      ]);
+    });
+    egress.reload();
+  });
+
+  await test('skips quota-cooling routes and reports the earliest retry', async () => {
+    await withConfig({
+      proxies: ['http://quota-a.example:8080', 'http://quota-b.example:8080'],
+      egress_mode: 'proxy_only',
+      allow_direct_fallback: false
+    }, () => {
+      egress.reload();
+      const routeA = { type: 'proxy', id: 'http://quota-a.example:8080' };
+      const routeB = { type: 'proxy', id: 'http://quota-b.example:8080' };
+      egress.recordFailure(routeA, 'quota', 30000);
+      egress.recordFailure(routeB, 'quota', 5000);
+
+      assert.strictEqual(egress.selectRoute(), null);
+      const earliest = egress.getEarliestQuotaRetryAfter();
+      assert.ok(earliest > 3000 && earliest <= 5000, `unexpected earliest retry: ${earliest}`);
+
+      egress.recordSuccess(routeA);
+      assert.deepStrictEqual(egress.getRoutableRoutes().map(r => r.id), [routeA.id]);
+      egress.recordSuccess(routeB);
+    });
+    egress.reload();
+  });
+
+  await test('uses direct only when no proxy route is routable', async () => {
+    await withConfig({
+      proxies: ['http://direct-pref.example:8080'],
+      egress_mode: 'auto',
+      allow_direct_fallback: true
+    }, () => {
+      egress.reload();
+      egress.routeCursor = 0;
+      assert.deepStrictEqual(egress.getRoutableRoutes().map(r => r.id), ['http://direct-pref.example:8080']);
+
+      egress.recordFailure({ type: 'proxy', id: 'http://direct-pref.example:8080' }, 'quota', 30000);
+      assert.deepStrictEqual(egress.getRoutableRoutes().map(r => r.id), ['direct']);
+    });
+    egress.reload();
+  });
+
+  await test('prefers verified proxies but fails over to unchecked ones', async () => {
+    await withConfig({
+      proxies: ['http://verified.example:8080', 'http://unchecked.example:8080'],
+      egress_mode: 'proxy_only',
+      allow_direct_fallback: false
+    }, () => {
+      egress.reload();
+      egress.proxyChecks.set('http://verified.example:8080', {
+        healthy: true, passes: 5, checks: 5, latency: 10, lastCheck: Date.now(), error: ''
+      });
+      assert.deepStrictEqual(egress.getRoutableRoutes().map(r => r.id), ['http://verified.example:8080']);
+
+      const attempted = new Set(['http://verified.example:8080']);
+      const next = egress.getNextRoutableRoute(attempted);
+      assert.ok(next, 'expected an unchecked proxy fallback');
+      assert.strictEqual(next.id, 'http://unchecked.example:8080');
+    });
+    egress.reload();
+  });
+
+  await test('health-check failures quarantine and successes verify', async () => {
+    const proxy = { type: 'http', host: 'health.example', port: 8080, id: 'http://health.example:8080' };
+    const route = { type: 'proxy', proxyType: 'http', id: proxy.id };
+    const originalProbe = egress.probeProxy;
+    try {
+      egress.probeProxy = async () => false;
+      await egress.checkProxy(proxy);
+      const failed = egress.proxyChecks.get(proxy.id);
+      assert.strictEqual(failed.healthy, false);
+      assert.strictEqual(failed.passes, 0);
+      assert.strictEqual(egress.isAvailable(route), false);
+      assert.match(egress._health(route).lastError, /health check failed/i);
+
+      egress.probeProxy = async () => true;
+      await egress.checkProxy(proxy);
+      const passed = egress.proxyChecks.get(proxy.id);
+      assert.strictEqual(passed.healthy, true);
+      assert.strictEqual(passed.passes, 5);
+      assert.strictEqual(egress.isAvailable(route), true);
+    } finally {
+      egress.probeProxy = originalProbe;
+      egress.resetRoute(route, 'test');
+      egress.proxyChecks.delete(proxy.id);
+    }
+  });
+
+  console.log('\n[Test 9] Bounded admission queue');
   await test('enforces global concurrency and makes release idempotent', async () => {
     await withConfig({ queue_max_concurrent: 1, queue_max_per_key: 1, queue_max_size: 1, queue_wait_ms: 30 }, async () => {
       const queue = new requestQueue.RequestQueue();

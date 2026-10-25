@@ -80,7 +80,12 @@ function proxyIdentity(raw) {
   try {
     const value = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
     const url = new URL(value);
-    return `${url.protocol}//${url.hostname}:${url.port || (url.protocol === 'https:' ? 443 : url.protocol === 'socks5:' ? 1080 : 80)}`;
+    let protocol = url.protocol.replace(':', '').toLowerCase();
+    if (protocol === 'socks5h' || protocol === 'socks') protocol = 'socks5';
+    const hostname = url.hostname.replace(/^\[|\]$/g, '');
+    const displayHost = hostname.includes(':') ? `[${hostname}]` : hostname;
+    const port = url.port || (protocol === 'https' ? '443' : protocol === 'socks5' ? '1080' : '80');
+    return `${protocol}://${displayHost}:${port}`;
   } catch (e) {
     return '';
   }
@@ -95,15 +100,25 @@ function maskProxy(raw) {
     url.password = '***';
     return url.toString().replace(/\/$/, '');
   } catch (e) {
-    return raw;
+    // Never return a malformed value that might contain credentials. The
+    // settings update handler rejects this marker until the entry is fixed.
+    if (typeof raw === 'string' && raw.includes('@')) return '[invalid proxy]';
+    return typeof raw === 'string' ? raw : '';
   }
 }
 
-function restoreMaskedProxy(masked, existing) {
-  if (typeof masked !== 'string' || !masked.includes('***')) return masked;
-  const identity = proxyIdentity(masked);
-  if (!identity) return masked;
-  return existing.find(entry => proxyIdentity(entry) === identity) || masked;
+// Restore masked entries by endpoint in order, consuming each existing raw
+// entry once. This preserves credential-only variants that share host:port.
+function restoreMaskedProxies(maskedList, existing) {
+  const remaining = Array.isArray(existing) ? [...existing] : [];
+  return (Array.isArray(maskedList) ? maskedList : []).map(masked => {
+    if (typeof masked !== 'string' || !masked.includes('***')) return masked;
+    const identity = proxyIdentity(masked);
+    if (!identity) return masked;
+    const index = remaining.findIndex(entry => proxyIdentity(entry) === identity);
+    if (index === -1) return masked;
+    return remaining.splice(index, 1)[0];
+  });
 }
 
 // Bounded JSON body parser with 1MB ceiling preventing Denial of Service (H1)
@@ -324,6 +339,10 @@ async function handleAdminRoute(req, res, pathname) {
       const parsed = parseInt(body.max_retries, 10);
       if (Number.isFinite(parsed)) updates.max_retries = Math.min(Math.max(0, parsed), 3);
     }
+    if (body.proxy_quota_failovers !== undefined) {
+      const parsed = parseInt(body.proxy_quota_failovers, 10);
+      if (Number.isFinite(parsed)) updates.proxy_quota_failovers = Math.min(Math.max(0, parsed), 20);
+    }
     if (body.global_rpm_limit !== undefined) updates.global_rpm_limit = parseInt(body.global_rpm_limit, 10) || 0;
     if (body.global_tpm_limit !== undefined) updates.global_tpm_limit = parseInt(body.global_tpm_limit, 10) || 0;
     if (body.upstream_zen_key !== undefined) {
@@ -347,7 +366,22 @@ async function handleAdminRoute(req, res, pathname) {
       } else if (typeof body.proxies === 'string') {
         incoming = body.proxies.split(/[\n,]/).map(p => p.trim()).filter(Boolean);
       }
-      updates.proxies = incoming.map(entry => restoreMaskedProxy(entry, existingProxies));
+      const restored = restoreMaskedProxies(incoming, existingProxies);
+      if (restored.length > 100) {
+        return sendJson(res, 400, { error: 'A maximum of 100 proxies is supported.' });
+      }
+      if (restored.some(entry => typeof entry === 'string' && entry.includes('***'))) {
+        return sendJson(res, 400, {
+          error: 'Proxy credentials are masked. Re-enter the full proxy URL for new or changed entries, or leave unchanged entries exactly as shown.'
+        });
+      }
+      const invalid = restored.find(entry => !egress.parseProxyUrl(entry));
+      if (invalid) {
+        return sendJson(res, 400, {
+          error: `Invalid proxy URL: ${maskProxy(invalid)}. Use http://, https://, or socks5:// with an optional user:pass.`
+        });
+      }
+      updates.proxies = restored;
     }
 
     config.update(updates);
@@ -407,5 +441,10 @@ async function handleAdminRoute(req, res, pathname) {
 }
 
 module.exports = {
-  handleAdminRoute
+  handleAdminRoute,
+  _test: {
+    maskProxy,
+    proxyIdentity,
+    restoreMaskedProxies
+  }
 };

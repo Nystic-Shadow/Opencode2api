@@ -2,6 +2,7 @@ const http = require('http');
 const https = require('https');
 const net = require('net');
 const tls = require('tls');
+const crypto = require('crypto');
 const config = require('./config');
 
 const DEFAULT_PORTS = {
@@ -9,6 +10,21 @@ const DEFAULT_PORTS = {
   https: 443,
   socks5: 1080
 };
+
+// Proxy providers commonly expose one host:port and select the egress IP from
+// the username. Two entries can therefore be different routes while sharing an
+// endpoint. The tag keeps them distinct without exposing the credentials in
+// logs, status responses, or session keys.
+const ROUTE_TAG_SALT = crypto.randomBytes(16);
+
+function credentialTag(username, password) {
+  if (!username && !password) return '';
+  return crypto
+    .createHmac('sha256', ROUTE_TAG_SALT)
+    .update(`${username}\u0000${password}`)
+    .digest('hex')
+    .slice(0, 10);
+}
 
 function parseProxyUrl(raw) {
   if (!raw || typeof raw !== 'string') return null;
@@ -27,31 +43,53 @@ function parseProxyUrl(raw) {
   if (type === 'socks5h' || type === 'socks') type = 'socks5';
   if (!['http', 'https', 'socks5'].includes(type)) return null;
 
-  const port = parseInt(url.port, 10) || DEFAULT_PORTS[type];
-  if (!url.hostname || !port) return null;
+  let username = '';
+  let password = '';
+  try {
+    username = url.username ? decodeURIComponent(url.username) : '';
+    password = url.password ? decodeURIComponent(url.password) : '';
+  } catch (e) {
+    // A malformed percent escape must be rejected, not crash config reload.
+    return null;
+  }
+  if (type === 'socks5') {
+    // SOCKS5 username/password auth encodes both lengths in one byte.
+    if (Buffer.byteLength(username) > 255 || Buffer.byteLength(password) > 255) return null;
+  }
+
+  const port = url.port ? parseInt(url.port, 10) : DEFAULT_PORTS[type];
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  // URL.hostname keeps IPv6 brackets; net.connect/tls.connect need the bare
+  // address, while display IDs must keep the brackets to remain valid URLs.
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  if (!hostname) return null;
+  const displayHost = hostname.includes(':') ? `[${hostname}]` : hostname;
+  const tag = credentialTag(username, password);
+  const endpoint = `${type}://${displayHost}:${port}`;
 
   return {
     type,
-    host: url.hostname,
+    host: hostname,
     port,
-    username: url.username ? decodeURIComponent(url.username) : '',
-    password: url.password ? decodeURIComponent(url.password) : '',
-    url: `${type}://${url.hostname}:${port}`,
-    id: `${type}://${url.hostname}:${port}`
+    username,
+    password,
+    url: endpoint,
+    // The fragment is an opaque route key, never sent on the wire.
+    id: tag ? `${endpoint}#${tag}` : endpoint
   };
 }
 
 function parseProxyList() {
   const configured = config.get('proxies');
-  const values = Array.isArray(configured) ? [...configured] : [];
-  if (values.length === 0) {
-    for (const name of ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY']) {
-      if (process.env[name]) {
-        values.push(process.env[name]);
-        break;
-      }
-    }
+  let values = [];
+  if (Array.isArray(configured)) {
+    values = [...configured];
+  } else if (typeof configured === 'string') {
+    values = configured.split(/[\n,]/).map(value => value.trim()).filter(Boolean);
   }
+  // Deliberately no HTTPS_PROXY/HTTP_PROXY/ALL_PROXY fallback. Proxy-only
+  // deployments must use the explicit PROXIES list; an ambient variable can
+  // silently route inference somewhere the operator did not choose.
 
   const seen = new Set();
   const result = [];
@@ -140,11 +178,13 @@ class EgressManager {
     this.proxyFingerprint = JSON.stringify(this.proxies);
     this.routeResetListeners = [];
     this.proxyChecks = new Map();
+    this.probeErrors = new Map();
     this.proxyChecksRunning = false;
     this.proxyChecksPromise = null;
     this.proxyChecksEnabled = false;
     this.proxyCheckTimer = null;
     this.maxProxyPool = 100;
+    this.routeCursor = 0;
     this.lastReload = Date.now();
 
     config.onChange(() => {
@@ -179,6 +219,8 @@ class EgressManager {
     this.proxyIds = nextIds;
     this.proxyFingerprint = nextFingerprint;
     this.proxyChecks.clear();
+    this.probeErrors.clear();
+    this.routeCursor = 0;
 
     for (const id of new Set([...oldIds, ...nextIds])) {
       this.health.delete(id);
@@ -192,12 +234,14 @@ class EgressManager {
     }
     this.proxyAgents.clear();
     this.lastReload = Date.now();
-    if (this.proxyChecksEnabled) this.runProxyChecks();
+    if (this.proxyChecksEnabled) {
+      this.runProxyChecks().catch(err => console.warn('[Egress] Proxy health checks failed:', err.message));
+    }
   }
 
   startHealthChecks() {
     this.proxyChecksEnabled = true;
-    this.runProxyChecks();
+    this.runProxyChecks().catch(err => console.warn('[Egress] Proxy health checks failed:', err.message));
     if (!this.proxyCheckTimer) {
       this.proxyCheckTimer = setInterval(() => this.runProxyChecks(), 5 * 60 * 1000);
       if (typeof this.proxyCheckTimer.unref === 'function') this.proxyCheckTimer.unref();
@@ -258,16 +302,18 @@ class EgressManager {
     const healthy = passes === checks;
     const latency = Math.round((Date.now() - started) / checks);
     const health = this._health(route);
+    const probeError = this.probeErrors.get(route.id) || '';
 
     if (healthy) {
       health.failures = 0;
       health.openUntil = 0;
       health.lastError = '';
       health.lastSuccess = Date.now();
+      this.probeErrors.delete(route.id);
     } else {
       health.failures = (health.failures || 0) + 1;
       health.openUntil = Date.now() + (5 * 60 * 1000);
-      health.lastError = `Proxy health check failed (${passes}/${checks})`;
+      health.lastError = `Proxy health check failed (${passes}/${checks})${probeError ? `: ${probeError}` : ''}`;
       health.lastFailure = Date.now();
     }
 
@@ -281,6 +327,24 @@ class EgressManager {
     });
   }
 
+  _probeTarget() {
+    const raw = config.get('upstream_inference_url') || 'https://opencode.ai';
+    try {
+      const url = new URL(raw);
+      if (url.protocol !== 'https:') {
+        return { host: 'opencode.ai', port: 443, servername: 'opencode.ai' };
+      }
+      const host = url.hostname.replace(/^\[|\]$/g, '');
+      return {
+        host,
+        port: parseInt(url.port, 10) || 443,
+        servername: host
+      };
+    } catch (e) {
+      return { host: 'opencode.ai', port: 443, servername: 'opencode.ai' };
+    }
+  }
+
   probeProxy(route, timeoutMs = 5000) {
     return new Promise((resolve) => {
       let settled = false;
@@ -291,6 +355,7 @@ class EgressManager {
         if (socket) {
           try { socket.destroy(); } catch (e) {}
         }
+        this.probeErrors.set(route.id, 'probe timeout');
         resolve(false);
       }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
@@ -309,6 +374,7 @@ class EgressManager {
           if (stream) {
             try { stream.destroy(); } catch (e) {}
           }
+          this.probeErrors.set(route.id, (err && err.message) || 'probe failed');
           resolve(false);
           return;
         }
@@ -316,11 +382,7 @@ class EgressManager {
         resolve(true);
       };
 
-      this._connectViaProxy(route, {
-        host: 'opencode.ai',
-        port: 443,
-        servername: 'opencode.ai'
-      }, done);
+      this._connectViaProxy(route, this._probeTarget(), done);
     });
   }
 
@@ -329,11 +391,14 @@ class EgressManager {
       const route = { ...proxy, type: 'proxy', proxyType: proxy.type, id: proxy.id };
       const health = this._health(route);
       const check = this.proxyChecks.get(proxy.id);
+      const available = this.isAvailable(route);
+      const quotaRetryAfterMs = this.getQuotaRetryAfter(route);
       return {
         id: proxy.id,
-        endpoint: `${proxy.type}://${proxy.host}:${proxy.port}`,
-        available: this.isAvailable(route),
-        quotaRetryAfterMs: this.getQuotaRetryAfter(route),
+        endpoint: proxy.url,
+        available,
+        routable: available && quotaRetryAfterMs === 0,
+        quotaRetryAfterMs,
         failures: health.failures || 0,
         openUntil: health.openUntil || 0,
         lastError: health.lastError || '',
@@ -345,15 +410,17 @@ class EgressManager {
       };
     });
 
-    const healthy = entries.filter(entry => entry.available && entry.healthy === true);
-    const fastest = [...healthy].sort((a, b) => (a.latency || Infinity) - (b.latency || Infinity))[0] || null;
+    const verified = entries.filter(entry => entry.available && entry.healthy === true);
+    const routable = verified.filter(entry => entry.routable);
+    const fastest = [...routable].sort((a, b) => (a.latency || Infinity) - (b.latency || Infinity))[0] || null;
     return {
       configuredCount: this.proxies.length,
       maxPool: this.maxProxyPool,
-      verifiedCount: healthy.length,
+      verifiedCount: verified.length,
+      routableCount: routable.length,
       isScanning: this.proxyChecksRunning,
       fastestProxy: fastest,
-      topProxies: healthy.slice(0, 10).map(entry => ({
+      topProxies: routable.slice(0, 10).map(entry => ({
         endpoint: entry.endpoint,
         latency: entry.latency,
         passes: entry.passes,
@@ -395,8 +462,8 @@ class EgressManager {
    *
    * Quota is not an infrastructure failure: the route is still usable once the
    * upstream window resets, so it stays in the candidate list (and readiness
-   * stays green). Requests fail fast with 429 + Retry-After instead of being
-   * silently rotated onto another IP.
+   * stays green). Callers may skip cooling routes and fail over to another
+   * proxy; the route returns to normal rotation when the cooldown expires.
    */
   getQuotaRetryAfter(route) {
     if (!route) return 0;
@@ -405,11 +472,25 @@ class EgressManager {
     return remaining > 0 ? remaining : 0;
   }
 
+  /**
+   * Earliest time any currently available route leaves provider-quota
+   * cooldown. Used only when every routable proxy is exhausted.
+   */
+  getEarliestQuotaRetryAfter(candidates = null) {
+    const routes = Array.isArray(candidates) ? candidates : this.getCandidates();
+    let earliest = 0;
+    for (const route of routes) {
+      const remaining = this.getQuotaRetryAfter(route);
+      if (remaining > 0 && (earliest === 0 || remaining < earliest)) earliest = remaining;
+    }
+    return earliest;
+  }
+
   _allowDirect() {
     return config.get('allow_direct_fallback') === true;
   }
 
-  getCandidates() {
+  getCandidates({ includeQuota = true } = {}) {
     const mode = String(config.get('egress_mode') || 'proxy_only').toLowerCase();
     const direct = { type: 'direct', id: 'direct' };
     const proxyRoutes = this.proxies.map(proxy => ({
@@ -430,11 +511,47 @@ class EgressManager {
       if (this._allowDirect()) routes.push(direct);
     }
 
-    return routes.filter(route => this.isAvailable(route));
+    return routes.filter(route => {
+      if (!this.isAvailable(route)) return false;
+      if (!includeQuota && this.getQuotaRetryAfter(route) > 0) return false;
+      return true;
+    });
   }
 
-  selectRoute() {
-    return this.getCandidates()[0] || null;
+  /**
+   * Routes eligible for normal traffic. Verified proxies come first. Direct is
+   * only used when no proxy route is available at all.
+   */
+  getRoutableRoutes({ includeUnverified = false } = {}) {
+    const candidates = this.getCandidates({ includeQuota: false });
+    const proxies = candidates.filter(route => route.type !== 'direct');
+    const pool = proxies.length > 0 ? proxies : candidates;
+    const verified = pool.filter(route => this.proxyChecks.get(route.id)?.healthy === true);
+    if (verified.length > 0) return includeUnverified ? pool : verified;
+    return pool;
+  }
+
+  /**
+   * Round-robin across routable proxies so one endpoint does not absorb every
+   * request (and every quota hit) while the rest of the pool sits idle.
+   */
+  selectRoute(routes = null) {
+    const pool = Array.isArray(routes) ? routes : this.getRoutableRoutes();
+    if (pool.length === 0) return null;
+    const index = this.routeCursor % pool.length;
+    this.routeCursor = (index + 1) % pool.length;
+    return pool[index];
+  }
+
+  getNextRoutableRoute(attempted = null) {
+    const excluded = attempted instanceof Set ? attempted : new Set(attempted || []);
+    const verified = this.getRoutableRoutes().find(route => !excluded.has(route.id));
+    if (verified) return verified;
+    // Verified proxies may all have been attempted (for example after a quota
+    // cooldown). Fall back to unchecked-but-available proxies rather than
+    // returning a 429 while part of the pool has never been tried.
+    return this.getRoutableRoutes({ includeUnverified: true })
+      .find(route => !excluded.has(route.id)) || null;
   }
 
   nextRoute(current, candidates = null) {
@@ -492,8 +609,11 @@ class EgressManager {
 
     const secureProxy = route.proxyType === 'https';
     const requestModule = secureProxy ? https : http;
+    // CONNECT authority form requires brackets around IPv6 literals.
+    const connectHost = destHost.includes(':') ? `[${destHost}]` : destHost;
+    const authority = `${connectHost}:${destPort}`;
     const headers = {
-      Host: `${destHost}:${destPort}`,
+      Host: authority,
       'User-Agent': 'OpenCode2API/3'
     };
     if (route.username) {
@@ -506,7 +626,7 @@ class EgressManager {
         host: route.host,
         port: route.port,
         method: 'CONNECT',
-        path: `${destHost}:${destPort}`,
+        path: authority,
         headers,
         timeout: 10000,
         ...(secureProxy ? { servername: route.host, rejectUnauthorized: true } : {})
@@ -644,6 +764,7 @@ class EgressManager {
 
     if (kind === 'quota') {
       health.retryAfterUntil = Math.max(health.retryAfterUntil, now + Math.max(1000, retryAfterMs || 0));
+      health.lastError = 'upstream quota';
       return;
     }
 
@@ -672,10 +793,12 @@ class EgressManager {
     const routes = this.getCandidates().map(route => ({
       id: route.id,
       type: route.type,
-      available: this.isAvailable(route)
+      available: this.isAvailable(route),
+      routable: this.isAvailable(route) && this.getQuotaRetryAfter(route) === 0,
+      quotaRetryAfterMs: this.getQuotaRetryAfter(route)
     }));
     return {
-      mode: config.get('egress_mode') || 'auto',
+      mode: config.get('egress_mode') || 'proxy_only',
       proxies: this.proxies.map(proxy => ({ id: proxy.id, type: proxy.type })),
       allowDirect: this._allowDirect(),
       routes,

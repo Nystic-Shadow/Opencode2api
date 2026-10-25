@@ -4,15 +4,16 @@ All notable changes to this project are documented in this file.
 
 ---
 
-## [Unreleased] - 2026-10-25 — Proxy-Only Egress, Bounded Admission, and Honest Quotas
+## [Unreleased] - 2026-10-26 — Proxy-Only Egress, Round-Robin Quota Failover, and Bounded Admission
 
-> This release supersedes the quota-rotation and WARP-tunnel design described in the entries below. The gateway no longer rotates egress IPs to evade upstream limits, and WARP support has been removed entirely.
+> This release supersedes the quota-rotation and WARP-tunnel design described in the entries below. WARP support has been removed entirely. Egress is explicit HTTP/HTTPS/SOCKS5 proxies only.
 
 ### Behavior changes
 
 - **WARP removed**: server modules, admin endpoints, configuration, dashboard controls, install scripts, and container wiring are gone. Egress is explicit HTTP/HTTPS/SOCKS5 proxies only.
-- **No quota evasion**: automatic identity rotation on `401`/`429` is removed. Upstream quota is returned as `429` with the real `Retry-After`; the route stays in `/readyz` so a temporary quota window does not mark the deployment unhealthy.
-- **No public proxy scraping in the request path**: public proxy lists are disabled by default and never used for egress. Only explicit `PROXIES` are used.
+- **Best-effort quota failover**: requests rotate round-robin across healthy proxies. An upstream `429` (or quota-flavored `403`) cools that route and retries the next routable proxy, bounded by `PROXY_QUOTA_FAILOVERS` (default `10`, max `20`). The gateway returns `429` with the earliest real `Retry-After` only when the pool or budget is exhausted. Proxies change the egress IP; they cannot remove quota that is tied to the account or key.
+- **No public proxy scraping in the request path**: public proxy lists are disabled by default and never used for egress. Only explicit `PROXIES` are used; ambient `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` variables are ignored so proxy-only mode cannot be redirected by the hosting environment.
+- **Credential-only variants are distinct routes**: two proxy entries may share a host and port when their credentials select different egress IPs. They receive separate health, quota, session, and agent state.
 - **Anonymous by default in Compose**: `EGRESS_MODE=proxy_only` and `ALLOW_DIRECT_FALLBACK=false`. The gateway returns `503 no_egress_route` instead of silently leaking the host IP.
 - **Required dashboard password**: `docker-compose.yml` requires `DASHBOARD_PASS`. Known defaults such as `admin123` and passwords shorter than 12 characters are ignored; a random password is generated and written to `data/admin-password.txt`.
 - **Explicit environment wins**: shell and container variables take precedence over `.env` values.
@@ -20,8 +21,10 @@ All notable changes to this project are documented in this file.
 
 ### Reliability
 
-- Egress manager with deterministic ordering (**user proxies → direct only if allowed**), route health tracking, circuit breaking on network/`5xx` failures, and provider-quota cooldown.
-- Explicit proxy pool capped at 100, with five consecutive health probes per proxy and a 5-second timeout per probe. Failed proxies are quarantined for five minutes.
+- Egress manager with round-robin route selection (**verified proxies first; direct only if allowed and no proxy is routable**), route health tracking, circuit breaking on network/`5xx` failures, and quota cooldowns that keep a route in `/readyz`.
+- Quota-aware candidate selection: cooling routes are skipped, unchecked-but-available proxies remain available for failover, and `PROXY_QUOTA_FAILOVERS` is tracked separately from the network retry budget.
+- Explicit proxy pool capped at 100, with five consecutive health probes per proxy and a 5-second timeout per probe. Failed proxies are quarantined for five minutes. Probes target the configured upstream host.
+- IPv6 proxy hosts are parsed correctly (`net`/`tls` receive a bare address; display IDs keep brackets).
 - Bounded global and per-key admission queue with zero-value support (`QUEUE_MAX_SIZE=0`, `QUEUE_WAIT_MS=0` fail fast).
 - Per-attempt timeout, overall request deadline, retries capped at `3` (default `2`), and fail-fast `429 queue_full` when saturated.
 - Admission slots are held for the full stream, not released when headers arrive. Client aborts destroy the in-flight upstream request; release is idempotent.
@@ -30,7 +33,9 @@ All notable changes to this project are documented in this file.
 
 ### Testing
 
-- `npm test` runs the security suite plus the reliability suite covering proxy parsing, SOCKS5 frames, retry classification, quota cooldown, route ordering, and queue limits/timeouts.
+- `npm test` runs the security suite plus the reliability suite covering proxy parsing (including IPv6), SOCKS5 frames, retry classification, quota cooldown, round-robin selection, quota failover, direct-fallback preference, health-check quarantine, and queue limits/timeouts.
+- `npm run check:proxies` runs the real five-probe, 5-second verification and exits non-zero when no proxy is healthy.
+- Verified round-robin quota failover against a local mock 429 upstream through both an HTTP CONNECT proxy and a SOCKS5 proxy: two upstream attempts, `429` with `Retry-After`, then an immediate `429` with no extra upstream hits while both routes were cooling, then fresh attempts after the cooldown.
 - Verified OpenAI non-stream, OpenAI stream, Anthropic non-stream, and Anthropic stream against a local mock upstream.
 - Verified `/healthz` liveness, `/readyz` gating, legacy-key rejection, and `503 no_egress_route` with `Retry-After`.
 

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   gateway:
     image: ghcr.io/nystic-shadow/opencode2api:latest
@@ -9,15 +7,39 @@ services:
     ports:
       - "${PORT:-8080}:8080"
     environment:
-      - PORT=${PORT:-8080}
+      - PORT=8080
       - DASHBOARD_USER=${DASHBOARD_USER:-admin}
-      - DASHBOARD_PASS=${DASHBOARD_PASS:-admin123}
-      - WARP_HOST=${WARP_HOST:-warp}
-      - WARP_PORT=${WARP_PORT:-1080}
+      # Required: set DASHBOARD_PASS in .env or your shell before starting.
+      - DASHBOARD_PASS=${DASHBOARD_PASS:?Set DASHBOARD_PASS to a strong password}
+      # WARP runs in its own container. The gateway only talks to its SOCKS5 port.
+      - WARP_ENGINE=sidecar
+      - WARP_MODE=always
+      - WARP_HOST=warp
+      - WARP_PORT=1080
+      - WARP_AUTO_ROTATE_MINUTES=0
+      - ALLOW_DIRECT_FALLBACK=false
+      - EGRESS_MODE=auto
+      # Optional user-owned proxies, comma separated:
+      # PROXIES=socks5://user:pass@host:1080,http://host:8080
+      - PROXIES=${PROXIES:-}
+      - MAX_RETRIES=${MAX_RETRIES:-2}
+      - REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS:-30000}
+      - REQUEST_DEADLINE_MS=${REQUEST_DEADLINE_MS:-90000}
+      - QUEUE_MAX_CONCURRENT=${QUEUE_MAX_CONCURRENT:-8}
+      - QUEUE_MAX_PER_KEY=${QUEUE_MAX_PER_KEY:-4}
+      - QUEUE_MAX_SIZE=${QUEUE_MAX_SIZE:-100}
+      - QUEUE_WAIT_MS=${QUEUE_WAIT_MS:-15000}
+      - PROXY_SCRAPER_ENABLED=false
     volumes:
       - ./data:/app/data
     depends_on:
       - warp
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
 
   warp:
     image: caomingjun/warp:latest
@@ -27,6 +49,10 @@ services:
       - WARP_SLEEP=2
     cap_add:
       - NET_ADMIN
+    # Recent runc versions drop the TUN device rule; add it back so WARP can
+    # create its tunnel. See the caomingjun/warp README.
+    device_cgroup_rules:
+      - 'c 10:200 rwm'
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=0
       - net.ipv4.conf.all.src_valid_mark=1

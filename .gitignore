@@ -17,6 +17,8 @@ Thumbs.db
 
 # Local database state (fresh per environment)
 data/*.json
+data/admin-password.txt
+data/*.conf
 !data/.gitkeep
 
 # Scratch test files

@@ -1,6 +1,5 @@
 const http = require('http');
 const https = require('https');
-const tls = require('tls');
 const crypto = require('crypto');
 const config = require('./config');
 const identity = require('./identity');
@@ -9,77 +8,79 @@ const discovery = require('./discovery');
 const keys = require('./keys');
 const metrics = require('./metrics');
 const warp = require('./warp');
-const proxyScraper = require('./proxyScraper');
+const egress = require('./egress');
+const requestQueue = require('./requestQueue');
 
-// High-performance keepAlive connection agent: keeps TLS sockets hot, eliminates handshake lag
-const upstreamAgent = new https.Agent({
-  keepAlive: true,
-  maxSockets: 128,
-  maxFreeSockets: 32,
-  timeout: 60000,
-  keepAliveMsecs: 30000
-});
+function routeLabel(route) {
+  if (!route) return 'no egress route';
+  if (route.type === 'warp') return `WARP:${route.port}`;
+  if (route.type === 'proxy') return `proxy:${route.id}`;
+  return 'direct';
+}
 
-let proxyIndex = 0;
+function configInt(key, fallback, min = 0) {
+  const parsed = parseInt(config.get(key), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, parsed);
+}
 
-// ═══════════════════════════════════════════════════════════════════════════
-// LOCAL RATE LIMITER — Prevents burning WARP ports by throttling outbound
-// requests to match OpenCode's free tier window. Implements a sliding-window
-// token bucket per egress route (WARP port / direct).
-// ═══════════════════════════════════════════════════════════════════════════
-const localRateLimiter = {
-  // Sliding window: track request timestamps per route
-  windows: new Map(), // routeKey -> [timestamps]
-  burnedUntil: new Map(), // routeKey -> timestamp (H3)
-  maxPerMinute: 60,
-  windowMs: 60 * 1000,
-  queue: [],
-  processing: false,
-  concurrentInFlight: 0,
-  maxConcurrent: 16,
+const DEFAULT_UPSTREAM_URL = 'https://opencode.ai/inference/v1/chat/completions';
 
-  canProceed(routeKey) {
-    const now = Date.now();
-    const burned = this.burnedUntil.get(routeKey);
-    if (burned && burned > now) return false;
-
-    if (!this.windows.has(routeKey)) this.windows.set(routeKey, []);
-    const win = this.windows.get(routeKey);
-    while (win.length > 0 && (now - win[0]) > this.windowMs) win.shift();
-    return win.length < this.maxPerMinute;
-  },
-
-  record(routeKey) {
-    const now = Date.now();
-    if (!this.windows.has(routeKey)) this.windows.set(routeKey, []);
-    this.windows.get(routeKey).push(now);
-  },
-
-  waitTime(routeKey) {
-    const now = Date.now();
-    const burned = this.burnedUntil.get(routeKey);
-    if (burned && burned > now) {
-      return burned - now;
-    }
-    if (!this.windows.has(routeKey)) return 0;
-    const win = this.windows.get(routeKey);
-    while (win.length > 0 && (now - win[0]) > this.windowMs) win.shift();
-    if (win.length >= this.maxPerMinute) {
-      return Math.max(0, (win[0] + this.windowMs) - now);
-    }
-    return 0;
-  },
-
-  markBurned(routeKey, durationMs = 30000) {
-    const now = Date.now();
-    this.burnedUntil.set(routeKey, now + durationMs);
+// Resolve the upstream endpoint once per attempt. The default is the real
+// OpenCode Zen inference URL; overriding it is intended for local test
+// upstreams and self-hosted compatible mirrors.
+function upstreamTarget() {
+  const raw = config.get('upstream_inference_url') || DEFAULT_UPSTREAM_URL;
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (e) {
+    parsed = new URL(DEFAULT_UPSTREAM_URL);
   }
-};
+  const isHttps = parsed.protocol === 'https:';
+  return {
+    protocol: parsed.protocol,
+    transport: isHttps ? https : http,
+    hostname: parsed.hostname,
+    port: parseInt(parsed.port, 10) || (isHttps ? 443 : 80),
+    path: `${parsed.pathname || '/'}${parsed.search || ''}`
+  };
+}
+
+function sendJsonError(res, statusCode, type, message, headers = {}) {
+  if (res.headersSent) {
+    try { res.end(); } catch (e) {}
+    return;
+  }
+  res.writeHead(statusCode, { 'Content-Type': 'application/json', ...headers });
+  res.end(JSON.stringify({
+    error: {
+      message,
+      type,
+      code: statusCode
+    }
+  }));
+}
+
+function sendAnthropicError(res, statusCode, type, message, headers = {}) {
+  if (res.headersSent) {
+    try { res.end(); } catch (e) {}
+    return;
+  }
+  res.writeHead(statusCode, { 'Content-Type': 'application/json', ...headers });
+  res.end(JSON.stringify({
+    type: 'error',
+    error: {
+      type,
+      message
+    }
+  }));
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SESSION PERSISTENCE — Each WARP port keeps a stable session ID to leverage
-// OpenCode's session affinity and prompt caching. Only rotated when the port
-// itself is rotated. Direct route gets its own stable session.
+// SESSION PERSISTENCE — Each egress route keeps a stable session ID to leverage
+// OpenCode's session affinity and prompt caching. Only rotated on quota/route
+// failure. Direct route gets its own stable session.
 // ═══════════════════════════════════════════════════════════════════════════
 const persistentSessions = {
   sessions: new Map(), // routeKey -> { sessionId, projectId, createdAt }
@@ -174,90 +175,8 @@ const routeHealth = {
 };
 
 /**
- * Returns either a Cloudflare WARP SOCKS5 agent, scraped proxy agent, proxy tunnel agent, or direct keepAlive agent.
+ * Clean & normalize chat completion request parameters for upstream compatibility.
  */
-function getUpstreamAgent(attempt = 1, routeTypeOrUseWarp = 'warp', targetParam = null) {
-  let routeType = routeTypeOrUseWarp;
-  if (typeof routeTypeOrUseWarp === 'boolean') {
-    routeType = routeTypeOrUseWarp ? 'warp' : 'direct';
-  }
-
-  if (routeType === 'warp' && warp.isReady()) {
-    const port = typeof targetParam === 'number' ? targetParam : warp.getBestPort();
-    return warp.getWarpAgent(port, config.get('warp_host'));
-  }
-
-  if (routeType === 'scraped') {
-    const proxyObj = (targetParam && typeof targetParam === 'object') ? targetParam : proxyScraper.getBestProxy();
-    if (proxyObj) {
-      const agent = proxyScraper.createProxyAgent(proxyObj);
-      if (agent) return agent;
-    }
-  }
-
-  const envProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-  const configuredProxies = config.get('proxies') || [];
-  const proxyList = Array.isArray(configuredProxies) && configuredProxies.length > 0
-    ? configuredProxies
-    : (envProxy ? [envProxy] : []);
-
-  if (routeType === 'user_proxy' || (routeType !== 'warp' && routeType !== 'scraped' && proxyList.length > 0)) {
-    if (proxyList.length > 0) {
-      const proxyUrlStr = proxyList[(attempt - 1) % proxyList.length];
-      try {
-        const proxyUrl = new URL(proxyUrlStr);
-        const agent = new https.Agent({
-          keepAlive: true
-        });
-        agent.createConnection = function(options, callback) {
-          const targetHost = options.host || options.hostname || 'opencode.ai';
-          const targetPort = options.port || 443;
-          const connectReq = http.request({
-            host: proxyUrl.hostname,
-            port: proxyUrl.port || 80,
-            method: 'CONNECT',
-            path: `${targetHost}:${targetPort}`,
-            headers: {
-              Host: `${targetHost}:${targetPort}`,
-              ...(proxyUrl.username ? {
-                'Proxy-Authorization': 'Basic ' + Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString('base64')
-              } : {})
-            },
-            timeout: 10000
-          });
-          connectReq.on('timeout', () => {
-            connectReq.destroy(new Error(`Proxy CONNECT to ${proxyUrl.host} timed out`));
-          });
-          connectReq.on('connect', (res, socket, head) => {
-            if (res.statusCode !== 200) {
-              callback(new Error(`Proxy CONNECT returned HTTP ${res.statusCode}`));
-              return;
-            }
-            const tlsSocket = tls.connect({
-              socket: socket,
-              servername: options.servername || targetHost
-            }, () => {
-              callback(null, tlsSocket);
-            });
-            tlsSocket.on('error', err => callback(err));
-          });
-          connectReq.on('error', err => callback(err));
-          connectReq.end();
-        };
-        return agent;
-      } catch (err) {
-        console.error('[ProxyAgent] Failed to create proxy agent, falling back to direct:', err.message);
-      }
-    }
-  }
-
-  return upstreamAgent;
-}
-
-function normalizeModelId(id) {
-  if (!id) return '';
-  return id.replace(/[-_]?free$/i, '');
-}
 
 function payloadHasImages(payload) {
   if (!payload || !Array.isArray(payload.messages)) return false;
@@ -285,51 +204,6 @@ function anthropicPayloadHasImages(payload) {
     }
   }
   return false;
-}
-
-/**
- * Determine the next healthy fallback model for resilient failover.
- * Enabled by default to eliminate capacity limit drops on throttled models.
- */
-function getNextFallbackModel(currentModel, triedModels = new Set(), hasImages = false) {
-  if (config.get('smart_fallback') !== true) return null;
-
-  // Strict: only free models participate in failover cascades (never downgrade paid models)
-  const isFree = discovery.isModelFree(currentModel);
-  if (!isFree) return null;
-
-  const allFree = discovery.getAllModels().filter(m => m.is_free);
-
-  // Preferred priority ranking of high-reliability free models (1M context powerhouses first)
-  const priorityOrder = [
-    'beam',
-    'nemotron-3.5-lightning',
-    'deepseek-v4.1-flash',
-    'glm-5.3-flash',
-    'nemotron-3.5-super-vl',
-    'mimo-v2.6-flash',
-    'big-pickle',
-    'flint-40b'
-  ];
-
-  const untried = allFree.filter(m => {
-    if (m.id === currentModel || m.upstream_id === currentModel) return false;
-    if (triedModels.has(m.id) || triedModels.has(m.upstream_id)) return false;
-    if (hasImages && !m.supports_vision) return false;
-    return true;
-  });
-
-  if (untried.length === 0) return null;
-
-  untried.sort((a, b) => {
-    let aIdx = priorityOrder.indexOf(a.id);
-    let bIdx = priorityOrder.indexOf(b.id);
-    if (aIdx === -1) aIdx = 999;
-    if (bIdx === -1) bIdx = 999;
-    return aIdx - bIdx;
-  });
-
-  return untried[0].id;
 }
 
 /**
@@ -424,65 +298,86 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const mergedTools = toolResult.tools;
   const mergedToolChoice = toolResult.toolChoice;
   const clientToolNames = toolResult.clientToolNames;
-  const injectedToolNames = toolResult.injectedToolNames;
 
   let currentModel = requestedModel;
-  const hasImages = payloadHasImages(clientPayload);
-  const triedModels = new Set([currentModel]);
-  const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 5;
-  const requestTimeout = config.get('request_timeout_ms') || 60000;
-  let requestWarpFailed = false;
-  const triedWarpPorts = new Set();
-  let warpRotatedInThisRequest = false;
+  const maxRetries = Math.min(3, configInt('max_retries', 0));
+  const requestTimeout = configInt('request_timeout_ms', 30000, 5000);
+  const deadline = startTime + Math.max(requestTimeout, configInt('request_deadline_ms', 90000, requestTimeout));
+  const queueWaitMs = configInt('queue_wait_ms', 15000, 0);
 
-  const hasZenKey = !!(config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY);
-  const scraperEnabled = !hasZenKey && config.get('proxy_scraper_enabled') === true; // Never egress secrets over third-party proxies (C3)
-  const egressMode = config.get('egress_mode') || 'hybrid';
-  let activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
-  if (scraperEnabled && egressMode === 'scraped_only') {
-    const p = proxyScraper.getBestProxy();
-    activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
-  } else if (!warp.isReady() || config.get('warp_mode') === 'disabled' || routeHealth.isWarpDegraded()) {
-    const p = scraperEnabled ? proxyScraper.getBestProxy() : null;
-    activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
+  let activeRoute = egress.getCandidates()[0] || null;
+  if (!activeRoute) {
+    metrics.recordRequest({
+      model: requestedModel,
+      status: 503,
+      tokens: {},
+      latencyMs: Date.now() - startTime,
+      stream: isClientStream,
+      keyId: keyObj.id
+    });
+    sendJsonError(res, 503, 'no_egress_route',
+      'No egress route is available. WARP is not ready and direct fallback is disabled. Wait for the sidecar or configure PROXIES / ALLOW_DIRECT_FALLBACK.',
+      { 'Retry-After': '5' });
+    return;
   }
 
-  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
-    let useWarp = activeRoute.type === 'warp';
-    let currentWarpPort = activeRoute.port || warp.getBestPort();
+  // Quota is a provider window, not a broken route: fail fast with the real
+  // reset hint instead of rotating egress to evade the limit.
+  const initialQuotaMs = egress.getQuotaRetryAfter(activeRoute);
+  if (initialQuotaMs > 0) {
+    const retryAfterSec = Math.max(1, Math.ceil(initialQuotaMs / 1000));
+    sendJsonError(res, 429, 'free_tier_rate_limit',
+      'OpenCode Free Tier capacity limit reached for this egress. The gateway fails fast instead of rotating IPs. Retry after the indicated delay, or configure an upstream Zen key or a user-owned proxy.',
+      { 'Retry-After': String(retryAfterSec) });
+    return;
+  }
 
-    const upstreamModel = discovery.resolveUpstreamModel(currentModel);
+  let lastStatus = 0;
+  let lastBody = '';
+  let currentUpstreamReq = null;
 
-    let routeKey = 'direct';
-    if (activeRoute.type === 'warp') {
-      routeKey = `warp:${currentWarpPort}`;
-    } else if (activeRoute.type === 'scraped' && activeRoute.proxy) {
-      routeKey = `scraped:${activeRoute.proxy.host}:${activeRoute.proxy.port}`;
+  // Abort the in-flight upstream request if the client goes away. Listening on
+  // the response (not the request) avoids destroying the upstream request when
+  // the request body has merely finished being read.
+  res.once('close', () => {
+    if (!res.writableEnded && currentUpstreamReq) {
+      try { currentUpstreamReq.destroy(); } catch (e) {}
     }
+  });
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    if (!activeRoute) break;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      lastStatus = 504;
+      lastBody = 'Upstream request deadline exceeded before the next attempt.';
+      break;
+    }
+
+    const useWarp = activeRoute.type === 'warp';
+    const upstreamModel = discovery.resolveUpstreamModel(currentModel);
+    const routeKey = activeRoute.id;
 
     const session = persistentSessions.getOrCreate(routeKey);
     const sessionId = (attempt === 1) ? session.sessionId : identity.generateCanonicalSessionId();
     const projectId = (attempt === 1) ? session.projectId : identity.generateProjectId();
 
-    // Local rate limiter: check if this route has capacity before hitting upstream
-    const waitMs = localRateLimiter.waitTime(routeKey);
-    if (waitMs > 0 && attempt <= maxRetries) {
-      if (activeRoute.type === 'warp') {
-        const altPort = warp.getBestPort([...triedWarpPorts, currentWarpPort]);
-        if (altPort && !triedWarpPorts.has(altPort)) {
-          const altRouteKey = `warp:${altPort}`;
-          if (localRateLimiter.canProceed(altRouteKey)) {
-            currentWarpPort = altPort;
-            activeRoute.port = altPort;
-            continue;
-          }
-        }
-      }
-      const cappedWait = Math.min(waitMs, 5000);
-      console.log(`[RateLimiter] Route ${routeKey} throttled, waiting ${Math.round(cappedWait/1000)}s...`);
-      await new Promise(r => setTimeout(r, cappedWait));
+    // Admission control: bound concurrent upstream requests per gateway and per API key.
+    const releaseSlot = await requestQueue.acquire(keyObj?.id || 'anonymous', Math.min(queueWaitMs, remainingMs));
+    if (!releaseSlot) {
+      metrics.recordRequest({
+        model: requestedModel,
+        status: 429,
+        tokens: {},
+        latencyMs: Date.now() - startTime,
+        stream: isClientStream,
+        keyId: keyObj.id
+      });
+      sendJsonError(res, 429, 'queue_full',
+        'Gateway concurrency limit reached. Retry shortly.',
+        { 'Retry-After': '5' });
+      return;
     }
-    localRateLimiter.record(routeKey);
 
     const upstreamPayload = {
       ...baseSanitized,
@@ -496,85 +391,94 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
     const payloadString = JSON.stringify(upstreamPayload);
     const upstreamHeaders = identity.buildUpstreamHeaders(sessionId, projectId, Buffer.byteLength(payloadString));
+    const attemptTimeout = Math.max(1000, Math.min(requestTimeout, deadline - Date.now()));
 
-    const attemptResult = await new Promise((resolve) => {
-      let isTimedOut = false;
-      const upstreamReq = https.request({
-        hostname: 'opencode.ai',
-        path: '/inference/v1/chat/completions',
-        method: 'POST',
-        headers: upstreamHeaders,
-        agent: getUpstreamAgent(attempt, activeRoute.type, activeRoute.type === 'warp' ? currentWarpPort : activeRoute.proxy),
-        timeout: requestTimeout
-      }, (upstreamRes) => {
-        const contentType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
-        const isValidContentType = contentType.includes('event-stream') || contentType.includes('application/json');
-
-        // If upstream error (non-200) or bogus proxy payload (non-API content-type)
-        if (upstreamRes.statusCode !== 200 || !isValidContentType) {
-          let errBody = '';
-          upstreamRes.on('data', chunk => errBody += chunk.toString());
-          upstreamRes.on('end', () => {
-            const routeDesc = activeRoute.type === 'warp'
-              ? `WARP:${currentWarpPort}`
-              : (activeRoute.type === 'scraped' && activeRoute.proxy ? `Proxy:${activeRoute.proxy.host}` : 'Direct');
-            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${routeDesc}) [CT: ${contentType}]: ${errBody.slice(0, 300)}`);
-            if (upstreamRes.statusCode === 429 || upstreamRes.statusCode === 403 || !isValidContentType) {
-              if (activeRoute.type === 'warp' && typeof warp.clearAgent === 'function') {
-                warp.clearAgent(currentWarpPort);
-              }
-              try { upstreamReq.destroy(); } catch (e) {}
-              if (upstreamRes.socket) {
-                try { upstreamRes.socket.destroy(); } catch (e) {}
-              }
-            }
-            resolve({
-              success: false,
-              statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
-              headers: upstreamRes.headers,
-              body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
-            });
+    const target = upstreamTarget();
+    let attemptResult;
+    try {
+      attemptResult = await new Promise((resolve) => {
+        if (target.protocol !== 'https:' && activeRoute.type !== 'direct') {
+          resolve({
+            success: false,
+            statusCode: 502,
+            headers: {},
+            body: 'Plaintext upstream_inference_url requires direct egress'
           });
           return;
         }
+        let isTimedOut = false;
+        const upstreamReq = target.transport.request({
+          hostname: target.hostname,
+          port: target.port,
+          path: target.path,
+          method: 'POST',
+          headers: upstreamHeaders,
+          agent: egress.getAgent(activeRoute, target.protocol),
+          timeout: attemptTimeout
+        }, (upstreamRes) => {
+          const contentType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
+          const isValidContentType = contentType.includes('event-stream') || contentType.includes('application/json');
 
-        // Upstream responded 200 OK!
-        resolve({
-          success: true,
-          statusCode: 200,
-          upstreamRes,
-          upstreamReq,
-          resolvedModel: currentModel
+          // If upstream error (non-200) or bogus proxy payload (non-API content-type)
+          if (upstreamRes.statusCode !== 200 || !isValidContentType) {
+            let errBody = '';
+            upstreamRes.on('data', chunk => errBody += chunk.toString());
+            upstreamRes.on('end', () => {
+              console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for ${currentModel} (${routeLabel(activeRoute)}) [CT: ${contentType}]: ${errBody.slice(0, 300)}`);
+              if (!isValidContentType) {
+                try { upstreamReq.destroy(); } catch (e) {}
+                if (upstreamRes.socket) {
+                  try { upstreamRes.socket.destroy(); } catch (e) {}
+                }
+              }
+              resolve({
+                success: false,
+                statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
+                headers: upstreamRes.headers,
+                body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
+              });
+            });
+            return;
+          }
+
+          // Upstream responded 200 OK!
+          resolve({
+            success: true,
+            statusCode: 200,
+            upstreamRes,
+            upstreamReq,
+            resolvedModel: currentModel
+          });
         });
-      });
 
-      upstreamReq.on('timeout', () => {
-        isTimedOut = true;
-        upstreamReq.destroy(new Error('Upstream timeout'));
-      });
-
-      upstreamReq.on('error', (err) => {
-        resolve({
-          success: false,
-          statusCode: isTimedOut ? 504 : 502,
-          body: err.message
+        upstreamReq.on('timeout', () => {
+          isTimedOut = true;
+          upstreamReq.destroy(new Error('Upstream timeout'));
         });
-      });
 
-      // Abort upstream if client disconnects
-      req.on('close', () => {
-        if (!res.writableEnded) {
-          try { upstreamReq.destroy(); } catch (e) {}
-        }
-      });
+        upstreamReq.on('error', (err) => {
+          resolve({
+            success: false,
+            statusCode: isTimedOut ? 504 : 502,
+            body: err.message
+          });
+        });
 
-      upstreamReq.write(payloadString);
-      upstreamReq.end();
-    });
+        currentUpstreamReq = upstreamReq;
+        upstreamReq.write(payloadString);
+        upstreamReq.end();
+      });
+    } catch (err) {
+      attemptResult = { success: false, statusCode: 502, headers: {}, body: err.message };
+    }
 
     if (attemptResult.success) {
       const { upstreamRes, upstreamReq, resolvedModel } = attemptResult;
 
+      // Hold the admission slot for the full response. Streaming inference is
+      // the concurrency being bounded, not just header latency.
+      upstreamRes.once('close', releaseSlot);
+      egress.recordSuccess(activeRoute);
       if (!useWarp) {
         routeHealth.markDirectHealthy();
       } else {
@@ -607,6 +511,41 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         let totalTokens = 0;
         let reasoningTokens = 0;
         let buffer = '';
+        // index -> 'client' | 'injected'; argument-only chunks carry no name.
+        const toolCallKinds = new Map();
+        let streamFailed = false;
+
+        const failStream = (err) => {
+          if (streamFailed) return;
+          streamFailed = true;
+          releaseSlot();
+          console.warn(`[Proxy] Upstream stream interrupted for ${requestedModel} (${routeLabel(activeRoute)}): ${err?.message || 'unknown error'}`);
+          if (!res.writableEnded && !res.destroyed) {
+            try {
+              res.write(`data: ${JSON.stringify({
+                error: {
+                  message: 'Upstream stream interrupted before completion.',
+                  type: 'upstream_stream_error',
+                  code: 502
+                }
+              })}\n\n`);
+              res.write('data: [DONE]\n\n');
+              res.end();
+            } catch (e) {
+              try { res.end(); } catch (e2) {}
+            }
+          }
+          metrics.recordRequest({
+            model: requestedModel,
+            status: 502,
+            tokens: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
+            latencyMs: Date.now() - startTime,
+            stream: true,
+            keyId: keyObj.id
+          });
+        };
+        upstreamRes.on('error', failStream);
+        upstreamRes.on('aborted', () => failStream(new Error('upstream aborted')));
 
         upstreamRes.on('data', (chunk) => {
           let chunkStr = chunk.toString();
@@ -640,17 +579,29 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
                 reasoningTokens = p.usage.completion_tokens_details?.reasoning_tokens || reasoningTokens;
               }
 
-              // Filter out injected tool calls from client stream (H2)
+              // Filter out injected tool calls from client stream (H2).
+              // Tool argument chunks do not repeat the function name, so track
+              // each streamed tool-call index once its name is known.
               if (p.choices && Array.isArray(p.choices)) {
                 let skipChunk = false;
                 for (const choice of p.choices) {
                   if (choice.delta?.tool_calls && Array.isArray(choice.delta.tool_calls)) {
-                    choice.delta.tool_calls = choice.delta.tool_calls.filter(tc => {
+                    const kept = [];
+                    for (const tc of choice.delta.tool_calls) {
+                      const idx = Number.isInteger(tc.index) ? tc.index : 0;
                       const name = tc.function?.name;
-                      if (!name) return clientToolNames && clientToolNames.size > 0;
-                      return clientToolNames && clientToolNames.has(name);
-                    });
-                    if (choice.delta.tool_calls.length === 0) {
+                      if (name) {
+                        const isClient = !!(clientToolNames && clientToolNames.has(name));
+                        toolCallKinds.set(idx, isClient ? 'client' : 'injected');
+                      }
+                      const kind = toolCallKinds.get(idx);
+                      if (kind === 'client') {
+                        kept.push(tc);
+                      }
+                    }
+                    if (kept.length > 0) {
+                      choice.delta.tool_calls = kept;
+                    } else {
                       delete choice.delta.tool_calls;
                       if (choice.finish_reason === 'tool_calls') {
                         choice.finish_reason = 'stop';
@@ -676,7 +627,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         });
 
         upstreamRes.on('end', () => {
-          res.end();
+          if (streamFailed) return;
+          releaseSlot();
+          if (!res.writableEnded && !res.destroyed) res.end();
           const latency = Date.now() - startTime;
           const total = totalTokens || (promptTokens + completionTokens);
           keys.recordUsage(keyObj.id, total);
@@ -699,9 +652,39 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         let completionId = 'chatcmpl-' + crypto.randomUUID();
         let finished = false;
 
+        function failAggregate(err) {
+          if (finished) return;
+          finished = true;
+          releaseSlot();
+          console.warn(`[Proxy] Upstream stream interrupted for ${requestedModel} (${routeLabel(activeRoute)}): ${err?.message || 'unknown error'}`);
+          metrics.recordRequest({
+            model: requestedModel,
+            status: 502,
+            tokens: { prompt_tokens: 0, completion_tokens: 0 },
+            latencyMs: Date.now() - startTime,
+            stream: false,
+            keyId: keyObj.id
+          });
+          if (res.headersSent || res.destroyed || res.writableEnded) {
+            try { res.end(); } catch (e) {}
+            return;
+          }
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: {
+              message: 'Upstream stream interrupted before completion.',
+              type: 'upstream_stream_error',
+              code: 502
+            }
+          }));
+        }
+        upstreamRes.on('error', failAggregate);
+        upstreamRes.on('aborted', () => failAggregate(new Error('upstream aborted')));
+
         function finishResponse() {
           if (finished) return;
           finished = true;
+          releaseSlot();
 
           const pTokens = finalUsage?.prompt_tokens || 0;
           const cTokens = finalUsage?.completion_tokens || Math.ceil((accumulatedContent.length + accumulatedReasoning.length) / 4);
@@ -710,7 +693,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
           const realToolCalls = accumulatedToolCalls.filter(tc => {
             const name = tc.function?.name;
-            if (!name || name === 'read') return false;
+            if (!name) return false;
             if (clientToolNames && clientToolNames.size > 0) {
               return clientToolNames.has(name);
             }
@@ -753,7 +736,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           });
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(responseJson, null, 2));
+          if (!res.destroyed && !res.writableEnded) {
+            res.end(JSON.stringify(responseJson, null, 2));
+          }
         }
 
         upstreamRes.on('data', (chunk) => {
@@ -800,218 +785,95 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       return; // Request handled successfully!
     }
 
-    // Upstream failed this attempt — inspect if we can retry or failover
-    const statusCode = attemptResult.statusCode;
+    // No live stream was established; release admission before retrying.
+    releaseSlot();
+
+    // Upstream failed this attempt. Classify before spending more time.
+    const statusCode = attemptResult.statusCode || 0;
     const bodyStr = typeof attemptResult.body === 'string' ? attemptResult.body : JSON.stringify(attemptResult.body || '');
-    const isRateLimited = statusCode === 429 ||
-      bodyStr.includes('FreeUsageLimitError') ||
-      bodyStr.includes('FreeTierError') ||
-      bodyStr.includes('capacity limit') ||
-      bodyStr.includes('rate limit') ||
-      bodyStr.includes('Rate limit');
-    const isForbidden = statusCode === 403;
+    const retryAfterMs = egress.parseRetryAfter(attemptResult.headers?.['retry-after']);
+    const failureKind = egress.classifyUpstreamFailure(statusCode, bodyStr);
 
-    const isWarpFailure = activeRoute.type === 'warp' && (
-      statusCode === 502 ||
-      statusCode === 504 ||
-      bodyStr.includes('ECONNREFUSED') ||
-      bodyStr.includes('timeout') ||
-      bodyStr.includes('ETIMEDOUT') ||
-      bodyStr.includes('ECONNRESET') ||
-      bodyStr.includes('SOCKS5')
-    );
+    lastStatus = statusCode || 502;
+    lastBody = bodyStr;
 
-    const isScrapedFailure = activeRoute.type === 'scraped' && (
-      statusCode === 502 ||
-      statusCode === 504 ||
-      bodyStr.includes('ECONNREFUSED') ||
-      bodyStr.includes('timeout') ||
-      bodyStr.includes('ETIMEDOUT') ||
-      bodyStr.includes('ECONNRESET') ||
-      bodyStr.includes('CONNECT') ||
-      bodyStr.includes('SOCKS5') ||
-      bodyStr.includes('certificate') ||
-      bodyStr.includes('CERT_') ||
-      bodyStr.includes('SSL') ||
-      bodyStr.includes('TLS') ||
-      bodyStr.includes('verify')
-    );
-
-    if (isWarpFailure) {
-      console.warn(`[Proxy] WARP connection notice (${attemptResult.body}), evaluating failover...`);
-      routeHealth.markWarpDegraded(attemptResult.body);
-      const bestScraped = proxyScraper.getBestProxy();
-      if (bestScraped) {
-        console.log(`[Proxy] Failover from WARP socket error to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (${bestScraped.latency}ms)`);
-        activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
-      } else if (!warpRotatedInThisRequest) {
-        warp.rotateKeys('connection_failure').catch(() => {});
-        warpRotatedInThisRequest = true;
-      }
-    } else if (isScrapedFailure) {
-      if (activeRoute.proxy) {
-        proxyScraper.markProxyBurned(`${activeRoute.proxy.host}:${activeRoute.proxy.port}`, 1800);
-      }
-      const nextScraped = proxyScraper.getBestProxy();
-      if (nextScraped) {
-        console.log(`[Proxy] Scraped proxy socket notice. Rotating to next verified proxy: ${nextScraped.type}://${nextScraped.host}:${nextScraped.port} (${nextScraped.latency}ms)`);
-        activeRoute = { type: 'scraped', port: null, proxy: nextScraped };
-      } else if (warp.isReady()) {
-        activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
-      }
-    } else if (isRateLimited || isForbidden) {
-      const retryAfterHeader = attemptResult.headers?.['retry-after'];
-      const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
-
-      localRateLimiter.markBurned(routeKey, retryAfterSec > 0 ? retryAfterSec * 1000 : 120000);
+    if (failureKind === 'quota') {
+      egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(routeKey);
-
-      if (activeRoute.type === 'warp') {
-        console.warn(`[WARP] Rate limit detected on port ${currentWarpPort}. Marking burned...`);
-        warp.markAccountBurned(currentWarpPort, retryAfterSec);
-        triedWarpPorts.add(currentWarpPort);
-
-        // Instant failover to verified clean proxy outside Cloudflare's Anycast ASN
-        const bestScraped = proxyScraper.getBestProxy();
-        if (bestScraped) {
-          console.log(`[RouteManager] 🚀 Cloudflare WARP IP rate-limited. Instant zero-downtime failover to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (latency: ${bestScraped.latency}ms)`);
-          activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
-        } else {
-          const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
-          if (nextPort && !triedWarpPorts.has(nextPort)) {
-            currentWarpPort = nextPort;
-            activeRoute = { type: 'warp', port: nextPort, proxy: null };
-            console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
-          } else {
-            console.warn('[WARP Pool] All active slots hit capacity. Rotating keys...');
-            warp.rotateKeys('auto_rate_limit').catch(() => {});
-          }
-        }
-      } else if (activeRoute.type === 'scraped') {
-        if (activeRoute.proxy) {
-          proxyScraper.markProxyBurned(`${activeRoute.proxy.host}:${activeRoute.proxy.port}`, retryAfterSec || 1800);
-        }
-        const nextScraped = proxyScraper.getBestProxy();
-        if (nextScraped) {
-          console.log(`[Proxy] Scraped proxy rate-limited. Rotating to next verified proxy: ${nextScraped.host}:${nextScraped.port} (${nextScraped.latency}ms)...`);
-          activeRoute = { type: 'scraped', port: null, proxy: nextScraped };
-        } else {
-          const nextWarpPort = warp.getBestPort();
-          if (nextWarpPort && warp.isReady()) {
-            activeRoute = { type: 'warp', port: nextWarpPort, proxy: null };
-          } else {
-            activeRoute = { type: 'direct', port: null, proxy: null };
-          }
-        }
-      } else {
-        // Direct route hit rate limit
-        const bestScraped = proxyScraper.getBestProxy();
-        if (bestScraped) {
-          activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
-        } else if (warp.isReady()) {
-          activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
-        }
-      }
-    } else if (activeRoute.type === 'direct') {
-      routeHealth.markDirectDegraded(statusCode || attemptResult.body);
-      const bestScraped = proxyScraper.getBestProxy();
-      if (bestScraped) {
-        activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
-      } else if (warp.isReady()) {
-        activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
-      }
-    }
-
-    // Strict Model Isolation: Paid models (Claude Opus, GPT, etc.) must NEVER failover to a different model!
-    if (!isRequestedFree) {
+      const retryAfterSec = Math.max(1, Math.ceil((retryAfterMs || 60000) / 1000));
+      console.warn(`[Proxy] Upstream quota/capacity limit on ${routeLabel(activeRoute)} for ${currentModel}. Failing fast (Retry-After ${retryAfterSec}s).`);
       metrics.recordRequest({
         model: requestedModel,
-        status: attemptResult.statusCode,
+        status: 429,
         tokens: {},
         latencyMs: Date.now() - startTime,
         stream: isClientStream,
         keyId: keyObj.id
       });
-      res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
+      sendJsonError(res, 429, 'free_tier_rate_limit',
+        'OpenCode Free Tier capacity limit reached for this egress. The gateway fails fast instead of rotating IPs. Retry after the indicated delay, or configure an upstream Zen key or a user-owned proxy.',
+        { 'Retry-After': String(retryAfterSec) });
+      return;
+    }
+
+    if (failureKind === 'fatal') {
+      egress.recordFailure(activeRoute, 'fatal');
+      metrics.recordRequest({
+        model: requestedModel,
+        status: statusCode || 502,
+        tokens: {},
+        latencyMs: Date.now() - startTime,
+        stream: isClientStream,
+        keyId: keyObj.id
+      });
       let errPayload = attemptResult.body;
       try { JSON.parse(errPayload); } catch (e) {
         errPayload = JSON.stringify({
           error: {
-            message: typeof errPayload === 'string' && errPayload ? errPayload : `Upstream error for model "${requestedModel}" (${attemptResult.statusCode})`,
+            message: typeof errPayload === 'string' && errPayload ? errPayload : `Upstream error for model "${requestedModel}" (${statusCode})`,
             type: 'upstream_error',
-            code: attemptResult.statusCode
+            code: statusCode || 502
           }
         });
       }
+      if (typeof errPayload !== 'string') errPayload = JSON.stringify(errPayload);
+      res.writeHead(statusCode || 502, { 'Content-Type': 'application/json' });
       res.end(errPayload);
       return;
     }
 
-    if (attempt <= maxRetries) {
-      const isRouteError = isRateLimited || isForbidden || isWarpFailure || isScrapedFailure;
-      const livePorts = [warp.basePort, warp.basePort + 1, warp.basePort + 2, warp.basePort + 3].filter(p => warp.portProcesses.has(p));
-      const poolCapacityExhausted = activeRoute.type !== 'warp' || triedWarpPorts.size >= Math.min(2, Math.max(1, livePorts.length));
-      const shouldTryModelFallback = (!isRouteError || poolCapacityExhausted || attempt >= 3) && config.get('smart_fallback');
-      const fallback = shouldTryModelFallback ? getNextFallbackModel(currentModel, triedModels, hasImages) : null;
-      if (fallback) {
-        console.log(`[Proxy] Model "${currentModel}" at capacity on tested routes. Smart failover to "${fallback}" (Attempt ${attempt}/${maxRetries + 1})...`);
-        currentModel = fallback;
-        triedModels.add(fallback);
-      } else {
-        const routeLabel = activeRoute.type === 'warp'
-          ? `Cloudflare WARP (port ${currentWarpPort})`
-          : (activeRoute.type === 'scraped' && activeRoute.proxy
-              ? `verified proxy (${activeRoute.proxy.host}:${activeRoute.proxy.port})`
-              : 'direct route');
-        console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
-      }
+    // Network / 5xx failure: degrade the route and try the next configured one.
+    egress.recordFailure(activeRoute, 'retry');
+    if (activeRoute.type === 'warp') routeHealth.markWarpDegraded(bodyStr || `HTTP ${statusCode}`);
+    else if (activeRoute.type === 'direct') routeHealth.markDirectDegraded(bodyStr || `HTTP ${statusCode}`);
+    console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for ${currentModel}: ${bodyStr.slice(0, 200)}`);
 
-      // Exponential backoff with random jitter
-      const backoffMs = Math.min(250 * Math.pow(1.4, attempt - 1) + Math.random() * 150, 1500);
-      await new Promise(r => setTimeout(r, backoffMs));
+    if (attempt > maxRetries) break;
+
+    const nextRoute = egress.nextRoute(activeRoute, egress.getCandidates());
+    if (nextRoute) {
+      activeRoute = nextRoute;
+      console.log(`[Proxy] Retrying on ${routeLabel(activeRoute)} (attempt ${attempt + 1}/${maxRetries + 1})...`);
     } else {
-      // Retries exhausted
-      metrics.recordRequest({
-        model: requestedModel,
-        status: attemptResult.statusCode,
-        tokens: {},
-        latencyMs: Date.now() - startTime,
-        stream: isClientStream,
-        keyId: keyObj.id
-      });
-      res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
-      let errPayload = attemptResult.body;
-      const isFreeTierErr = (attemptResult.statusCode === 403 || attemptResult.statusCode === 429) && typeof errPayload === 'string' &&
-        (errPayload.includes('FreeTierError') || errPayload.includes('FreeUsageLimitError') || errPayload.includes('capacity limit') || errPayload.includes('rate limit') || errPayload.includes('Rate limit'));
-
-      if (isFreeTierErr) {
-        if (warp.isAvailable()) {
-          warp.rotateKeys('exhausted_failover').catch(() => {});
-        }
-        errPayload = JSON.stringify({
-          error: {
-            message: "OpenCode Free Tier capacity limit reached for this IP window. Rate limits automatically reset shortly. You can also configure an upstream Zen key or proxy in Settings to continue without interruption.",
-            type: "free_tier_rate_limit",
-            code: attemptResult.statusCode
-          }
-        });
-      } else {
-        try {
-          JSON.parse(errPayload);
-        } catch (e) {
-          errPayload = JSON.stringify({
-            error: {
-              message: typeof errPayload === 'string' && errPayload ? errPayload : `Upstream gateway error (Status ${attemptResult.statusCode})`,
-              type: 'upstream_error',
-              code: attemptResult.statusCode
-            }
-          });
-        }
-      }
-      res.end(errPayload);
-      return;
+      const backoffMs = Math.min(250 * Math.pow(2, attempt - 1) + Math.random() * 200, 1500);
+      await new Promise(r => setTimeout(r, backoffMs));
     }
   }
+
+  // Retries exhausted, no alternate route, or deadline reached.
+  metrics.recordRequest({
+    model: requestedModel,
+    status: lastStatus || 502,
+    tokens: {},
+    latencyMs: Date.now() - startTime,
+    stream: isClientStream,
+    keyId: keyObj.id
+  });
+  const finalStatus = lastStatus === 504 ? 504 : 502;
+  sendJsonError(res, finalStatus, finalStatus === 504 ? 'upstream_timeout' : 'upstream_unavailable',
+    lastStatus === 504
+      ? 'Upstream request deadline exceeded.'
+      : `All configured egress routes failed: ${(lastBody || 'unknown upstream error').slice(0, 300)}`);
 }
 
 /**
@@ -1118,7 +980,6 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const mergedTools = toolResult.tools;
   const mergedToolChoice = toolResult.toolChoice;
   const clientToolNames = toolResult.clientToolNames;
-  const injectedToolNames = toolResult.injectedToolNames;
 
   const isFreeOnly = config.get('free_only') !== false;
   const isRequestedFree = discovery.isModelFree(requestedModel);
@@ -1151,62 +1012,81 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   }
 
   let currentModel = requestedModel;
-  const hasImages = anthropicPayloadHasImages(clientPayload);
-  const triedModels = new Set([currentModel]);
-  const maxRetries = config.get('max_retries') !== undefined ? config.get('max_retries') : 5;
-  const requestTimeout = config.get('request_timeout_ms') || 60000;
-  let requestWarpFailed = false;
-  const triedWarpPorts = new Set();
-  let warpRotatedInThisRequest = false;
+  const maxRetries = Math.min(3, configInt('max_retries', 0));
+  const requestTimeout = configInt('request_timeout_ms', 30000, 5000);
+  const deadline = startTime + Math.max(requestTimeout, configInt('request_deadline_ms', 90000, requestTimeout));
+  const queueWaitMs = configInt('queue_wait_ms', 15000, 0);
 
-  const hasZenKey = !!(config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY);
-  const scraperEnabled = !hasZenKey && config.get('proxy_scraper_enabled') === true; // Never egress secrets over third-party proxies (C3)
-  const egressMode = config.get('egress_mode') || 'hybrid';
-  let activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
-  if (scraperEnabled && egressMode === 'scraped_only') {
-    const p = proxyScraper.getBestProxy();
-    activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
-  } else if (!warp.isReady() || config.get('warp_mode') === 'disabled' || routeHealth.isWarpDegraded()) {
-    const p = scraperEnabled ? proxyScraper.getBestProxy() : null;
-    activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
+  let activeRoute = egress.getCandidates()[0] || null;
+  if (!activeRoute) {
+    metrics.recordRequest({
+      model: requestedModel,
+      status: 503,
+      tokens: {},
+      latencyMs: Date.now() - startTime,
+      stream: isClientStream,
+      keyId: keyObj.id
+    });
+    sendAnthropicError(res, 503, 'no_egress_route',
+      'No egress route is available. WARP is not ready and direct fallback is disabled. Wait for the sidecar or configure PROXIES / ALLOW_DIRECT_FALLBACK.',
+      { 'Retry-After': '5' });
+    return;
   }
 
-  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
-    let useWarp = activeRoute.type === 'warp';
-    let currentWarpPort = activeRoute.port || warp.getBestPort();
+  const initialQuotaMs = egress.getQuotaRetryAfter(activeRoute);
+  if (initialQuotaMs > 0) {
+    const retryAfterSec = Math.max(1, Math.ceil(initialQuotaMs / 1000));
+    sendAnthropicError(res, 429, 'rate_limit_error',
+      'OpenCode Free Tier capacity limit reached for this egress. The gateway fails fast instead of rotating IPs. Retry after the indicated delay, or configure an upstream Zen key or a user-owned proxy.',
+      { 'Retry-After': String(retryAfterSec) });
+    return;
+  }
 
-    const upstreamModel = discovery.resolveUpstreamModel(currentModel);
+  let lastStatus = 0;
+  let lastBody = '';
+  let currentUpstreamReq = null;
 
-    let routeKey = 'direct';
-    if (activeRoute.type === 'warp') {
-      routeKey = `warp:${currentWarpPort}`;
-    } else if (activeRoute.type === 'scraped' && activeRoute.proxy) {
-      routeKey = `scraped:${activeRoute.proxy.host}:${activeRoute.proxy.port}`;
+  // Abort the in-flight upstream request if the client goes away. Listening on
+  // the response (not the request) avoids destroying the upstream request when
+  // the request body has merely finished being read.
+  res.once('close', () => {
+    if (!res.writableEnded && currentUpstreamReq) {
+      try { currentUpstreamReq.destroy(); } catch (e) {}
     }
+  });
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    if (!activeRoute) break;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      lastStatus = 504;
+      lastBody = 'Upstream request deadline exceeded before the next attempt.';
+      break;
+    }
+
+    const useWarp = activeRoute.type === 'warp';
+    const upstreamModel = discovery.resolveUpstreamModel(currentModel);
+    const routeKey = activeRoute.id;
 
     const session = persistentSessions.getOrCreate(routeKey);
     const sessionId = (attempt === 1) ? session.sessionId : identity.generateCanonicalSessionId();
     const projectId = (attempt === 1) ? session.projectId : identity.generateProjectId();
 
-    // Local rate limiter: check if this route has capacity before hitting upstream
-    const waitMs = localRateLimiter.waitTime(routeKey);
-    if (waitMs > 0 && attempt <= maxRetries) {
-      if (activeRoute.type === 'warp') {
-        const altPort = warp.getBestPort([...triedWarpPorts, currentWarpPort]);
-        if (altPort && !triedWarpPorts.has(altPort)) {
-          const altRouteKey = `warp:${altPort}`;
-          if (localRateLimiter.canProceed(altRouteKey)) {
-            currentWarpPort = altPort;
-            activeRoute.port = altPort;
-            continue;
-          }
-        }
-      }
-      const cappedWait = Math.min(waitMs, 5000);
-      console.log(`[RateLimiter] Route ${routeKey} throttled, waiting ${Math.round(cappedWait/1000)}s...`);
-      await new Promise(r => setTimeout(r, cappedWait));
+    const releaseSlot = await requestQueue.acquire(keyObj?.id || 'anonymous', Math.min(queueWaitMs, remainingMs));
+    if (!releaseSlot) {
+      metrics.recordRequest({
+        model: requestedModel,
+        status: 429,
+        tokens: {},
+        latencyMs: Date.now() - startTime,
+        stream: isClientStream,
+        keyId: keyObj.id
+      });
+      sendAnthropicError(res, 429, 'queue_full',
+        'Gateway concurrency limit reached. Retry shortly.',
+        { 'Retry-After': '5' });
+      return;
     }
-    localRateLimiter.record(routeKey);
 
     const upstreamPayload = {
       model: upstreamModel,
@@ -1221,83 +1101,97 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
     const payloadString = JSON.stringify(upstreamPayload);
     const upstreamHeaders = identity.buildUpstreamHeaders(sessionId, projectId, Buffer.byteLength(payloadString));
+    const attemptTimeout = Math.max(1000, Math.min(requestTimeout, deadline - Date.now()));
 
-    const attemptResult = await new Promise((resolve) => {
-      let isTimedOut = false;
-      const upstreamReq = https.request({
-        hostname: 'opencode.ai',
-        path: '/inference/v1/chat/completions',
-        method: 'POST',
-        headers: upstreamHeaders,
-        agent: getUpstreamAgent(attempt, activeRoute.type, activeRoute.type === 'warp' ? currentWarpPort : activeRoute.proxy),
-        timeout: requestTimeout
-      }, (upstreamRes) => {
-        const contentType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
-        const isValidContentType = contentType.includes('event-stream') || contentType.includes('application/json');
-
-        if (upstreamRes.statusCode !== 200 || !isValidContentType) {
-          let errBody = '';
-          upstreamRes.on('data', chunk => errBody += chunk.toString());
-          upstreamRes.on('end', () => {
-            const routeDesc = activeRoute.type === 'warp'
-              ? `WARP:${currentWarpPort}`
-              : (activeRoute.type === 'scraped' && activeRoute.proxy ? `Proxy:${activeRoute.proxy.host}` : 'Direct');
-            console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for Anthropic model ${currentModel} (${routeDesc}) [CT: ${contentType}]: ${errBody.slice(0, 300)}`);
-            if (upstreamRes.statusCode === 429 || upstreamRes.statusCode === 403 || !isValidContentType) {
-              if (activeRoute.type === 'warp' && typeof warp.clearAgent === 'function') {
-                warp.clearAgent(currentWarpPort);
-              }
-              try { upstreamReq.destroy(); } catch (e) {}
-              if (upstreamRes.socket) {
-                try { upstreamRes.socket.destroy(); } catch (e) {}
-              }
-            }
-            resolve({
-              success: false,
-              statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
-              headers: upstreamRes.headers,
-              body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
-            });
+    const target = upstreamTarget();
+    let attemptResult;
+    try {
+      attemptResult = await new Promise((resolve) => {
+        if (target.protocol !== 'https:' && activeRoute.type !== 'direct') {
+          resolve({
+            success: false,
+            statusCode: 502,
+            headers: {},
+            body: 'Plaintext upstream_inference_url requires direct egress'
           });
           return;
         }
+        let isTimedOut = false;
+        const upstreamReq = target.transport.request({
+          hostname: target.hostname,
+          port: target.port,
+          path: target.path,
+          method: 'POST',
+          headers: upstreamHeaders,
+          agent: egress.getAgent(activeRoute, target.protocol),
+          timeout: attemptTimeout
+        }, (upstreamRes) => {
+          const contentType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
+          const isValidContentType = contentType.includes('event-stream') || contentType.includes('application/json');
 
-        resolve({
-          success: true,
-          statusCode: 200,
-          upstreamRes,
-          upstreamReq,
-          resolvedModel: currentModel
+          if (upstreamRes.statusCode !== 200 || !isValidContentType) {
+            let errBody = '';
+            upstreamRes.on('data', chunk => errBody += chunk.toString());
+            upstreamRes.on('end', () => {
+              console.warn(`[Proxy] Upstream ${upstreamRes.statusCode} error body for Anthropic model ${currentModel} (${routeLabel(activeRoute)}) [CT: ${contentType}]: ${errBody.slice(0, 300)}`);
+              if (!isValidContentType) {
+                try { upstreamReq.destroy(); } catch (e) {}
+                if (upstreamRes.socket) {
+                  try { upstreamRes.socket.destroy(); } catch (e) {}
+                }
+              }
+              resolve({
+                success: false,
+                statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
+                headers: upstreamRes.headers,
+                body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
+              });
+            });
+            return;
+          }
+
+          resolve({
+            success: true,
+            statusCode: 200,
+            upstreamRes,
+            upstreamReq,
+            resolvedModel: currentModel
+          });
         });
-      });
 
-      upstreamReq.on('timeout', () => {
-        isTimedOut = true;
-        upstreamReq.destroy(new Error('Upstream timeout'));
-      });
-
-      upstreamReq.on('error', (err) => {
-        resolve({
-          success: false,
-          statusCode: isTimedOut ? 504 : 502,
-          body: err.message
+        upstreamReq.on('timeout', () => {
+          isTimedOut = true;
+          upstreamReq.destroy(new Error('Upstream timeout'));
         });
-      });
 
-      req.on('close', () => {
-        if (!res.writableEnded) {
-          try { upstreamReq.destroy(); } catch (e) {}
-        }
-      });
+        upstreamReq.on('error', (err) => {
+          resolve({
+            success: false,
+            statusCode: isTimedOut ? 504 : 502,
+            body: err.message
+          });
+        });
 
-      upstreamReq.write(payloadString);
-      upstreamReq.end();
-    });
+        req.on('close', () => {
+          if (!res.writableEnded) {
+            try { upstreamReq.destroy(); } catch (e) {}
+          }
+        });
+
+        upstreamReq.write(payloadString);
+        upstreamReq.end();
+      });
+    } finally {
+      releaseSlot();
+    }
 
     if (attemptResult.success) {
       const { upstreamRes, upstreamReq, resolvedModel } = attemptResult;
       const messageId = 'msg_' + crypto.randomUUID().replace(/-/g, '').slice(0, 20);
 
+      // Hold the admission slot until the stream finishes or aborts.
+      upstreamRes.once('close', releaseSlot);
+      egress.recordSuccess(activeRoute);
       if (!useWarp) {
         routeHealth.markDirectHealthy();
       } else {
@@ -1347,6 +1241,40 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         let activeBlockType = null;
         let activeToolIndex = null;
         let hasToolCalls = false;
+        // index -> 'client' | 'injected'; argument-only chunks carry no name.
+        const toolCallKinds = new Map();
+        let streamFailed = false;
+
+        const failStream = (err) => {
+          if (streamFailed) return;
+          streamFailed = true;
+          releaseSlot();
+          console.warn(`[Proxy] Upstream Anthropic stream interrupted for ${requestedModel} (${routeLabel(activeRoute)}): ${err?.message || 'unknown error'}`);
+          if (!res.writableEnded && !res.destroyed) {
+            try {
+              res.write(`event: error\ndata: ${JSON.stringify({
+                type: 'error',
+                error: {
+                  type: 'api_error',
+                  message: 'Upstream stream interrupted before completion.'
+                }
+              })}\n\n`);
+              res.end();
+            } catch (e) {
+              try { res.end(); } catch (e2) {}
+            }
+          }
+          metrics.recordRequest({
+            model: requestedModel,
+            status: 502,
+            tokens: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
+            latencyMs: Date.now() - startTime,
+            stream: true,
+            keyId: keyObj.id
+          });
+        };
+        upstreamRes.on('error', failStream);
+        upstreamRes.on('aborted', () => failStream(new Error('upstream aborted')));
 
         function closeCurrentBlock() {
           if (activeBlockIndex >= 0 && activeBlockType !== null) {
@@ -1452,11 +1380,17 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
                 if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
                   for (const tc of delta.tool_calls) {
-                    const name = tc.function?.name;
-                    if (!name || name === 'read' || (clientToolNames && !clientToolNames.has(name))) continue;
                     const tIndex = tc.index !== undefined ? tc.index : 0;
-                    ensureToolBlock(tIndex, tc.id, tc.function?.name);
-                    if (tc.function?.arguments) {
+                    const name = tc.function?.name;
+                    if (name) {
+                      const isClient = !!(clientToolNames && clientToolNames.has(name));
+                      toolCallKinds.set(tIndex, isClient ? 'client' : 'injected');
+                    }
+                    if (toolCallKinds.get(tIndex) !== 'client') continue;
+                    if (name) {
+                      ensureToolBlock(tIndex, tc.id, name);
+                    }
+                    if (tc.function?.arguments && activeBlockType === 'tool_use' && activeToolIndex === tIndex) {
                       res.write(`event: content_block_delta\ndata: ${JSON.stringify({
                         type: 'content_block_delta',
                         index: activeBlockIndex,
@@ -1472,6 +1406,9 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         });
 
         upstreamRes.on('end', () => {
+          if (streamFailed) return;
+          releaseSlot();
+          if (res.destroyed || res.writableEnded) return;
           closeCurrentBlock();
 
           if (activeBlockIndex < 0) {
@@ -1515,9 +1452,39 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         let finalUsage = null;
         let finished = false;
 
+        function failAggregate(err) {
+          if (finished) return;
+          finished = true;
+          releaseSlot();
+          console.warn(`[Proxy] Upstream Anthropic stream interrupted for ${requestedModel} (${routeLabel(activeRoute)}): ${err?.message || 'unknown error'}`);
+          metrics.recordRequest({
+            model: requestedModel,
+            status: 502,
+            tokens: { prompt_tokens: 0, completion_tokens: 0 },
+            latencyMs: Date.now() - startTime,
+            stream: false,
+            keyId: keyObj.id
+          });
+          if (res.headersSent || res.destroyed || res.writableEnded) {
+            try { res.end(); } catch (e) {}
+            return;
+          }
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            type: 'error',
+            error: {
+              type: 'api_error',
+              message: 'Upstream stream interrupted before completion.'
+            }
+          }));
+        }
+        upstreamRes.on('error', failAggregate);
+        upstreamRes.on('aborted', () => failAggregate(new Error('upstream aborted')));
+
         function finishAnthropic() {
           if (finished) return;
           finished = true;
+          releaseSlot();
 
           const pTokens = finalUsage?.prompt_tokens || 0;
           const cTokens = finalUsage?.completion_tokens || Math.ceil((accumulatedContent.length + accumulatedReasoning.length) / 4);
@@ -1540,7 +1507,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           }
           const realToolCalls = accumulatedToolCalls.filter(tc => {
             const name = tc.function?.name;
-            if (!name || name === 'read') return false;
+            if (!name) return false;
             return clientToolNames && clientToolNames.has(name);
           });
           for (const tc of realToolCalls) {
@@ -1580,7 +1547,9 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           });
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(anthropicRes, null, 2));
+          if (!res.destroyed && !res.writableEnded) {
+            res.end(JSON.stringify(anthropicRes, null, 2));
+          }
         }
 
         upstreamRes.on('data', (chunk) => {
@@ -1625,214 +1594,95 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       return;
     }
 
-    // Upstream error on Anthropic request
-    const statusCode = attemptResult.statusCode;
+    // No live stream was established; release admission before retrying.
+    releaseSlot();
+
+    // Upstream failed this attempt. Classify before spending more time.
+    const statusCode = attemptResult.statusCode || 0;
     const bodyStr = typeof attemptResult.body === 'string' ? attemptResult.body : JSON.stringify(attemptResult.body || '');
-    const isRateLimited = statusCode === 429 ||
-      bodyStr.includes('FreeUsageLimitError') ||
-      bodyStr.includes('FreeTierError') ||
-      bodyStr.includes('capacity limit') ||
-      bodyStr.includes('rate limit') ||
-      bodyStr.includes('Rate limit');
-    const isForbidden = statusCode === 403;
+    const retryAfterMs = egress.parseRetryAfter(attemptResult.headers?.['retry-after']);
+    const failureKind = egress.classifyUpstreamFailure(statusCode, bodyStr);
 
-    const isWarpFailure = activeRoute.type === 'warp' && (
-      statusCode === 502 ||
-      statusCode === 504 ||
-      bodyStr.includes('ECONNREFUSED') ||
-      bodyStr.includes('timeout') ||
-      bodyStr.includes('ETIMEDOUT') ||
-      bodyStr.includes('ECONNRESET') ||
-      bodyStr.includes('SOCKS5')
-    );
+    lastStatus = statusCode || 502;
+    lastBody = bodyStr;
 
-    const isScrapedFailure = activeRoute.type === 'scraped' && (
-      statusCode === 502 ||
-      statusCode === 504 ||
-      bodyStr.includes('ECONNREFUSED') ||
-      bodyStr.includes('timeout') ||
-      bodyStr.includes('ETIMEDOUT') ||
-      bodyStr.includes('ECONNRESET') ||
-      bodyStr.includes('CONNECT') ||
-      bodyStr.includes('SOCKS5') ||
-      bodyStr.includes('certificate') ||
-      bodyStr.includes('CERT_') ||
-      bodyStr.includes('SSL') ||
-      bodyStr.includes('TLS') ||
-      bodyStr.includes('verify')
-    );
-
-    if (isWarpFailure) {
-      console.warn(`[Proxy] Anthropic WARP connection notice (${attemptResult.body}), evaluating failover...`);
-      routeHealth.markWarpDegraded(attemptResult.body);
-      const bestScraped = proxyScraper.getBestProxy();
-      if (bestScraped) {
-        console.log(`[Proxy] Failover from Anthropic WARP error to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (${bestScraped.latency}ms)`);
-        activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
-      } else if (!warpRotatedInThisRequest) {
-        warp.rotateKeys('connection_failure').catch(() => {});
-        warpRotatedInThisRequest = true;
-      }
-    } else if (isScrapedFailure) {
-      if (activeRoute.proxy) {
-        proxyScraper.markProxyBurned(`${activeRoute.proxy.host}:${activeRoute.proxy.port}`, 1800);
-      }
-      const nextScraped = proxyScraper.getBestProxy();
-      if (nextScraped) {
-        console.log(`[Proxy] Anthropic scraped proxy socket notice. Rotating to next verified proxy: ${nextScraped.type}://${nextScraped.host}:${nextScraped.port} (${nextScraped.latency}ms)`);
-        activeRoute = { type: 'scraped', port: null, proxy: nextScraped };
-      } else if (warp.isReady()) {
-        activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
-      }
-    } else if (isRateLimited || isForbidden) {
-      const retryAfterHeader = attemptResult.headers?.['retry-after'];
-      const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
-
-      localRateLimiter.markBurned(routeKey, retryAfterSec > 0 ? retryAfterSec * 1000 : 120000);
+    if (failureKind === 'quota') {
+      egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(routeKey);
-
-      if (activeRoute.type === 'warp') {
-        console.warn(`[WARP] Anthropic rate limit detected on port ${currentWarpPort}. Marking burned...`);
-        warp.markAccountBurned(currentWarpPort, retryAfterSec);
-        triedWarpPorts.add(currentWarpPort);
-
-        // Instant failover to verified clean proxy outside Cloudflare's Anycast ASN
-        const bestScraped = proxyScraper.getBestProxy();
-        if (bestScraped) {
-          console.log(`[RouteManager] 🚀 Cloudflare WARP IP rate-limited. Instant Anthropic failover to verified clean proxy: ${bestScraped.type}://${bestScraped.host}:${bestScraped.port} (latency: ${bestScraped.latency}ms)`);
-          activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
-        } else {
-          const nextPort = warp.getBestPort(Array.from(triedWarpPorts));
-          if (nextPort && !triedWarpPorts.has(nextPort)) {
-            currentWarpPort = nextPort;
-            activeRoute = { type: 'warp', port: nextPort, proxy: null };
-            console.log(`[WARP] Seamlessly hopping to next live slot on port ${currentWarpPort}...`);
-          } else {
-            console.warn('[WARP Pool] All active slots hit capacity. Rotating keys...');
-            warp.rotateKeys('auto_rate_limit').catch(() => {});
-          }
-        }
-      } else if (activeRoute.type === 'scraped') {
-        if (activeRoute.proxy) {
-          proxyScraper.markProxyBurned(`${activeRoute.proxy.host}:${activeRoute.proxy.port}`, retryAfterSec || 1800);
-        }
-        const nextScraped = proxyScraper.getBestProxy();
-        if (nextScraped) {
-          console.log(`[Proxy] Anthropic scraped proxy rate-limited. Rotating to next verified proxy: ${nextScraped.host}:${nextScraped.port} (${nextScraped.latency}ms)...`);
-          activeRoute = { type: 'scraped', port: null, proxy: nextScraped };
-        } else {
-          const nextWarpPort = warp.getBestPort();
-          if (nextWarpPort && warp.isReady()) {
-            activeRoute = { type: 'warp', port: nextWarpPort, proxy: null };
-          } else {
-            activeRoute = { type: 'direct', port: null, proxy: null };
-          }
-        }
-      } else {
-        const bestScraped = proxyScraper.getBestProxy();
-        if (bestScraped) {
-          activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
-        } else if (warp.isReady()) {
-          activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
-        }
-      }
-    } else if (activeRoute.type === 'direct') {
-      routeHealth.markDirectDegraded(statusCode || attemptResult.body);
-      const bestScraped = proxyScraper.getBestProxy();
-      if (bestScraped) {
-        activeRoute = { type: 'scraped', port: null, proxy: bestScraped };
-      } else if (warp.isReady()) {
-        activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
-      }
-    }
-
-    // Strict Model Isolation: Paid models (Claude Opus, GPT, etc.) must NEVER failover to a different model!
-    if (!isRequestedFree) {
+      const retryAfterSec = Math.max(1, Math.ceil((retryAfterMs || 60000) / 1000));
+      console.warn(`[Proxy] Upstream quota/capacity limit on ${routeLabel(activeRoute)} for ${currentModel}. Failing fast (Retry-After ${retryAfterSec}s).`);
       metrics.recordRequest({
         model: requestedModel,
-        status: attemptResult.statusCode,
+        status: 429,
         tokens: {},
         latencyMs: Date.now() - startTime,
         stream: isClientStream,
         keyId: keyObj.id
       });
-      res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
+      sendAnthropicError(res, 429, 'rate_limit_error',
+        'OpenCode Free Tier capacity limit reached for this egress. The gateway fails fast instead of rotating IPs. Retry after the indicated delay, or configure an upstream Zen key or a user-owned proxy.',
+        { 'Retry-After': String(retryAfterSec) });
+      return;
+    }
+
+    if (failureKind === 'fatal') {
+      egress.recordFailure(activeRoute, 'fatal');
+      metrics.recordRequest({
+        model: requestedModel,
+        status: statusCode || 502,
+        tokens: {},
+        latencyMs: Date.now() - startTime,
+        stream: isClientStream,
+        keyId: keyObj.id
+      });
       let errPayload = attemptResult.body;
       try { JSON.parse(errPayload); } catch (e) {
         errPayload = JSON.stringify({
           type: 'error',
           error: {
             type: 'api_error',
-            message: typeof errPayload === 'string' && errPayload ? errPayload : `Upstream error for model "${requestedModel}" (${attemptResult.statusCode})`
+            message: typeof errPayload === 'string' && errPayload ? errPayload : `Upstream error for model "${requestedModel}" (${statusCode})`
           }
         });
       }
+      if (typeof errPayload !== 'string') errPayload = JSON.stringify(errPayload);
+      res.writeHead(statusCode || 502, { 'Content-Type': 'application/json' });
       res.end(errPayload);
       return;
     }
 
-    if (attempt <= maxRetries) {
-      const isRouteError = isRateLimited || isForbidden || isWarpFailure || isScrapedFailure;
-      const livePorts = [warp.basePort, warp.basePort + 1, warp.basePort + 2, warp.basePort + 3].filter(p => warp.portProcesses.has(p));
-      const poolCapacityExhausted = activeRoute.type !== 'warp' || triedWarpPorts.size >= Math.min(2, Math.max(1, livePorts.length));
-      const shouldTryModelFallback = (!isRouteError || poolCapacityExhausted || attempt >= 3) && config.get('smart_fallback');
-      const fallback = shouldTryModelFallback ? getNextFallbackModel(currentModel, triedModels, hasImages) : null;
-      if (fallback) {
-        console.log(`[Proxy] Anthropic Model "${currentModel}" at capacity on tested routes. Smart failover to "${fallback}" (Attempt ${attempt}/${maxRetries + 1})...`);
-        currentModel = fallback;
-        triedModels.add(fallback);
-      } else {
-        const routeLabel = activeRoute.type === 'warp'
-          ? `Cloudflare WARP (port ${currentWarpPort})`
-          : (activeRoute.type === 'scraped' && activeRoute.proxy
-              ? `verified proxy (${activeRoute.proxy.host}:${activeRoute.proxy.port})`
-              : 'direct route');
-        console.log(`[Proxy] Upstream ${attemptResult.statusCode || 'failure'} on Anthropic model "${currentModel}". Retrying via ${routeLabel} with fresh session ID (Attempt ${attempt}/${maxRetries + 1})...`);
-      }
-      const backoffMs = Math.min(250 * Math.pow(1.4, attempt - 1) + Math.random() * 150, 1500);
-      await new Promise(r => setTimeout(r, backoffMs));
-    } else {
-      metrics.recordRequest({
-        model: requestedModel,
-        status: attemptResult.statusCode,
-        tokens: {},
-        latencyMs: Date.now() - startTime,
-        stream: isClientStream,
-        keyId: keyObj.id
-      });
-      res.writeHead(attemptResult.statusCode, { 'Content-Type': 'application/json' });
-      let errPayload = attemptResult.body;
-      const isFreeTierErr = (attemptResult.statusCode === 403 || attemptResult.statusCode === 429) && typeof errPayload === 'string' &&
-        (errPayload.includes('FreeTierError') || errPayload.includes('FreeUsageLimitError') || errPayload.includes('capacity limit') || errPayload.includes('rate limit') || errPayload.includes('Rate limit'));
+    // Network / 5xx failure: degrade the route and try the next configured one.
+    egress.recordFailure(activeRoute, 'retry');
+    if (activeRoute.type === 'warp') routeHealth.markWarpDegraded(bodyStr || `HTTP ${statusCode}`);
+    else if (activeRoute.type === 'direct') routeHealth.markDirectDegraded(bodyStr || `HTTP ${statusCode}`);
+    console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for Anthropic model ${currentModel}: ${bodyStr.slice(0, 200)}`);
 
-      if (isFreeTierErr) {
-        if (warp.isAvailable()) {
-          warp.rotateKeys('exhausted_failover').catch(() => {});
-        }
-        errPayload = JSON.stringify({
-          type: 'error',
-          error: {
-            type: 'rate_limit_error',
-            message: "OpenCode Free Tier capacity limit reached for this IP window. Rate limits automatically reset shortly. Configure Cloudflare WARP, an upstream proxy, or an upstream Zen key in Settings to continue without interruption."
-          }
-        });
-      } else {
-        try {
-          JSON.parse(errPayload);
-        } catch (e) {
-          errPayload = JSON.stringify({
-            type: 'error',
-            error: {
-              type: 'api_error',
-              message: typeof errPayload === 'string' && errPayload ? errPayload : `Upstream gateway error (${attemptResult.statusCode})`
-            }
-          });
-        }
-      }
-      res.end(errPayload);
-      return;
+    if (attempt > maxRetries) break;
+
+    const nextRoute = egress.nextRoute(activeRoute, egress.getCandidates());
+    if (nextRoute) {
+      activeRoute = nextRoute;
+      console.log(`[Proxy] Retrying Anthropic request on ${routeLabel(activeRoute)} (attempt ${attempt + 1}/${maxRetries + 1})...`);
+    } else {
+      const backoffMs = Math.min(250 * Math.pow(2, attempt - 1) + Math.random() * 200, 1500);
+      await new Promise(r => setTimeout(r, backoffMs));
     }
   }
+
+  // Retries exhausted, no alternate route, or deadline reached.
+  metrics.recordRequest({
+    model: requestedModel,
+    status: lastStatus || 502,
+    tokens: {},
+    latencyMs: Date.now() - startTime,
+    stream: isClientStream,
+    keyId: keyObj.id
+  });
+  const finalStatus = lastStatus === 504 ? 504 : 502;
+  sendAnthropicError(res, finalStatus, finalStatus === 504 ? 'api_error' : 'api_error',
+    lastStatus === 504
+      ? 'Upstream request deadline exceeded.'
+      : `All configured egress routes failed: ${(lastBody || 'unknown upstream error').slice(0, 300)}`);
 }
 
 module.exports = {

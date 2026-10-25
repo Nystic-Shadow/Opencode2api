@@ -3,23 +3,16 @@ set -e
 
 # ==============================================================================
 # OpenCode2API Docker Entrypoint
-# Ensures persistent directories exist and boots Node.js gateway
-# Userspace Cloudflare WARP engine is managed dynamically by Node.js
+#
+# WARP is owned by exactly one process:
+#   - WARP_ENGINE=sidecar  -> the compose `warp` service owns the tunnel
+#   - WARP_ENGINE=embedded -> this container's Node process owns wireproxy
+#
+# The entrypoint therefore does not start, kill, or reconfigure WARP engines.
+# Doing so would race the gateway and can leave a stale process on the SOCKS
+# port after a container restart.
 # ==============================================================================
 
 mkdir -p /app/data
-
-# Terminate any leftover wireproxy processes from previous runs to ensure clean ports
-pkill -9 -f wireproxy 2>/dev/null || true
-
-# If legacy warp-svc is present on the host/system, start dbus and warp-svc
-if command -v warp-svc >/dev/null 2>&1; then
-  mkdir -p /var/run/dbus /var/lib/dbus /var/lib/cloudflare-warp
-  if [ ! -f /var/lib/dbus/machine-id ]; then
-    dbus-uuidgen > /var/lib/dbus/machine-id 2>/dev/null || true
-  fi
-  dbus-daemon --system --fork 2>/dev/null || true
-  warp-svc >/dev/null 2>&1 &
-fi
 
 exec "$@"

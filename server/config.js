@@ -1,8 +1,14 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+
+const DEFAULT_UPSTREAM_INFERENCE_URL = 'https://opencode.ai/inference/v1/chat/completions';
+// This path was stored by older builds but was never used. Migrate it instead
+// of letting a stale cache point inference at a non-existent endpoint.
+const LEGACY_UPSTREAM_INFERENCE_URL = 'https://opencode.ai/inference/openai/v1/chat/completions';
 
 // Clean and strip quotes from .env values
 function parseEnvVal(val) {
@@ -12,6 +18,32 @@ function parseEnvVal(val) {
   }
   return v;
 }
+
+// A weak or known-default dashboard password must never win over the
+// generated secret, even when it arrives through DASHBOARD_PASS.
+function sanitizeAdminPasswordEnv() {
+  const pass = (process.env.DASHBOARD_PASS || '').trim();
+  if (!pass) return;
+  if (pass === 'admin123' || pass.length < 12) {
+    console.warn('[Config] DASHBOARD_PASS is a known default or shorter than 12 characters; ignoring it. Set a strong password or read the generated value from data/admin-password.txt.');
+    delete process.env.DASHBOARD_PASS;
+  }
+}
+
+// Read an integer from env first, then the current config value. Explicit zero
+// is preserved for settings where zero is meaningful (queue size / wait time).
+function envOrConfigInt(envName, current, fallback, min) {
+  const raw = process.env[envName] !== undefined && process.env[envName] !== ''
+    ? process.env[envName]
+    : current;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, parsed);
+}
+
+// Capture the real process environment before .env is read. Explicit shell or
+// container variables must always win over values from a local .env file.
+const EXPLICIT_ENV_KEYS = new Set(Object.keys(process.env));
 
 // Simple .env parser - dynamic reloader
 function loadEnv(force = false) {
@@ -25,6 +57,7 @@ function loadEnv(force = false) {
       if (idx !== -1) {
         const key = trimmed.slice(0, idx).trim();
         const val = parseEnvVal(trimmed.slice(idx + 1));
+        if (EXPLICIT_ENV_KEYS.has(key)) continue;
         if (force || process.env[key] === undefined) {
           process.env[key] = val;
         }
@@ -42,32 +75,41 @@ if (!fs.existsSync(DATA_DIR)) {
 const DEFAULT_CONFIG = {
   port: parseInt(process.env.PORT, 10) || 8080,
   admin_username: process.env.DASHBOARD_USER || 'admin',
-  admin_password: process.env.DASHBOARD_PASS || 'admin123',
+  admin_password: process.env.DASHBOARD_PASS || '',
   client_version: '2.1.4',
   discovery_interval_seconds: 600,
   auto_update_cli: true,
   free_only: true,
   global_rpm_limit: 0, // 0 = unlimited
   global_tpm_limit: 0, // 0 = unlimited
-  smart_fallback: process.env.SMART_FALLBACK !== 'false', // Default: true for zero-drop high resilience (auto failovers across free models if one hits capacity)
-  max_retries: parseInt(process.env.MAX_RETRIES, 10) || 8, // Auto-retry attempts on transient upstream drops (up to 8 attempts across verified proxies and models)
-  request_timeout_ms: 60000,
+  smart_fallback: process.env.SMART_FALLBACK !== 'false',
+  max_retries: parseInt(process.env.MAX_RETRIES, 10) || 2, // hard-capped at 3 below
+  request_timeout_ms: parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 30000,
+  request_deadline_ms: parseInt(process.env.REQUEST_DEADLINE_MS, 10) || 90000,
+  queue_max_concurrent: parseInt(process.env.QUEUE_MAX_CONCURRENT, 10) || 8,
+  queue_max_per_key: parseInt(process.env.QUEUE_MAX_PER_KEY, 10) || 4,
+  queue_max_size: parseInt(process.env.QUEUE_MAX_SIZE, 10) || 100,
+  queue_wait_ms: parseInt(process.env.QUEUE_WAIT_MS, 10) || 15000,
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
   proxies: process.env.PROXIES ? process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean) : [],
   warp_mode: process.env.WARP_MODE || 'auto', // 'auto' | 'always' | 'disabled'
+  warp_engine: process.env.WARP_ENGINE || 'auto', // 'auto' | 'sidecar' | 'embedded' | 'cli' | 'disabled'
   warp_host: process.env.WARP_HOST || '127.0.0.1',
   warp_auto_switch: process.env.WARP_AUTO_SWITCH !== 'false',
-  warp_rotate_on_unauth: process.env.WARP_ROTATE_ON_UNAUTH !== 'false', // true by default: auto-rotates WireGuard keys on rate limits/429
-  warp_rotate_on_rate_limit: process.env.WARP_ROTATE_ON_RATE_LIMIT !== 'false',
-  warp_auto_rotate_minutes: parseInt(process.env.WARP_AUTO_ROTATE_MINUTES, 10) || 5, // 0 = disabled, default: every 5 minutes
+  warp_rotate_on_unauth: false,
+  warp_rotate_on_rate_limit: false,
+  warp_auto_rotate_minutes: parseInt(process.env.WARP_AUTO_ROTATE_MINUTES, 10) || 0, // 0 = stable egress
   warp_port: parseInt(process.env.WARP_PORT, 10) || 40000,
-  egress_mode: process.env.EGRESS_MODE || 'hybrid', // 'hybrid' | 'scraped_only' | 'warp_only' | 'direct'
-  proxy_scraper_enabled: process.env.PROXY_SCRAPER_ENABLED === 'true', // Secure by default: opt-in only
+  egress_mode: process.env.EGRESS_MODE || 'auto', // 'auto' | 'warp_only' | 'proxy_only' | 'direct'
+  allow_direct_fallback: process.env.ALLOW_DIRECT_FALLBACK === 'true'
+    ? true
+    : (process.env.ALLOW_DIRECT_FALLBACK === 'false' ? false : null),
+  proxy_scraper_enabled: process.env.PROXY_SCRAPER_ENABLED === 'true', // opt-in only
   proxy_scraper_strict_passes: parseInt(process.env.PROXY_SCRAPER_STRICT_PASSES, 10) || 5,
   proxy_scraper_max_latency_ms: parseInt(process.env.PROXY_SCRAPER_MAX_LATENCY_MS, 10) || 3000,
   upstream_models_url: 'https://opencode.ai/zen/v1/models',
   upstream_metadata_url: 'https://models.opencode.ai/api.json',
-  upstream_inference_url: 'https://opencode.ai/inference/openai/v1/chat/completions'
+  upstream_inference_url: process.env.UPSTREAM_INFERENCE_URL || DEFAULT_UPSTREAM_INFERENCE_URL
 };
 
 class ConfigManager {
@@ -79,6 +121,7 @@ class ConfigManager {
 
   refreshFromEnv() {
     loadEnv(true);
+    sanitizeAdminPasswordEnv();
     if (process.env.DASHBOARD_USER && process.env.DASHBOARD_USER.trim()) {
       this.config.admin_username = process.env.DASHBOARD_USER.trim();
     }
@@ -89,6 +132,7 @@ class ConfigManager {
 
   load() {
     loadEnv(true);
+    sanitizeAdminPasswordEnv();
     try {
       let fileConfig = {};
       if (fs.existsSync(CONFIG_FILE)) {
@@ -115,8 +159,16 @@ class ConfigManager {
       if (process.env.OPENCODE_ZEN_KEY) {
         this.config.upstream_zen_key = process.env.OPENCODE_ZEN_KEY.trim();
       }
+      if (process.env.UPSTREAM_INFERENCE_URL) {
+        this.config.upstream_inference_url = process.env.UPSTREAM_INFERENCE_URL.trim();
+      } else if (!this.config.upstream_inference_url || this.config.upstream_inference_url === LEGACY_UPSTREAM_INFERENCE_URL) {
+        this.config.upstream_inference_url = DEFAULT_UPSTREAM_INFERENCE_URL;
+      }
       if (process.env.WARP_MODE) {
         this.config.warp_mode = process.env.WARP_MODE.trim();
+      }
+      if (process.env.WARP_ENGINE) {
+        this.config.warp_engine = process.env.WARP_ENGINE.trim();
       }
       if (process.env.WARP_HOST) {
         this.config.warp_host = process.env.WARP_HOST.trim();
@@ -124,12 +176,56 @@ class ConfigManager {
       if (process.env.WARP_PORT) {
         this.config.warp_port = parseInt(process.env.WARP_PORT, 10);
       }
-      if (fileConfig.max_retries === undefined || fileConfig.max_retries < 6) {
-        this.config.max_retries = 6;
+      if (process.env.EGRESS_MODE) {
+        this.config.egress_mode = process.env.EGRESS_MODE.trim();
       }
-      if (process.env.MAX_RETRIES) {
-        this.config.max_retries = parseInt(process.env.MAX_RETRIES, 10);
+      if (process.env.PROXIES) {
+        this.config.proxies = process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean);
       }
+      if (process.env.ALLOW_DIRECT_FALLBACK !== undefined) {
+        this.config.allow_direct_fallback = process.env.ALLOW_DIRECT_FALLBACK === 'true';
+      }
+
+      // Retry budget: fail fast instead of spending minutes per request.
+      const envRetries = process.env.MAX_RETRIES !== undefined ? parseInt(process.env.MAX_RETRIES, 10) : NaN;
+      if (Number.isFinite(envRetries)) {
+        this.config.max_retries = envRetries;
+      } else if (fileConfig.max_retries === undefined || fileConfig.max_retries > 3) {
+        this.config.max_retries = 2;
+      }
+      this.config.max_retries = Math.min(Math.max(0, parseInt(this.config.max_retries, 10) || 0), 3);
+
+      this.config.request_timeout_ms = Math.max(
+        5000,
+        parseInt(process.env.REQUEST_TIMEOUT_MS || this.config.request_timeout_ms, 10) || 30000
+      );
+      this.config.request_deadline_ms = Math.max(
+        this.config.request_timeout_ms,
+        parseInt(process.env.REQUEST_DEADLINE_MS || this.config.request_deadline_ms, 10) || 90000
+      );
+      this.config.queue_max_concurrent = envOrConfigInt('QUEUE_MAX_CONCURRENT', this.config.queue_max_concurrent, 8, 1);
+      this.config.queue_max_per_key = envOrConfigInt('QUEUE_MAX_PER_KEY', this.config.queue_max_per_key, 4, 1);
+      this.config.queue_max_size = envOrConfigInt('QUEUE_MAX_SIZE', this.config.queue_max_size, 100, 0);
+      this.config.queue_wait_ms = envOrConfigInt('QUEUE_WAIT_MS', this.config.queue_wait_ms, 15000, 0);
+
+      // Public proxy scraping is no longer part of the request path. It stays
+      // opt-in for diagnostics only; the gateway uses explicit PROXIES instead.
+      if (process.env.PROXY_SCRAPER_ENABLED !== undefined) {
+        this.config.proxy_scraper_enabled = process.env.PROXY_SCRAPER_ENABLED === 'true';
+      } else {
+        this.config.proxy_scraper_enabled = false;
+      }
+
+      // Stable egress is more reliable than periodic WARP key churn. Rotation
+      // remains possible through an explicit env override, never through 401/429.
+      if (process.env.WARP_AUTO_ROTATE_MINUTES !== undefined) {
+        this.config.warp_auto_rotate_minutes = Math.max(0, parseInt(process.env.WARP_AUTO_ROTATE_MINUTES, 10) || 0);
+      } else {
+        this.config.warp_auto_rotate_minutes = 0;
+      }
+      this.config.warp_rotate_on_unauth = false;
+      this.config.warp_rotate_on_rate_limit = false;
+
       // Auto-migrate legacy config: enable smart_fallback by default for high availability
       if (!this.config.client_version || this.config.client_version.startsWith('1.') || this.config.client_version === '2.0.32') {
         this.config.client_version = '2.1.4';
@@ -141,6 +237,16 @@ class ConfigManager {
       }
       if (process.env.SMART_FALLBACK !== undefined) {
         this.config.smart_fallback = process.env.SMART_FALLBACK !== 'false';
+      }
+
+      if (!this.config.admin_password || this.config.admin_password === 'admin123') {
+        const generated = crypto.randomBytes(18).toString('base64url');
+        this.config.admin_password = generated;
+        this.config._admin_password_generated = true;
+        try {
+          fs.writeFileSync(path.join(DATA_DIR, 'admin-password.txt'), generated + '\n', { mode: 0o600 });
+        } catch (e) {}
+        console.warn('[Config] Generated a random admin password. Set DASHBOARD_PASS to choose your own; the generated value is in data/admin-password.txt.');
       }
 
       this.save();
@@ -163,7 +269,7 @@ class ConfigManager {
       return (process.env.DASHBOARD_USER && process.env.DASHBOARD_USER.trim()) || this.config.admin_username || 'admin';
     }
     if (key === 'admin_password') {
-      return (process.env.DASHBOARD_PASS && process.env.DASHBOARD_PASS.trim()) || this.config.admin_password || 'admin123';
+      return (process.env.DASHBOARD_PASS && process.env.DASHBOARD_PASS.trim()) || this.config.admin_password || '';
     }
     return this.config[key];
   }
@@ -179,9 +285,11 @@ class ConfigManager {
   update(newVals) {
     if (newVals.admin_username) {
       process.env.DASHBOARD_USER = newVals.admin_username;
+      EXPLICIT_ENV_KEYS.add('DASHBOARD_USER');
     }
     if (newVals.admin_password) {
       process.env.DASHBOARD_PASS = newVals.admin_password;
+      EXPLICIT_ENV_KEYS.add('DASHBOARD_PASS');
     }
     this.config = { ...this.config, ...newVals };
     this.save();

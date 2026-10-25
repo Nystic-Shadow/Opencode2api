@@ -70,6 +70,8 @@ class CloudflareWarpManager {
     this.roundRobinIndex = 0;
     this.statusCache = null;
     this.socketAlive = false;
+    this.sidecarReady = false;
+    this.sidecarTimer = null;
     this.lastStatusCheck = 0;
     this.isBootstrapping = false;
     this.accountPool = [];
@@ -116,7 +118,54 @@ class CloudflareWarpManager {
     return this.activePort || this.basePort || 40000;
   }
 
+  /**
+   * Resolve the configured WARP engine.
+   *
+   * sidecar  - an external WARP/SOCKS5 container owns the endpoint; this
+   *            process must never spawn wireproxy.
+   * embedded - this process spawns and supervises wireproxy on loopback.
+   * cli      - this process drives the official warp-cli daemon.
+   * disabled - no WARP transport.
+   *
+   * auto picks sidecar when WARP_HOST is remote, otherwise prefers the
+   * embedded engine (Docker image ships wireproxy) and falls back to CLI.
+   */
+  getEngineMode() {
+    const raw = String(config.get('warp_engine') || 'auto').toLowerCase();
+    const aliases = {
+      external: 'sidecar',
+      proxy: 'sidecar',
+      socks5: 'sidecar',
+      wireproxy: 'embedded',
+      'warp-cli': 'cli',
+      off: 'disabled',
+      none: 'disabled'
+    };
+    const configured = aliases[raw] || raw;
+    if (['sidecar', 'embedded', 'cli', 'disabled'].includes(configured)) {
+      return configured;
+    }
+
+    const host = String(config.get('warp_host') || process.env.WARP_HOST || '').toLowerCase();
+    if (host && !['127.0.0.1', 'localhost', '::1', '0.0.0.0'].includes(host)) {
+      return 'sidecar';
+    }
+    if (this.wireproxyPath) return 'embedded';
+    if (this.cliPath) return 'cli';
+    return 'sidecar';
+  }
+
+  isSidecarMode() {
+    return this.getEngineMode() === 'sidecar';
+  }
+
   getBestPort(excludePorts = []) {
+    if (this.isSidecarMode()) {
+      const sidecarPort = this.getActivePort();
+      if (Array.isArray(excludePorts) && excludePorts.includes(sidecarPort)) return null;
+      return sidecarPort;
+    }
+
     const ports = [this.basePort, this.basePort + 1, this.basePort + 2, this.basePort + 3];
     const livePorts = ports.filter(p => this.portProcesses.has(p));
     if (livePorts.length === 0) return this.getActivePort();
@@ -169,7 +218,7 @@ class CloudflareWarpManager {
   _resolveWarpHost(port, host = null) {
     if (host) return host;
     // Multi-port embedded wireproxy pool (40000..40009) always runs on container loopback (H6)
-    if (port >= 40000 && port <= 40009) return '127.0.0.1';
+    if (!this.isSidecarMode() && port >= 40000 && port <= 40009) return '127.0.0.1';
     return config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
   }
 
@@ -297,6 +346,12 @@ class CloudflareWarpManager {
   }
 
   isReady() {
+    const engine = this.getEngineMode();
+    if (engine === 'disabled') return false;
+    if (engine === 'sidecar') {
+      if (this.sidecarReady === true) return true;
+      return this.socketAlive === true;
+    }
     if (this.portProcesses && this.portProcesses.size > 0) {
       return true;
     }
@@ -607,6 +662,13 @@ class CloudflareWarpManager {
    * Starts WireProxy userspace SOCKS5 engine with strict per-port serialization
    */
   async startWireproxy(account, targetPort = null) {
+    const engine = this.getEngineMode();
+    if (engine === 'sidecar') {
+      throw new Error('Embedded wireproxy is disabled while WARP_ENGINE=sidecar (an external WARP sidecar owns the endpoint)');
+    }
+    if (engine === 'disabled') {
+      throw new Error('WARP is disabled by configuration');
+    }
     if (!this.wireproxyPath) {
       throw new Error('wireproxy binary not found on system');
     }
@@ -671,7 +733,7 @@ BindAddress = ${bindHost}:${port}
     fs.writeFileSync(confPath, confContent);
 
     this.setProgress(75, 'launching_tunnel', `Starting userspace WireProxy SOCKS5 daemon on ${bindHost}:${port}...`);
-    console.log(`[WARP] Starting userspace WireProxy SOCKS5 daemon on ${host}:${port} (${endpointHost})...`);
+    console.log(`[WARP] Starting userspace WireProxy SOCKS5 daemon on ${bindHost}:${port} (${endpointHost})...`);
 
     let procExited = false;
     let procExitCode = null;
@@ -720,7 +782,7 @@ BindAddress = ${bindHost}:${port}
       }
     });
 
-    this.setProgress(85, 'verifying_socket', `Probing SOCKS5 handshake on ${host}:${port}...`);
+    this.setProgress(85, 'verifying_socket', `Probing SOCKS5 handshake on ${bindHost}:${port}...`);
 
     // 1. Poll until local SOCKS5 socket answers handshake (up to 8 seconds)
     const startTime = Date.now();
@@ -733,7 +795,7 @@ BindAddress = ${bindHost}:${port}
       if (procExited) {
         throw new Error(`WireProxy process for port ${port} exited prematurely with code ${procExitCode} (signal: ${procExitSignal})`);
       }
-      const alive = await this.probeSocks5(host, port);
+      const alive = await this.probeSocks5(bindHost, port);
       if (alive) {
         socketLive = true;
         break;
@@ -742,11 +804,11 @@ BindAddress = ${bindHost}:${port}
 
     if (!socketLive) {
       try { proc.kill('SIGTERM'); } catch (e) {}
-      throw new Error(`WireProxy launched on ${host}:${port} but SOCKS5 port failed to answer within 8s`);
+      throw new Error(`WireProxy launched on ${bindHost}:${port} but SOCKS5 port failed to answer within 8s`);
     }
 
     // 2. Poll for genuine Cloudflare Edge egress verification (trace)
-    this.setProgress(90, 'verifying_tunnel', `Verifying edge egress connectivity on ${host}:${port} (${endpointHost})...`);
+    this.setProgress(90, 'verifying_tunnel', `Verifying edge egress connectivity on ${bindHost}:${port} (${endpointHost})...`);
     let trace = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       if (procExited) break;
@@ -757,8 +819,8 @@ BindAddress = ${bindHost}:${port}
 
     if (trace && trace.ip) {
       const ipFamily = trace.ip.includes(':') ? 'IPv6' : 'IPv4';
-      console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${host}:${port} (warp=on • Egress: ${trace.ip} [${ipFamily} • ${trace.colo || 'Edge'}])`);
-      this.setProgress(100, 'connected', `Cloudflare WARP Egress Active on ${host}:${port} (warp=on • ${trace.ip})`);
+      console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${bindHost}:${port} (warp=on • Egress: ${trace.ip} [${ipFamily} • ${trace.colo || 'Edge'}])`);
+      this.setProgress(100, 'connected', `Cloudflare WARP Egress Active on ${bindHost}:${port} (warp=on • ${trace.ip})`);
       this.portProcesses.set(port, { proc, startedAt: Date.now(), account, egressIp: trace.ip });
       this.socketAlive = true;
       this.statusCache = null;
@@ -811,6 +873,74 @@ BindAddress = ${bindHost}:${port}
   }
 
   /**
+   * Waits for an external WARP sidecar (for example caomingjun/warp) to answer
+   * SOCKS5 on the configured endpoint. The gateway never spawns its own tunnel
+   * in this mode, so a sidecar restart cannot collide with an embedded process.
+   */
+  async bootstrapSidecar() {
+    const port = this.getActivePort();
+    const host = this._resolveWarpHost(port);
+
+    this.setProgress(20, 'checking_sidecar', `Probing WARP sidecar on ${host}:${port}...`);
+    const alive = await this.probeSocks5(host, port);
+    if (!alive) {
+      this.sidecarReady = false;
+      this.socketAlive = false;
+      this.statusCache = null;
+      this.setProgress(0, 'waiting_sidecar', `Waiting for WARP sidecar at ${host}:${port}`);
+      console.warn(`[WARP] Sidecar is not answering on ${host}:${port} yet. The gateway will keep serving and retry in the background.`);
+      this.startSidecarMonitor();
+      return false;
+    }
+
+    // Verify that the SOCKS5 endpoint really reaches Cloudflare. The trace is
+    // allowed to fail transiently; it only affects the reported egress IP.
+    const trace = await this.probeEgressTrace(port, 6000);
+    if (trace && trace.warp && !['on', 'plus'].includes(trace.warp)) {
+      console.warn(`[WARP] Sidecar SOCKS5 is reachable but reports warp=${trace.warp}; traffic may not be tunneled through WARP. Check the sidecar logs.`);
+    }
+    this.sidecarReady = true;
+    this.socketAlive = true;
+    this.activePort = port;
+    this.statusCache = null;
+    const egress = trace?.ip
+      ? ` • Egress: ${trace.ip}${trace.colo ? ` (${trace.colo})` : ''}${trace.warp ? ` • warp=${trace.warp}` : ''}`
+      : '';
+    this.setProgress(100, 'connected', `Cloudflare WARP sidecar active on ${host}:${port}${egress}`);
+    console.log(`[WARP] Sidecar SOCKS5 engine is LIVE on ${host}:${port}${egress}`);
+    this.startSidecarMonitor();
+    return true;
+  }
+
+  startSidecarMonitor() {
+    if (this.sidecarTimer) return;
+    let misses = 0;
+    this.sidecarTimer = setInterval(async () => {
+      if (this.getEngineMode() !== 'sidecar') {
+        clearInterval(this.sidecarTimer);
+        this.sidecarTimer = null;
+        return;
+      }
+      const port = this.getActivePort();
+      const host = this._resolveWarpHost(port);
+      const alive = await this.probeSocks5(host, port);
+      if (alive) {
+        misses = 0;
+        this.sidecarReady = true;
+      } else {
+        misses++;
+        if (misses >= 2) {
+          this.sidecarReady = false;
+          this.socketAlive = false;
+          this.statusCache = null;
+          this.setProgress(0, 'waiting_sidecar', `WARP sidecar unreachable at ${host}:${port}`);
+        }
+      }
+    }, 15000);
+    if (typeof this.sidecarTimer.unref === 'function') this.sidecarTimer.unref();
+  }
+
+  /**
    * Auto-bootstraps Cloudflare WARP:
    * 1. Checks if SOCKS5 proxy is already live.
    * 2. If not, boots wireproxy (userspace WireGuard) or warp-cli.
@@ -819,6 +949,24 @@ BindAddress = ${bindHost}:${port}
     if (this.isBootstrapping && !forceRestart) return false;
     this.isBootstrapping = true;
     this.setProgress(10, 'initializing', 'Initializing Cloudflare WARP engine...');
+
+    const engine = this.getEngineMode();
+    if (engine === 'disabled') {
+      this.isBootstrapping = false;
+      this.setProgress(0, 'idle', 'WARP is disabled by configuration');
+      return false;
+    }
+    if (engine === 'sidecar') {
+      try {
+        return await this.bootstrapSidecar();
+      } catch (err) {
+        console.warn('[WARP] Sidecar bootstrap notice:', err.message);
+        this.setProgress(0, 'waiting_sidecar', 'Sidecar bootstrap notice: ' + err.message);
+        return false;
+      } finally {
+        this.isBootstrapping = false;
+      }
+    }
 
     const port = this.getActivePort();
     const host = this._resolveWarpHost(port);
@@ -1008,7 +1156,10 @@ BindAddress = ${bindHost}:${port}
     const socketAlive = await this.probeSocks5(host, port);
 
     if (socketAlive) {
-      const engine = this.wireproxyPath ? 'Userspace WireGuard' : (this.cliPath ? 'CLI Daemon' : 'SOCKS5 Proxy');
+      const engineMode = this.getEngineMode();
+      const engine = engineMode === 'sidecar'
+        ? 'Sidecar SOCKS5'
+        : (this.wireproxyPath ? 'Userspace WireGuard' : (this.cliPath ? 'CLI Daemon' : 'SOCKS5 Proxy'));
       const trace = await this.probeEgressTrace(port);
       const egressDetail = trace?.ip ? ` • IP: ${trace.ip}${trace.colo ? ` (${trace.colo})` : ''}` : '';
       this.setProgress(100, 'connected', `Cloudflare WARP Egress Active (${engine} • ${host}:${port}${egressDetail})`);
@@ -1019,6 +1170,7 @@ BindAddress = ${bindHost}:${port}
         connected: true,
         running: true,
         mode: 'proxy',
+        engine_mode: engineMode,
         host: host,
         port: port,
         engine: engine,
@@ -1031,11 +1183,13 @@ BindAddress = ${bindHost}:${port}
       };
       this.statusCache = result;
       this.lastStatusCheck = now;
+      if (engineMode === 'sidecar') this.sidecarReady = true;
       return result;
     }
 
-    // If socket is not alive but an engine is installed, return Disconnected
-    if (this.wireproxyPath || this.cliPath) {
+    // If socket is not alive but an engine is installed or configured, return Disconnected
+    if (this.wireproxyPath || this.cliPath || this.getEngineMode() === 'sidecar') {
+      const engineMode = this.getEngineMode();
       const result = {
         available: true,
         installed: true,
@@ -1043,9 +1197,10 @@ BindAddress = ${bindHost}:${port}
         connected: false,
         running: false,
         mode: 'proxy',
+        engine_mode: engineMode,
         host: host,
         port: port,
-        engine: this.wireproxyPath ? 'Userspace WireGuard' : 'CLI Daemon',
+        engine: engineMode === 'sidecar' ? 'Sidecar SOCKS5' : (this.wireproxyPath ? 'Userspace WireGuard' : 'CLI Daemon'),
         socketAlive: false,
         reason: this.isBootstrapping ? 'Establishing tunnel...' : 'SOCKS5 socket inactive',
         bootstrapping: this.isBootstrapping,
@@ -1053,6 +1208,7 @@ BindAddress = ${bindHost}:${port}
       };
       this.statusCache = result;
       this.lastStatusCheck = now;
+      if (engineMode === 'sidecar') this.sidecarReady = false;
       return result;
     }
 
@@ -1126,6 +1282,13 @@ BindAddress = ${bindHost}:${port}
   }
 
   async rotateKeys(reason = 'manual') {
+    const engine = this.getEngineMode();
+    if (engine === 'sidecar') {
+      console.warn('[WARP] Key rotation is owned by the sidecar in WARP_ENGINE=sidecar mode; restart the sidecar to rotate.');
+      return false;
+    }
+    if (engine === 'disabled') return false;
+
     const now = Date.now();
 
     // 1. Concurrent deduplication: If a rotation is already in flight, await it!

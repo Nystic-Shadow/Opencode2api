@@ -264,13 +264,20 @@ async function handleAdminRoute(req, res, pathname) {
     const updates = {};
     if (body.admin_username && body.admin_username.trim()) updates.admin_username = body.admin_username.trim();
     if (body.admin_password && body.admin_password.trim() && body.admin_password !== '••••••••') {
-      updates.admin_password = body.admin_password.trim();
+      const nextPassword = body.admin_password.trim();
+      if (nextPassword === 'admin123' || nextPassword.length < 12) {
+        return sendJson(res, 400, { error: 'Dashboard password must be at least 12 characters and must not be a known default.' });
+      }
+      updates.admin_password = nextPassword;
     }
     if (body.discovery_interval_seconds !== undefined) updates.discovery_interval_seconds = parseInt(body.discovery_interval_seconds, 10) || 600;
     if (body.auto_update_cli !== undefined) updates.auto_update_cli = !!body.auto_update_cli;
     if (body.free_only !== undefined) updates.free_only = !!body.free_only;
     if (body.smart_fallback !== undefined) updates.smart_fallback = !!body.smart_fallback;
-    if (body.max_retries !== undefined) updates.max_retries = parseInt(body.max_retries, 10) || 3;
+    if (body.max_retries !== undefined) {
+      const parsed = parseInt(body.max_retries, 10);
+      if (Number.isFinite(parsed)) updates.max_retries = Math.min(Math.max(0, parsed), 3);
+    }
     if (body.global_rpm_limit !== undefined) updates.global_rpm_limit = parseInt(body.global_rpm_limit, 10) || 0;
     if (body.global_tpm_limit !== undefined) updates.global_tpm_limit = parseInt(body.global_tpm_limit, 10) || 0;
     if (body.upstream_zen_key !== undefined) {
@@ -284,9 +291,14 @@ async function handleAdminRoute(req, res, pathname) {
     if (body.warp_mode !== undefined) updates.warp_mode = body.warp_mode;
     if (body.warp_host !== undefined) updates.warp_host = (body.warp_host || '127.0.0.1').trim();
     if (body.warp_auto_switch !== undefined) updates.warp_auto_switch = !!body.warp_auto_switch;
-    if (body.warp_rotate_on_unauth !== undefined) updates.warp_rotate_on_unauth = !!body.warp_rotate_on_unauth;
-    if (body.warp_rotate_on_rate_limit !== undefined) updates.warp_rotate_on_rate_limit = !!body.warp_rotate_on_rate_limit;
-    if (body.warp_auto_rotate_minutes !== undefined) updates.warp_auto_rotate_minutes = parseInt(body.warp_auto_rotate_minutes, 10) || 0;
+    // Automatic WARP rotation on auth/quota failures is deliberately not
+    // supported: it evades upstream limits and makes egress unstable.
+    updates.warp_rotate_on_unauth = false;
+    updates.warp_rotate_on_rate_limit = false;
+    if (body.warp_auto_rotate_minutes !== undefined) {
+      const parsed = parseInt(body.warp_auto_rotate_minutes, 10);
+      if (Number.isFinite(parsed)) updates.warp_auto_rotate_minutes = Math.max(0, parsed);
+    }
     if (body.warp_port !== undefined) updates.warp_port = parseInt(body.warp_port, 10) || 40000;
     if (body.proxies !== undefined) {
       if (Array.isArray(body.proxies)) {

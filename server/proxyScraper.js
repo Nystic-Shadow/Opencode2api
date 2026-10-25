@@ -19,28 +19,23 @@ const PROXY_SOURCES = [
   { url: 'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=2500&country=all&ssl=all&anonymity=all', type: 'http' }
 ];
 
-// Pre-verified fast proxies tested directly against opencode.ai:443 (<3000ms latency, genuine TLS cert, 5x strict check)
-const DEFAULT_SEED_PROXIES = [
-  { host: '101.36.104.239', port: 10808, type: 'socks5', latency: 680, successCount: 5, lastChecked: Date.now() },
-  { host: '123.58.219.171', port: 10808, type: 'socks5', latency: 710, successCount: 5, lastChecked: Date.now() },
-  { host: '183.106.215.208', port: 1080, type: 'socks5', latency: 719, successCount: 5, lastChecked: Date.now() }
-];
-
 class ProxyScraperService {
   constructor() {
     this.rawCandidates = [];
-    this.verifiedPool = [...DEFAULT_SEED_PROXIES]; // [{ host, port, type, latency, successCount, lastChecked }]
+    this.verifiedPool = [];
     this.isScanning = false;
     this.scanInterval = null;
     this.roundRobinIndex = 0;
     this.burnedProxies = new Map(); // proxyStr -> cooldownUntil
     this.cachedAgents = new Map();
+    this.enabled = config.get('proxy_scraper_enabled') === true;
 
     this.loadCache();
-    this.startBackgroundScanner();
+    if (this.enabled) this.startBackgroundScanner();
   }
 
   loadCache() {
+    if (!this.enabled) return;
     try {
       if (fs.existsSync(PROXY_CACHE_FILE)) {
         const raw = fs.readFileSync(PROXY_CACHE_FILE, 'utf8');
@@ -49,8 +44,8 @@ class ProxyScraperService {
           this.verifiedPool = data.proxies.filter(p => p.latency <= 3000);
           console.log(`[ProxyScraper] Loaded ${this.verifiedPool.length} verified fast (<3s) proxies from disk cache.`);
         } else {
-          console.log('[ProxyScraper] Cache invalidated (version upgrade). Starting with pre-verified clean proxies.');
-          this.verifiedPool = [...DEFAULT_SEED_PROXIES];
+          console.log('[ProxyScraper] Cache invalidated (version upgrade). Starting with an empty pool.');
+          this.verifiedPool = [];
           this.saveCache();
         }
       }
@@ -60,6 +55,7 @@ class ProxyScraperService {
   }
 
   saveCache() {
+    if (!this.enabled) return;
     try {
       if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
       fs.writeFileSync(PROXY_CACHE_FILE, JSON.stringify({
@@ -74,6 +70,7 @@ class ProxyScraperService {
   }
 
   startBackgroundScanner() {
+    if (!this.enabled) return;
     // If pool has fewer than 5 verified proxies, initiate fast sweep on startup
     if (this.verifiedPool.length < 5) {
       setTimeout(() => this.runScrapeAndVerify().catch(() => {}), 1000);
@@ -276,6 +273,7 @@ class ProxyScraperService {
   }
 
   async runScrapeAndVerify() {
+    if (!this.enabled) return;
     if (this.isScanning) return;
     this.isScanning = true;
     console.log('[ProxyScraper] Initiating proxy scrape & 5x strict validation sweep...');
@@ -385,6 +383,7 @@ class ProxyScraperService {
   }
 
   getBestProxy() {
+    if (!this.enabled) return null;
     const now = Date.now();
     const cleanList = this.verifiedPool.filter(p => {
       const key1 = `${p.host}:${p.port}`;

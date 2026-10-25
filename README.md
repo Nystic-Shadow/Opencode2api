@@ -4,318 +4,311 @@
 
 # ⚡ OpenCode2API
 
-### *Enterprise High-Throughput API Gateway & Proxy Engine for OpenCode Zen Models*
+### OpenAI + Anthropic compatible gateway for OpenCode Zen models
 
-> **Turn Free OpenCode Zen Models into 100% Zero-Drop, Ultra-Low-Latency OpenAI & Anthropic Endpoints.**
+> **Stable, observable egress through Cloudflare WARP or your own proxies. No IP rotation to evade upstream quotas.**
 
-[![Release Version](https://img.shields.io/badge/Release-v1.5.0-blue.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Nystic-Shadow/Opencode2api/releases/tag/v1.5)
-[![Gateway Status](https://img.shields.io/badge/Gateway_Status-🟢_LIVE-2fbc5b.svg?style=for-the-badge&logo=statuspage&logoColor=white)]()
-[![Gateway Pass Rate](https://img.shields.io/badge/Pass_Rate-100%25_Zero--Drop-2fbc5b.svg?style=for-the-badge&logo=checkmarx&logoColor=white)]()
-[![Zero External Dependencies](https://img.shields.io/badge/Core_Deps-0_External-007acc.svg?style=for-the-badge&logo=node.js&logoColor=white)](server/)
+[![Node.js](https://img.shields.io/badge/Node.js-20-339933.svg?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Docker Compose](https://img.shields.io/badge/Docker_Compose-Ready-2496ED.svg?style=for-the-badge&logo=docker&logoColor=white)](docker-compose.yml)
-[![Cloudflare WARP](https://img.shields.io/badge/Tunnel-Cloudflare_WARP-F38020.svg?style=for-the-badge&logo=cloudflare&logoColor=white)](https://1.1.1.1/)
+[![Cloudflare WARP](https://img.shields.io/badge/Egress-Cloudflare_WARP-F38020.svg?style=for-the-badge&logo=cloudflare&logoColor=white)](https://1.1.1.1/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
-
-<br />
-
-**OpenCode2API** is a high-performance, zero-dependency reverse-engineering API Gateway that transforms upstream OpenCode Zen free models into rock-solid **OpenAI** and **Anthropic** compatible endpoints. Connect free cutting-edge models directly into **Cursor**, **Cline**, **Roo Code**, **Continue**, **LibreChat**, **OpenAI SDK**, and **Anthropic SDK** with **native tool calling**, **multimodal vision**, **extended thinking streaming**, and **autonomous Cloudflare WARP proxy failover**.
 
 </div>
 
 ---
 
-## ✨ Core Features & Capabilities
+## What this is
 
-### 🛡️ 1. Anti-Bot Gate Bypass & 100% Zero-Drop Resilience
-- **Bypasses `"OpenCode Zen models can only be used with OpenCode CLI"`:** Automatically injects official decompiled CLI core tool schemas (`shell`, `edit`, `glob`, `grep`, `read`) into every request to satisfy upstream anti-bot checks.
-- **Descending Session Inversion:** Mints authentic `ses_...` tokens using OpenCode's proprietary millisecond bitwise inversion algorithm: `~((Date.now() << 12) | counter)`, preventing `401` session expirations.
-- **Smart Model Cascade Failover:** If an upstream model experiences maintenance or rate-limits (e.g. `glm-5.3-flash` returning 429 *"Endpoint is unavailable"*), the gateway transparently reroutes to an equivalent healthy model (`deepseek-v4.1-flash` or `beam`), adds the `x-opencode2api-fallback` header, and completes the request with a **200 OK**.
-- **Jittered Exponential Backoff:** Automatically retries transient connection resets (`ECONNRESET`), socket timeouts, and `502`/`503` upstream drops up to 3 times with randomized backoff.
+OpenCode2API exposes OpenCode Zen models through standard **OpenAI** and **Anthropic** APIs. It adds authentication, model discovery, tool/function calling, vision, reasoning streams, bounded concurrency, and health-checked egress through Cloudflare WARP or user-owned proxies.
 
-### 🌐 2. Dual Standard API Compatibility (OpenAI & Anthropic)
-- **OpenAI Standard:** Full `/v1/chat/completions` and `/v1/models` compatibility.
-- **Anthropic Standard:** Full `/v1/messages` endpoint with structured content blocks.
-- **Zero-Latency SSE Streaming:** Immediate socket flushing and `X-Accel-Buffering: no` ensures prompt tokens and completions stream in real time with sub-millisecond gateway overhead.
+It is designed for **stable operation**, not for defeating provider limits. Free-tier capacity is controlled upstream. The gateway therefore:
 
-### 🧠 3. Claude 3.7 Extended Thinking & Deep Reasoning Stream
-- **Claude 3.7 Compatible Thinking Stream:** In Anthropic mode, deep reasoning traces are translated into standard `content_block_start` (`type: 'thinking'`), streamed via `thinking_delta`, and sealed with cryptographic signatures for IDEs like **Cursor**, **Cline**, and **Roo Code**.
-- **OpenAI Reasoning Field:** Reasoning traces are simultaneously surfaced via standard `reasoning_content` deltas.
-- **Configurable Thinking Budgets:** Adjust reasoning depth dynamically via `thinking_level` (`off`, `low` 4k, `medium` 16k, `high` 32k, `max` 64k tokens).
+- fails fast on upstream quota (`429`) with a real `Retry-After`,
+- never rotates WARP keys or switches IPs to evade `401`/`429`,
+- never scrapes public proxy lists in the request path,
+- only fails over between routes on network errors and `5xx` responses,
+- exposes `/readyz` so a scheduler or load balancer can stop sending traffic when no route or model is available.
 
-### 🔒 4. Cloudflare WARP Proxy & Autonomous Key Rotation
-- **Zero-Dependency SOCKS5 Client:** Connects natively to local Cloudflare WARP (`127.0.0.1:40000`) via pure Node.js RFC 1928 implementation.
-- **Unauth Auto-Switching:** Automatically flips egress routing to Cloudflare WARP whenever an IP hits `401`, `403`, or `FreeTierError`.
-- **Dynamic WireGuard Key Rotation:** If the WARP egress IP is rate-limited, the gateway automatically executes `warp-cli tunnel rotate-keys`, resets edge egress in ~1.2 seconds, and retries seamlessly without dropping the client socket.
-- **Flexible Modes:** Toggle between `Auto Failover`, `Always WARP`, or `Disabled` directly from the dashboard.
-
-### 🔄 5. Autonomous Model Discovery & Zero-Leak Clean IDs
-- **10-Minute Background Discovery Cron:** Continuously syncs active models directly from OpenCode Zen.
-- **Clean Model Identifiers:** Automatically strips `-free` and `_free` suffixes from upstream IDs. Use clean names (`deepseek-v4.1-flash`, `nemotron-3.5-super-vl`, `beam`) in your applications without maintaining hardcoded translation lists.
-- **Dynamic Capability Inspection:** Inspects context window limits, max output tokens, vision support, reasoning capabilities, and tool support dynamically.
-
-### 🛠️ 6. Native Tool & Function Calling Engine
-- **Structured Schema Handling:** Pass custom function definitions, argument constraints, and parameters.
-- **Safe Schema Merging:** User-defined tools are merged seamlessly alongside required CLI system tools, ensuring upstream validation passes while your custom functions execute reliably.
-
-### 👁️ 7. Multimodal Vision Processing
-- **Full Image Understanding:** Complete support for image analysis using Base64 data URIs and URLs on vision-capable models (`nemotron-3.5-super-vl`, `mimo-v2.6-flash`, `longcat-2.5-preview`).
-- **Cross-Format Translation:** Accepts both OpenAI `image_url` data URIs and Anthropic `image` content blocks.
-
-### 🔑 8. Multi-Tenant Scoped API Keys & Quota Allocator
-- **Scoped `O2P-` Keys:** Generate custom keys for teams, agents, or client applications.
-- **Flexible Rate Limits:** Set independent RPM (Requests Per Minute) and TPM (Tokens Per Minute) caps.
-- **Token Budget Sliders:** Allocate quotas in **K (Thousands)** or **M (Millions)** of tokens, or set to Unlimited.
-- **Model Whitelists & Expiration:** Restrict specific keys to text-only or vision-only models, with automatic expiration dates (7d, 30d, 90d, or never).
-
-### 📊 9. Web Admin Control Plane & Live Telemetry
-- **Genuine 60-Second Telemetry Graph:** Live time-series graphs for RPM, TPM, Latency, and Success Rate (zero synthetic/demo data).
-- **Interactive Playground:** Full markdown chat, vision attachment preview, thinking token inspectors, and model parameter drawers.
-- **Zero Server Dependencies:** The entire backend runs on native Node.js core modules (`http`, `https`, `crypto`, `net`). Minimal memory footprint (<30MB RAM) and sub-millisecond cold starts.
+> **There is no 99% or 100% availability guarantee.** If the upstream free tier is exhausted, the gateway returns `429`; it does not manufacture capacity. For predictable capacity, use an upstream Zen key or a provider you are authorized to use.
 
 ---
 
-## 📐 Gateway Specifications & Engineering Matrix
+## Features
 
-| Category | Specification | Technical Implementation |
+### API compatibility
+
+- **OpenAI:** `/v1/chat/completions` (streaming and non-streaming), `/v1/models`, `/v1/models/:model`
+- **Anthropic:** `/v1/messages` (text, thinking blocks, `tool_use`, images)
+- SSE streaming with `X-Accel-Buffering: no` and TCP `setNoDelay(true)`
+- OpenAI `tools` / `tool_choice` and Anthropic tool-use translation
+- Vision via OpenAI `image_url` data URIs and Anthropic `image` blocks
+- Reasoning traces as OpenAI `reasoning_content` and Anthropic `thinking_delta`
+
+### Upstream compatibility
+
+- Injects the core CLI tool schemas the upstream expects while preserving client-defined tools
+- Mints canonical descending `ses_...` session identifiers
+- Discovers models from OpenCode Zen every 10 minutes and strips `-free` / `_free` suffixes
+- Supports an upstream Zen key for paid models (`OPENCODE_ZEN_KEY`)
+
+### Egress and reliability
+
+- **Cloudflare WARP** in four explicit modes: `sidecar`, `embedded`, `cli`, `disabled`
+- **User-owned proxies:** HTTP, HTTPS, and SOCKS5 with optional authentication
+- Deterministic route order: **WARP → user proxies → direct (only if allowed)**
+- Route health tracking, circuit breaking on repeated network/`5xx` failures, and route failover
+- Provider-quota cooldown that fails fast with `429` + `Retry-After` while keeping the route ready
+- Bounded global/per-key admission queue, request deadline, and capped retries
+- `/healthz` liveness and `/readyz` readiness endpoints
+- Docker Compose sidecar deployment with direct fallback disabled by default
+
+### Control plane
+
+- React dashboard with live telemetry, playground, model catalog, and API-key management
+- Scoped `O2P-` API keys with RPM/TPM limits, token budgets, model whitelists, and expiry
+- Cryptographically random master key and admin password on first run
+- No hardcoded `O2P-master-key` or `admin123` backdoors
+
+---
+
+## Reliability model
+
+```text
+client request
+    │
+    ▼
+API key auth ──► 401 on invalid/expired key
+    │
+    ▼
+quota cooldown? ──► 429 + Retry-After (no IP rotation)
+    │
+    ▼
+admission queue ──► 429 queue_full + Retry-After when saturated
+    │
+    ▼
+select egress route: WARP → user proxies → direct (if allowed)
+    │
+    ▼
+upstream request with timeout and overall deadline
+    │
+    ├── 2xx ──► stream/non-stream response (slot held until close)
+    ├── 429 / quota 403 ──► 429 + Retry-After (fail fast)
+    ├── network / 5xx ──► next route or retry, then 502/504
+    └── fatal 4xx ──► return the upstream error
+```
+
+Key properties:
+
+| Behavior | Implementation |
+| :--- | :--- |
+| Retry budget | `MAX_RETRIES=2` by default, hard-capped at `3` |
+| Request timeout | `30s` per attempt by default |
+| Overall deadline | `90s` by default |
+| Queue | `8` concurrent globally, `4` per key, `100` waiting, `15s` wait |
+| Stream admission | Slot held for the full response, not released when headers arrive |
+| Quota | `429` with `Retry-After`; route remains in `/readyz` |
+| Route failover | Network errors and `5xx` only |
+| Direct egress | Disabled by compose (`ALLOW_DIRECT_FALLBACK=false`) |
+
+---
+
+## Requirements
+
+- **Node.js 20+** for local runs (the Docker image uses `node:20-bookworm-slim`)
+- **Docker + Docker Compose v2** for the recommended deployment
+- **Cloudflare WARP sidecar** (provided by the compose file) or your own SOCKS5/HTTP proxies
+- Linux host for the WARP sidecar (`NET_ADMIN` capability is required)
+
+---
+
+## Quickstart: Docker Compose (recommended)
+
+### 1. Configure secrets
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set a strong dashboard password:
+
+```dotenv
+DASHBOARD_USER=admin
+DASHBOARD_PASS=replace-with-a-long-random-password
+```
+
+Generate one with:
+
+```bash
+openssl rand -base64 24
+```
+
+`DASHBOARD_PASS` is required by `docker-compose.yml`. Known defaults such as `admin123` and passwords shorter than 12 characters are ignored; the gateway generates a random password and writes it to `data/admin-password.txt`.
+
+### 2. Optional: add your own proxies
+
+```dotenv
+PROXIES=socks5://user:pass@proxy.example:1080,http://proxy.example:8080
+```
+
+Proxies are used after WARP and before direct egress. They are never scraped from public lists.
+
+### 3. Start
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+The stack contains:
+
+- `gateway` — the Node.js API gateway on port `8080`
+- `warp` — `caomingjun/warp`, providing a SOCKS5 endpoint at `warp:1080`
+
+The gateway binds HTTP immediately. WARP and model discovery run in the background, so a slow sidecar cannot make the container fail its liveness probe.
+
+### 4. Verify
+
+```bash
+curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8080/readyz
+```
+
+`/readyz` returns `503` until at least one egress route and one model are available. It returns `200` when the gateway is ready to serve inference.
+
+If it stays `503`:
+
+```bash
+docker compose logs -f warp
+docker compose logs -f gateway
+```
+
+Check that the sidecar answers SOCKS5 on `warp:1080` and that the gateway can reach `https://opencode.ai`.
+
+### 5. Read the generated credentials
+
+```bash
+cat data/admin-password.txt
+cat data/keys.json
+```
+
+- `data/admin-password.txt` — generated dashboard password (only when no strong `DASHBOARD_PASS` is configured)
+- `data/keys.json` — master API key (`O2P-...`)
+
+Keep the `data/` directory private. It contains credentials and runtime state.
+
+---
+
+## Local Node.js
+
+```bash
+npm install --prefix client
+npm run build
+
+# Linux/macOS
+DASHBOARD_PASS='replace-with-a-long-random-password' npm start
+
+# PowerShell
+$env:DASHBOARD_PASS='replace-with-a-long-random-password'; npm start
+```
+
+Open <http://127.0.0.1:8080/>. The API base URL is `http://127.0.0.1:8080/v1`.
+
+For anonymous egress locally, use one of:
+
+- **Embedded WARP:** install `wireproxy` and set `WARP_ENGINE=embedded` (the Docker image ships it; a local Windows build can use `wireproxy.exe` in the repository root).
+- **WARP CLI:** install Cloudflare WARP and set `WARP_ENGINE=cli`.
+- **Sidecar:** run a SOCKS5 WARP container and set `WARP_ENGINE=sidecar`, `WARP_HOST`, `WARP_PORT`.
+- **Your proxy:** set `PROXIES=...`.
+
+If you intentionally want direct egress for local development, set `WARP_ENGINE=disabled` and `ALLOW_DIRECT_FALLBACK=true`. This exposes your host IP to the upstream and is not anonymous.
+
+---
+
+## WARP engine modes
+
+`WARP_ENGINE` controls who owns the tunnel:
+
+| Mode | Behavior | Use when |
 | :--- | :--- | :--- |
-| **Proxy Latency** | `< 1.2ms` internal overhead | Pure Node.js event loop, zero intermediate serialization layers |
-| **Memory Footprint** | `< 30MB RAM` baseline | Pure Node.js core runtime (`http`, `https`, `crypto`, `net`), 0 npm modules on server |
-| **Cold Start Time** | `< 50ms` | Instant initialization, no heavy framework hydration |
-| **OpenAI API Standard** | Full v1 Specification | `/v1/chat/completions` (streaming & non-streaming), `/v1/models`, `/v1/models/:model` |
-| **Anthropic API Standard**| Full Messages v1 | `/v1/messages` (text, thinking blocks, tool_use blocks, image content blocks) |
-| **Streaming Engine** | Zero-Buffering SSE | HTTP 1.1 Chunked Transfer, `X-Accel-Buffering: no`, TCP socket `setNoDelay(true)` |
-| **Session Architecture** | `Identifier.descending()` | `~((Date.now() << 12) \| seq)` inverted 48-bit hex + 14 Base62 characters |
-| **Anti-Bot Bypass** | Core Tool Injection | Automatic merging of 5 decompiled CLI schemas (`shell`, `edit`, `glob`, `grep`, `read`) |
-| **Tunnel Egress** | RFC 1928 SOCKS5 Client | Native Node.js SOCKS5 socket tunneling to local WARP daemon on port 40000 |
-| **IP Failover Speed** | `~1.2 seconds` | Dynamic WireGuard / MASQUE tunnel key rotation (`warp-cli tunnel rotate-keys`) |
-| **Model Discovery** | Dynamic 10-min Cron | Automatic upstream model discovery with automatic `-free` suffix removal |
-| **Rate Limiting** | Sliding Window (60s) | Per-key and global RPM / TPM sliding windows with token bucket enforcement |
-| **Reasoning Support** | Claude 3.7 / OpenAI spec | `thinking_delta` blocks with HMAC signatures, and `reasoning_content` deltas |
-| **Container Platform** | Alpine Linux Docker | Multi-stage ultra-lightweight image (<75MB final compressed footprint) |
+| `sidecar` | The gateway only talks to an external SOCKS5 endpoint. It never spawns `wireproxy`. | Docker Compose, or a separate WARP container |
+| `embedded` | The gateway spawns and supervises `wireproxy` on loopback ports `40000–40003`. | Local Linux/Windows with `wireproxy` installed |
+| `cli` | The gateway configures and uses the official `warp-cli` proxy mode. | Host with Cloudflare WARP installed |
+| `disabled` | No WARP transport. | Direct or user-proxy-only deployments |
+| `auto` | `sidecar` for a non-loopback `WARP_HOST`; otherwise `embedded` if `wireproxy` exists, then `cli`, then `sidecar`. | Default |
+
+Aliases: `external`, `proxy`, and `socks5` map to `sidecar`; `wireproxy` maps to `embedded`; `warp-cli` maps to `cli`; `off` and `none` map to `disabled`.
+
+### Rotation policy
+
+- `WARP_AUTO_ROTATE_MINUTES=0` by default: no periodic key churn.
+- `warp_rotate_on_unauth` and `warp_rotate_on_rate_limit` are forced to `false`.
+- In `sidecar` mode, key rotation belongs to the sidecar. Restart the sidecar if you intentionally need a new WARP identity.
+- The gateway does **not** rotate IPs to evade quotas or anti-bot controls.
 
 ---
 
-## 🔮 The Breakthrough: How We Patched the OpenCode Zen Anti-Bot Gate
+## Egress modes
 
-OpenCode Zen models are guarded by an upstream barrier that returns:
-> `403 Forbidden: "OpenCode Zen models can only be used with the OpenCode CLI"`
+| `EGRESS_MODE` | Route order |
+| :--- | :--- |
+| `auto` / `hybrid` (default) | WARP → user proxies → direct only if `ALLOW_DIRECT_FALLBACK=true` |
+| `warp_only` | WARP only |
+| `proxy_only` | User proxies only |
+| `direct` | Direct only (not anonymous) |
 
-OpenCode2API neutralizes this barrier and delivers **100% zero-drop availability** through four deep architectural patches:
+`ALLOW_DIRECT_FALLBACK`:
 
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                             4-LAYER RESILIENCE ENGINE                                  │
-├─────────────────────────┬──────────────────────────────────────────────────────────────┤
-│ 1. Core Tool Merging    │ Injects official decompiled CLI schemas (shell, edit, glob,  │
-│                         │ grep, read) alongside client tools to satisfy anti-bot gate. │
-├─────────────────────────┼──────────────────────────────────────────────────────────────┤
-│ 2. Canonical Sessions   │ Generates exact inverted 48-bit millisecond timestamps       │
-│                         │ ~(ts * 4096 + counter) conforming to Identifier.descending().│
-├─────────────────────────┼──────────────────────────────────────────────────────────────┤
-│ 3. Cloudflare WARP      │ Native RFC 1928 SOCKS5 tunnel with automatic WireGuard key   │
-│    Dynamic Rotation     │ rotation on 401/403 unauth to reset edge egress in ~1.2s.    │
-├─────────────────────────┼──────────────────────────────────────────────────────────────┤
-│ 4. Autonomous Version   │ Polls GitHub & npm every 30 min; hot-patches User-Agent      │
-│    Sync & Auto-Update   │ and header fingerprints with zero container restarts.        │
-└─────────────────────────┴──────────────────────────────────────────────────────────────┘
-```
+- `false` — never use direct egress. Recommended for anonymous deployments.
+- `true` — allow direct egress as the last route.
+- unset — direct is allowed only when no proxy is configured and `WARP_MODE` is not `always`.
 
-### 1. Mandatory Core CLI Tool Schema Injection ([`server/tools.js`](file:///d:/CODES/Opencode2api/server/tools.js))
-OpenCode's inference server examines the `tools` array in incoming JSON payloads. Empty arrays or third-party tools trigger an immediate bot block. We decompiled the official OpenCode CLI and extracted the exact schemas for all 5 core tools (`shell`, `edit`, `glob`, `grep`, `read`). Our gateway's `mergeTools()` combines any caller-defined functions with these 5 core tools:
-```javascript
-function mergeTools(clientTools) {
-  const userTools = Array.isArray(clientTools) ? clientTools : [];
-  const merged = [...CORE_TOOLS]; // Injects the 5 official CLI schemas
-  for (const ut of userTools) {
-    const utName = ut.function?.name || ut.name;
-    if (!merged.some(ct => ct.function.name === utName)) {
-      merged.push(ut); // Preserves user's custom function tools
-    }
-  }
-  return merged;
-}
-```
+`WARP_MODE`:
 
-### 2. Canonical Descending Session Minting ([`server/identity.js`](file:///d:/CODES/Opencode2api/server/identity.js))
-Session IDs are minted using OpenCode's internal `Identifier.descending()` temporal algorithm:
-$$\text{Part}_{\text{time}} = \sim(\text{Date.now()} \times 4096 + \text{seq})$$
-Combined with 14 Base62 random entropy characters, this produces genuine `ses_[0-9a-f]{12}[0-9A-Za-z]{14}` tokens that pass upstream validation without expiring.
+- `always` — keep WARP enabled and prevent implicit direct fallback.
+- `disabled` / `never` — disable WARP.
+- `auto` — default.
 
-### 3. Cloudflare WARP Dynamic Failover & Key Rotation ([`server/warp.js`](file:///d:/CODES/Opencode2api/server/warp.js))
-When an IP hits free-tier hourly usage limits (`FreeTierError`), the gateway automatically switches egress to a local Cloudflare WARP SOCKS5 client on `127.0.0.1:40000`. If WARP's egress is exhausted, it calls `warp-cli tunnel rotate-keys`, renegotiates WireGuard keys in ~1.2 seconds, and retries seamlessly without dropping the client socket.
-
-### 4. Autonomous Upstream CLI Sync ([`server/updater.js`](file:///d:/CODES/Opencode2api/server/updater.js))
-A background worker checks GitHub (`anomalyco/opencode`) and the npm registry. Newly released CLI versions are hot-applied to request headers without container restarts, and newly added Zen models are automatically discovered and cataloged.
+Compose sets `WARP_ENGINE=sidecar`, `WARP_MODE=always`, and `ALLOW_DIRECT_FALLBACK=false`.
 
 ---
 
-## 🏗️ System Architecture & Data Flow Pipeline
+## Environment variables
 
-```mermaid
-flowchart TD
-    subgraph ClientLayer ["Client Applications"]
-        IDE["Cursor / Cline / Roo Code / Continue"]
-        SDK["OpenAI / Anthropic SDKs & Custom Agents"]
-    end
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PORT` | `8080` | HTTP port |
+| `DASHBOARD_USER` | `admin` | Dashboard username |
+| `DASHBOARD_PASS` | generated | Dashboard password; 12+ characters, required by compose |
+| `OPENCODE_ZEN_KEY` | empty | Upstream Zen key for paid models |
+| `UPSTREAM_INFERENCE_URL` | OpenCode Zen URL | Override the upstream chat endpoint (local testing or compatible mirrors; plain HTTP requires direct egress) |
+| `PROXIES` | empty | Comma-separated `http://`, `https://`, or `socks5://` proxies |
+| `WARP_ENGINE` | `auto` | `auto`, `sidecar`, `embedded`, `cli`, `disabled` |
+| `WARP_MODE` | `auto` | `auto`, `always`, `disabled`/`never` |
+| `WARP_HOST` | `127.0.0.1` | WARP SOCKS5 host |
+| `WARP_PORT` | `40000` | WARP SOCKS5 port (compose uses `1080`) |
+| `WARP_AUTO_ROTATE_MINUTES` | `0` | Periodic key rotation; `0` disables it |
+| `EGRESS_MODE` | `auto` | `auto`, `warp_only`, `proxy_only`, `direct` |
+| `ALLOW_DIRECT_FALLBACK` | unset | `true`/`false` direct-egress policy |
+| `MAX_RETRIES` | `2` | Retries per request, capped at `3` |
+| `REQUEST_TIMEOUT_MS` | `30000` | Per-attempt timeout |
+| `REQUEST_DEADLINE_MS` | `90000` | Overall request deadline |
+| `QUEUE_MAX_CONCURRENT` | `8` | Global concurrent upstream requests |
+| `QUEUE_MAX_PER_KEY` | `4` | Concurrent upstream requests per API key |
+| `QUEUE_MAX_SIZE` | `100` | Maximum queued requests |
+| `QUEUE_WAIT_MS` | `15000` | Maximum queue wait before `429` |
+| `PROXY_SCRAPER_ENABLED` | `false` | Diagnostics only; never used for request egress |
 
-    subgraph Gateway ["OpenCode2API Gateway (Port 8080)"]
-        Router{"Request Router"}
-        Auth["Key & Quota Validator (O2P-*)"]
-        ToolInj["Core CLI Tool Injector (Anti-Bot Gate Bypass)"]
-        SessMint["Descending Session Minter (ses_*)"]
-        SSE["Zero-Latency SSE Streamer"]
-        Cascade["Smart Cascade Failover (glm -> beam / deepseek)"]
-        WarpCtrl["Cloudflare WARP Proxy & Key Rotator (127.0.0.1:40000)"]
-    end
-
-    subgraph Upstream ["Upstream Infrastructure"]
-        Zen["OpenCode Zen Cloud Engine"]
-        CF["Cloudflare Edge Egress (Rotatable IP)"]
-    end
-
-    IDE & SDK -->|"HTTP /v1/chat/completions or /v1/messages"| Router
-    Router --> Auth
-    Auth --> ToolInj
-    ToolInj --> SessMint
-    SessMint -->|"Direct Inference"| Zen
-    Zen -.->|"401 / 403 / FreeTierError"| WarpCtrl
-    WarpCtrl -->|"Route via SOCKS5 Tunnel"| CF
-    CF --> Zen
-    Zen -.->|"429 Model Throttled"| Cascade
-    Cascade -->|"Failover Healthy Model"| Zen
-    Zen --> SSE --> IDE & SDK
-```
+Explicit environment variables override cached values in `data/config.json`. `data/config.json` is rewritten on startup with normalized defaults.
 
 ---
 
-## 🖼️ Visual Control Plane Tour
+## Authentication
 
-Captured live from the running OpenCode2API control plane at `1440x920` (Retina 2x):
-
-### 1. System Telemetry & Live 60-Second Performance Monitor
-Monitor live RPM, TPM, Token Allocation (Prompt / Completion / Reasoning), Latency, and genuine 60-second sampled time-series graph.
-![Telemetry Dashboard](docs/screenshots/overview.png)
-
----
-
-### 2. Interactive Test Playground
-Dual OpenAI & Anthropic chat interface with live thinking token inspection, image attachments, and temperature controls.
-![Interactive Playground](docs/screenshots/playground.png)
-
----
-
-### 3. Elevated Model Selector & Capability Inspector
-Switch dynamically across auto-discovered models with capability badges (Vision, Tools, Reasoning, Context Window) floating above the chat feed.
-![Model Dropdown](docs/screenshots/model-dropdown.png)
-
----
-
-### 4. Multi-Tenant Scoped API Keys & Quota Allocator
-Issue custom `O2P-` keys with independent RPM/TPM caps, token budget sliders in K/M, model whitelists, and expiration policies.
-![API Key Management](docs/screenshots/api-keys.png)
-
----
-
-### 5. Auto-Discovered Zen Models Catalog
-All available models synchronized directly from OpenCode Zen with clean IDs (zero `-free` suffix leaks) and one-click manual discovery sync.
-![Models Catalog](docs/screenshots/models.png)
-
----
-
-## 🚀 Quickstart & Deployment
-
-### Option A: Docker Compose (Recommended)
-
-Pull and run with a single command without needing local source builds:
+Send the master key from `data/keys.json`, or a scoped key created in the dashboard:
 
 ```bash
-docker compose up -d
-```
-
-```yaml
-version: '3.8'
-
-services:
-  gateway:
-    image: ghcr.io/nystic-shadow/opencode2api:latest
-    build: .
-    container_name: opencode2api
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    environment:
-      - PORT=8080
-      - DASHBOARD_USER=admin
-      - DASHBOARD_PASS=admin123
-      - WARP_HOST=warp
-      - WARP_PORT=1080
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      - warp
-
-  warp:
-    image: caomingjun/warp:latest
-    container_name: opencode2api-warp
-    restart: unless-stopped
-    environment:
-      - WARP_SLEEP=2
-    cap_add:
-      - NET_ADMIN
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
-      - net.ipv4.conf.all.src_valid_mark=1
-    volumes:
-      - warp-data:/var/lib/cloudflare-warp
-
-volumes:
-  warp-data:
-```
-
-### Option B: Cloudflare WARP 1-Line Host Auto-Installer
-If running directly on a Linux VPS / host without Docker compose:
-```bash
-curl -fsSL https://raw.githubusercontent.com/Nystic-Shadow/Opencode2api/main/scripts/install-warp.sh | sudo bash
-```
-*Installs the official Cloudflare WARP client, registers the device, configures SOCKS5 proxy on `127.0.0.1:40000`, and verifies upstream edge handshake.*
-
-### Option C: Local Node.js (v18+)
-
-```bash
-git clone https://github.com/Nystic-Shadow/Opencode2api.git
-cd Opencode2api
-
-npm run build    # Compile web control plane
-npm start        # Start gateway on http://127.0.0.1:8080
-```
-
-### Access Endpoints
-- **Web Control Plane:** `http://127.0.0.1:8080/` (Default Login: `admin` / `admin123`)
-- **OpenAI Compatible Base URL:** `http://127.0.0.1:8080/v1`
-- **Anthropic Messages Endpoint:** `http://127.0.0.1:8080/v1/messages`
-- **Master Admin API Key:** `O2P-master-key`
-
----
-
-## 🔌 IDE & Client Configuration
-
-Use clean model identifiers (e.g. `deepseek-v4.1-flash`, `nemotron-3.5-super-vl`, `beam`). No `-free` suffixes required!
-
-### Cursor & Continue
-- **Base URL:** `http://127.0.0.1:8080/v1`
-- **API Key:** `O2P-master-key` (or your custom scoped key)
-- **Model:** `deepseek-v4.1-flash` or `beam`
-
-### Cline & Roo Code (Anthropic Mode)
-- **API Provider:** Anthropic Compatible
-- **Base URL:** `http://127.0.0.1:8080`
-- **API Key:** `O2P-master-key`
-- **Model ID:** `deepseek-v4.1-flash` (supports streaming reasoning tokens)
-
-### Quick cURL Test
-```bash
-curl -N http://127.0.0.1:8080/v1/chat/completions \
-  -H "Authorization: Bearer O2P-master-key" \
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer O2P-your-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-v4.1-flash",
@@ -324,46 +317,183 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
----
-
-## 🧪 Exhaustive 15-Vector Verification Suite
-
-The repository includes a comprehensive verification suite testing all gateway protocols:
+Anthropic clients can use either header:
 
 ```bash
-node test_exhaustive.js
+curl http://127.0.0.1:8080/v1/messages \
+  -H "x-api-key: O2P-your-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4.1-flash",
+    "max_tokens": 256,
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
 ```
 
+The old `O2P-master-key` and `sk-opencode-free-master` defaults are rejected with `401`.
+
+To choose the master key on a fresh deployment, set `INITIAL_KEY` or `MASTER_KEY` before the first start. Otherwise a random `O2P-...` key is generated and stored in `data/keys.json`.
+
+---
+
+## Client configuration
+
+Use clean model IDs such as `deepseek-v4.1-flash`, `nemotron-3.5-super-vl`, or `beam`.
+
+### Cursor / Continue (OpenAI mode)
+
+- **Base URL:** `http://127.0.0.1:8080/v1`
+- **API Key:** master key from `data/keys.json`, or a scoped key
+- **Model:** any ID from `/v1/models`
+
+### Cline / Roo Code (Anthropic mode)
+
+- **API Provider:** Anthropic compatible
+- **Base URL:** `http://127.0.0.1:8080`
+- **API Key:** master key or scoped key
+- **Model ID:** any ID from `/v1/models`
+
+For a remote deployment, put the gateway behind HTTPS (reverse proxy, tunnel, or load balancer) and never expose the dashboard over plain HTTP to the public internet.
+
+---
+
+## Health and readiness
+
+### `GET /healthz` — liveness
+
+Always `200` while the Node process is alive. Used by the image `HEALTHCHECK`.
+
+```json
+{
+  "status": "ok",
+  "service": "OpenCode2API",
+  "uptime_seconds": 42,
+  "models_count": 8,
+  "egress_ready": true,
+  "warp_ready": true
+}
 ```
-================================================================
-       OpenCode2API Enterprise Gateway - Exhaustive Test Suite   
-================================================================
 
-[TEST 01] GET /healthz (Service Health & Model Count) .................... PASSED (16ms)
-[TEST 02] GET /v1/models (Clean Model IDs & Capability Flags) ............ PASSED (3ms)
-[TEST 03] POST /v1/chat/completions (OpenAI Non-streaming Inference) ..... PASSED (1968ms)
-[TEST 04] POST /v1/chat/completions (OpenAI SSE Streaming) ............... PASSED (9470ms)
-[TEST 05] POST /v1/messages (Anthropic Non-streaming Protocol) ........... PASSED (4920ms)
-[TEST 06] POST /v1/messages (Anthropic SSE Streaming with Block Lifecycle) PASSED (2144ms)
-[TEST 07] POST /v1/chat/completions (OpenAI Tool & Function Calling) ..... PASSED (1567ms)
-[TEST 08] POST /v1/messages (Anthropic Tool Use Protocol) ................ PASSED (2296ms)
-[TEST 09] POST /v1/chat/completions (Multimodal Vision / Base64 Image) ... PASSED (3134ms)
-[TEST 10] POST /v1/chat/completions (Smart Failover Cascade Recovery) .... PASSED (1680ms)
-[TEST 11] GET /api/warp/status (Admin Authentication & WARP Diagnostics) . PASSED (171ms)
-[TEST 12] POST /api/warp/rotate (Dynamic WireGuard Key Rotation) ......... PASSED (2565ms)
-[TEST 13] POST /v1/chat/completions (WARP Tunnel Egress Inference) ....... PASSED (2088ms)
-[TEST 14] API Keys Lifecycle (Creation, Scoped Auth, Quota Deduction) .... PASSED (1399ms)
-[TEST 15] GET /api/stats (Real-Time Metrics & Telemetry Accuracy) ........ PASSED (2ms)
+### `GET /readyz` — readiness
 
-================================================================
-Test Execution Finished: 15 / 15 Vectors Passed (100%)
-================================================================
+`200` only when at least one egress route and one model are available; otherwise `503`.
 
-✔ 100% GATEWAY PASS RATE ACHIEVED ACROSS ALL ENTERPRISE PROTOCOLS!
+```json
+{
+  "status": "ready",
+  "models_count": 8,
+  "warp": { "engine": "sidecar", "ready": true, "host": "warp", "port": 1080 },
+  "egress": {
+    "mode": "auto",
+    "ready_routes": [{ "id": "warp:1080", "type": "warp" }],
+    "proxies_configured": 0,
+    "allow_direct": false
+  },
+  "queue": { "active": 0, "queued": 0, "limits": { "maxConcurrent": 8, "maxPerKey": 4, "maxQueue": 100, "maxWaitMs": 15000 } }
+}
+```
+
+Compose uses `/readyz` for its healthcheck. The Docker image itself uses `/healthz` so a temporary WARP outage does not restart a healthy process.
+
+---
+
+## Error semantics
+
+| Status | Type | Meaning |
+| :--- | :--- | :--- |
+| `401` | authentication | Missing/invalid API key, expired key, or paid model without a Zen key |
+| `429` | `free_tier_rate_limit` | Upstream quota/capacity; honor `Retry-After` |
+| `429` | `queue_full` | Gateway concurrency limit; retry shortly |
+| `502` | upstream/stream | Upstream connection or stream failed |
+| `503` | `no_egress_route` | WARP/proxy not ready and direct fallback disabled |
+| `504` | deadline | Overall request deadline exceeded |
+
+The gateway does not retry `429` on another IP. It returns the limit to the caller so clients can back off honestly.
+
+---
+
+## Testing and verification
+
+```bash
+npm test                 # security + reliability suites
+npm run build            # build the React dashboard
+docker compose config    # validate compose interpolation
+node --check server/proxy.js
+```
+
+The reliability suite covers proxy parsing, SOCKS5 response parsing, retry classification, quota cooldown, route ordering, admission queue limits, and WARP engine selection. It does not require network access.
+
+A live smoke test after deployment:
+
+```bash
+curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8080/readyz
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $(node -e "console.log(require('./data/keys.json')[0].key)")" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4.1-flash","stream":false,"messages":[{"role":"user","content":"Reply with OK."}]}'
+```
+
+Verify WARP egress from the sidecar:
+
+```bash
+docker compose exec warp curl -s https://cloudflare.com/cdn-cgi/trace | grep -E 'ip=|warp='
 ```
 
 ---
 
-## 📜 License
+## Operations
+
+### Data directory
+
+`data/` is mounted as a volume and contains:
+
+- `config.json` — normalized runtime configuration
+- `keys.json` — API keys (master key included)
+- `admin-password.txt` — generated dashboard password
+- `warp_account.json`, `warp_pool.json`, `wireproxy_*.conf` — embedded WARP state (when used)
+
+Back up `keys.json` and `config.json`. Treat the whole directory as a secret.
+
+### Change the dashboard password
+
+Set a strong `DASHBOARD_PASS` in `.env` and restart:
+
+```bash
+docker compose up -d --force-recreate gateway
+```
+
+Passwords shorter than 12 characters and known defaults are ignored.
+
+### Change the master API key
+
+Create a new scoped key in the dashboard, or edit `data/keys.json` while the gateway is stopped. Restart afterwards.
+
+### Proxy failover
+
+Routes are tried in order. A network error or `5xx` marks the route unhealthy after repeated failures; `429` marks a quota cooldown but keeps the route ready. There is no background public-proxy scanner in the request path.
+
+### Docker resilience
+
+- `restart: unless-stopped` on both services
+- `depends_on` for startup order, with `/readyz` as the real readiness gate
+- Persistent `data/` and `warp-data/` volumes
+- Sidecar restart does not require recreating the gateway
+
+---
+
+## Limitations and security notes
+
+- **Free-tier capacity is upstream-controlled.** No gateway can guarantee 99% availability without authorized upstream capacity.
+- **Anonymity depends on your egress.** With `ALLOW_DIRECT_FALLBACK=false`, the gateway will return `503` rather than silently leak the host IP.
+- **WARP sidecar image is not pinned.** `caomingjun/warp:latest` can change. Pin a digest or version for reproducible deployments.
+- **Do not expose the dashboard without TLS and strong credentials.** Use a reverse proxy, firewall, or private network.
+- **Respect upstream terms and applicable law.** This project is not affiliated with OpenCode, Anthropic, OpenAI, or Cloudflare.
+- **No warranty.** See the MIT license.
+
+---
+
+## License
 
 This project is open-source software licensed under the [MIT License](LICENSE).

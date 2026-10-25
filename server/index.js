@@ -9,6 +9,8 @@ const keys = require('./keys');
 const discovery = require('./discovery');
 const proxy = require('./proxy');
 const warp = require('./warp');
+const egress = require('./egress');
+const requestQueue = require('./requestQueue');
 const adminRoutes = require('./adminRoutes');
 
 // Global exception protection to guarantee gateway 100% zero-crash uptime
@@ -187,15 +189,46 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    // 1. Health endpoint
+    // 1. Health endpoint (liveness: always 200 while the process is alive)
     if (pathname === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({
         status: 'ok',
         service: 'OpenCode2API',
+        uptime_seconds: Math.round(process.uptime()),
         cli_version: config.get('client_version'),
-        models_count: discovery.models.length
+        models_count: discovery.models.length,
+        egress_ready: egress.getCandidates().length > 0,
+        warp_ready: warp.isReady()
       }));
+    }
+
+    // 1b. Readiness endpoint (traffic should only be sent when this is 200)
+    if (pathname === '/readyz') {
+      const routes = egress.getCandidates();
+      const modelsCount = discovery.models.length;
+      const ready = routes.length > 0 && modelsCount > 0;
+      const body = {
+        status: ready ? 'ready' : 'not_ready',
+        service: 'OpenCode2API',
+        uptime_seconds: Math.round(process.uptime()),
+        models_count: modelsCount,
+        warp: {
+          engine: warp.getEngineMode(),
+          ready: warp.isReady(),
+          host: config.get('warp_host'),
+          port: config.get('warp_port')
+        },
+        egress: {
+          mode: config.get('egress_mode'),
+          ready_routes: routes.map(r => ({ id: r.id, type: r.type })),
+          proxies_configured: (config.get('proxies') || []).length,
+          allow_direct: egress.getStatus().allowDirect
+        },
+        queue: requestQueue.getStats()
+      };
+      res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(body));
     }
 
     // 2. Admin dashboard APIs (/api/...)
@@ -306,55 +339,60 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// Sequenced Boot: Ensure WARP is connected before dashboard/server starts
+// Boot order: bind the HTTP port immediately, then establish WARP and sync
+// models in the background. A slow or restarting WARP sidecar must never make
+// the container fail its liveness probe or refuse to start.
+function startHttpServer() {
+  if (server.listening) return;
+
+  server.on('error', (err) => {
+    console.error('[HTTP] Server error:', err.message);
+    if (err.code === 'EADDRINUSE') process.exit(1);
+  });
+
+  server.listen(PORT, () => {
+    console.log(`\n=============================================================`);
+    console.log(`🚀 OpenCode2API Gateway Live on http://127.0.0.1:${PORT}`);
+    console.log(`📊 Admin Dashboard: http://127.0.0.1:${PORT}/`);
+    console.log(`🔑 Admin Username: ${config.get('admin_username')} (password via DASHBOARD_PASS or data/admin-password.txt)`);
+    console.log(`🌐 OpenAI Base URL: http://127.0.0.1:${PORT}/v1`);
+    console.log(`🌐 Anthropic Messages URL: http://127.0.0.1:${PORT}/v1/messages`);
+    console.log(`✨ Discovered Models: ${discovery.models.length} (cached at boot; syncing in background)`);
+    console.log(`⚡ OpenCode CLI Fingerprint: v${config.get('client_version')}`);
+    console.log(`🛡️  WARP Engine: ${warp.getEngineMode()} (ready: ${warp.isReady()})`);
+    console.log(`✅ Readiness probe: http://127.0.0.1:${PORT}/readyz`);
+    console.log(`=============================================================\n`);
+  });
+}
+
 async function boot() {
   console.log(`\n=============================================================`);
   console.log(`⚡ OpenCode2API Gateway Boot Sequence Initiated`);
   console.log(`=============================================================`);
 
-  // Step 1: Establish Cloudflare WARP connection first so gateway egress is ready
-  console.log(`[Boot] Step 1/3: Establishing Cloudflare WARP connection...`);
-  try {
-    const warpReady = await Promise.race([
-      warp.autoBootstrap(),
-      new Promise(resolve => setTimeout(() => resolve(false), 12000))
-    ]);
-    if (warpReady) {
-      console.log(`[Boot] Cloudflare WARP successfully connected on port ${config.get('warp_port') || 40000} (warp=on)`);
-    } else {
-      console.warn(`[Boot] WARP bootstrap in progress or timed out. Proceeding in background...`);
-    }
-  } catch (err) {
-    console.warn(`[Boot] WARP bootstrap notice:`, err.message);
-  }
+  // Bind first. The dashboard and /healthz are available immediately.
+  startHttpServer();
 
-  // Step 2: Discover models from OpenCode Zen (routes through WARP)
-  console.log(`[Boot] Step 2/3: Discovering upstream models from OpenCode Zen...`);
-  try {
-    await discovery.sync();
-  } catch (err) {
-    console.warn(`[Boot] Initial model discovery notice:`, err.message);
-  }
+  // WARP runs in the background so sidecar startup cannot delay the gateway.
+  warp.autoBootstrap()
+    .then((warpReady) => {
+      if (warpReady) {
+        console.log(`[Boot] WARP engine "${warp.getEngineMode()}" connected on port ${config.get('warp_port')} (warp=on)`);
+      } else {
+        console.warn(`[Boot] WARP engine "${warp.getEngineMode()}" is not ready yet; /readyz will report 503 until it is.`);
+      }
+    })
+    .catch((err) => {
+      console.warn('[Boot] WARP bootstrap notice:', err.message);
+    });
 
-  // Step 3: Launch Gateway HTTP Server & Dashboard
-  console.log(`[Boot] Step 3/3: Launching HTTP API & Control Plane on port ${PORT}...`);
-  server.listen(PORT, () => {
-    console.log(`\n=============================================================`);
-    console.log(`🚀 OpenCode2API Gateway Live on http://127.0.0.1:${PORT}`);
-    console.log(`📊 Admin Dashboard: http://127.0.0.1:${PORT}/`);
-    console.log(`🔑 Admin Username: ${config.get('admin_username')} (Password protected via DASHBOARD_PASS / .env)`);
-    console.log(`🌐 OpenAI Base URL: http://127.0.0.1:${PORT}/v1`);
-    console.log(`🌐 Anthropic Messages URL: http://127.0.0.1:${PORT}/v1/messages`);
-    console.log(`✨ Discovered Models: ${discovery.models.length} (clean IDs, free suffixes auto-removed)`);
-    console.log(`⚡ OpenCode CLI Fingerprint: v${config.get('client_version')}`);
-    console.log(`🛡️  WARP Status: ${warp.isReady() ? 'Connected (warp=on)' : 'Connecting / Idle'}`);
-    console.log(`=============================================================\n`);
-  });
+  // Model discovery also runs in the background; cached models are served now.
+  discovery.sync()
+    .then(() => console.log(`[Boot] Model discovery complete: ${discovery.models.length} models.`))
+    .catch((err) => console.warn('[Boot] Initial model discovery notice:', err.message));
 }
 
 boot().catch(err => {
   console.error('[Boot] Critical error during startup:', err);
-  server.listen(PORT, () => {
-    console.log(`🚀 OpenCode2API Gateway started in emergency fallback mode on http://127.0.0.1:${PORT}`);
-  });
+  startHttpServer();
 });

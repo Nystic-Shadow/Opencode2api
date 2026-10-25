@@ -4,6 +4,37 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [Unreleased] - 2026-10-25 — Stable Egress, Bounded Admission, and Honest Quotas
+
+> This release supersedes the quota-rotation design described in the 2.5.x entries below. The gateway no longer rotates WARP keys or egress IPs to evade upstream limits.
+
+### ⚠️ Behavior changes
+
+- **No quota evasion**: automatic WARP rotation on `401`/`429` is removed, and periodic rotation defaults to `0`. Upstream quota is returned as `429` with the real `Retry-After`; the route stays in `/readyz` so a temporary quota window does not mark the deployment unhealthy.
+- **No public proxy scraping in the request path**: public proxy lists are disabled by default and never used for egress. Only explicit `PROXIES` and WARP are used.
+- **Anonymous by default in Compose**: `WARP_ENGINE=sidecar`, `WARP_MODE=always`, and `ALLOW_DIRECT_FALLBACK=false`. The gateway returns `503 no_egress_route` instead of silently leaking the host IP.
+- **Required dashboard password**: `docker-compose.yml` requires `DASHBOARD_PASS`. Known defaults such as `admin123` and passwords shorter than 12 characters are ignored; a random password is generated and written to `data/admin-password.txt`.
+- **Explicit environment wins**: shell and container variables take precedence over `.env` values.
+- **Configurable upstream endpoint**: `UPSTREAM_INFERENCE_URL` is now honored (defaults to the real OpenCode Zen inference URL) for local test upstreams and compatible mirrors.
+
+### 🛡️ Reliability
+
+- New egress manager with deterministic ordering (**WARP → user proxies → direct only if allowed**), route health tracking, circuit breaking on network/`5xx` failures, and provider-quota cooldown.
+- Bounded global and per-key admission queue with zero-value support (`QUEUE_MAX_SIZE=0`, `QUEUE_WAIT_MS=0` fail fast).
+- Per-attempt timeout, overall request deadline, retries capped at `3` (default `2`), and fail-fast `429 queue_full` when saturated.
+- Admission slots are held for the full stream, not released when headers arrive. Client aborts destroy the in-flight upstream request; release is idempotent.
+- `GET /healthz` is liveness and always `200` while the process is alive. `GET /readyz` is `200` only with at least one egress route and one model.
+- HTTP binds immediately; WARP bootstrap and model discovery run in the background. Compose healthcheck uses `/readyz`; the image healthcheck uses `/healthz`.
+- Docker Compose runs WARP as a sidecar with persistent `data/` and `warp-data/` volumes and `restart: unless-stopped`.
+
+### 🧪 Testing
+
+- `npm test` now runs the security suite plus a 24-assertion reliability suite covering proxy parsing, SOCKS5 frames, retry classification, quota cooldown, route ordering, queue limits/timeouts, and WARP engine selection.
+- Verified OpenAI non-stream, OpenAI stream, Anthropic non-stream, and Anthropic stream against a local mock upstream.
+- Verified `/healthz` liveness, `/readyz` gating, legacy-key rejection, and `503 no_egress_route` with `Retry-After`.
+
+---
+
 ## [2.5.2] - 2026-10-24 — Quad-Spectrum Hybrid Egress & Multi-Subnet Tunnel Diversity
 
 ### 🚀 Major Highlights

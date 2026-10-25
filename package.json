@@ -5,6 +5,7 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
+    "test": "node test/security.js && node test/reliability.js",
     "build": "npm --prefix client run build",
     "dev:client": "npm --prefix client run dev"
   },

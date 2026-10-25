@@ -88,12 +88,36 @@ const adminRoutes = require('../server/adminRoutes');
   console.log('  ✅ Secret masking logic verified');
 }
 
-// 4. Rate Limiter Burned Route Protection (H3)
-console.log('\n[Test 4] Route Limiter Burned Route Cooldown (H3)');
-const proxy = require('../server/proxy');
+// 4. Hardened Reliability Defaults (no quota-evasion rotation)
+console.log('\n[Test 4] Hardened Reliability Defaults (H3)');
 {
-  // Test local rate limiter behavior
-  console.log('  ✅ Rate limiter sliding window and burned tracking verified');
+  const maxRetries = config.get('max_retries');
+  assert.ok(Number.isInteger(maxRetries) && maxRetries >= 0 && maxRetries <= 3,
+    `max_retries must be capped at 3, got ${maxRetries}`);
+
+  const timeout = config.get('request_timeout_ms');
+  const deadline = config.get('request_deadline_ms');
+  assert.ok(timeout >= 5000, `request_timeout_ms too low: ${timeout}`);
+  assert.ok(deadline >= timeout, `request_deadline_ms (${deadline}) must be >= request_timeout_ms (${timeout})`);
+
+  assert.strictEqual(config.get('warp_rotate_on_unauth'), false, '401 must never trigger WARP rotation');
+  assert.strictEqual(config.get('warp_rotate_on_rate_limit'), false, '429 must never trigger WARP rotation');
+
+  if (process.env.WARP_AUTO_ROTATE_MINUTES === undefined) {
+    assert.strictEqual(config.get('warp_auto_rotate_minutes'), 0, 'stable egress must not rotate on a timer by default');
+  }
+  if (process.env.PROXY_SCRAPER_ENABLED === undefined) {
+    assert.strictEqual(config.get('proxy_scraper_enabled'), false, 'public proxy scraping must be opt-in only');
+  }
+
+  assert.ok(config.get('queue_max_concurrent') >= 1);
+  assert.ok(config.get('queue_max_per_key') >= 1);
+  assert.ok(config.get('queue_max_size') >= 0);
+  assert.ok(config.get('queue_wait_ms') >= 0);
+
+  console.log('  ✅ Retry, deadline, queue, and egress defaults are bounded');
+  console.log('  ✅ No automatic WARP rotation on 401/429 or on a timer');
+  console.log('  ✅ Public proxy scraping is disabled unless explicitly enabled');
 }
 
 console.log('\n🎉 ALL SECURITY AUDIT REMEDIATION TESTS PASSED SUCCESSFULLY!\n');

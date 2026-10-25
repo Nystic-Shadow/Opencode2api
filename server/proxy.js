@@ -770,7 +770,12 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       bodyStr.includes('ETIMEDOUT') ||
       bodyStr.includes('ECONNRESET') ||
       bodyStr.includes('CONNECT') ||
-      bodyStr.includes('SOCKS5')
+      bodyStr.includes('SOCKS5') ||
+      bodyStr.includes('certificate') ||
+      bodyStr.includes('CERT_') ||
+      bodyStr.includes('SSL') ||
+      bodyStr.includes('TLS') ||
+      bodyStr.includes('verify')
     );
 
     if (isWarpFailure) {
@@ -1581,7 +1586,12 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       bodyStr.includes('ETIMEDOUT') ||
       bodyStr.includes('ECONNRESET') ||
       bodyStr.includes('CONNECT') ||
-      bodyStr.includes('SOCKS5')
+      bodyStr.includes('SOCKS5') ||
+      bodyStr.includes('certificate') ||
+      bodyStr.includes('CERT_') ||
+      bodyStr.includes('SSL') ||
+      bodyStr.includes('TLS') ||
+      bodyStr.includes('verify')
     );
 
     if (isWarpFailure) {

@@ -45,11 +45,13 @@ class ProxyScraperService {
       if (fs.existsSync(PROXY_CACHE_FILE)) {
         const raw = fs.readFileSync(PROXY_CACHE_FILE, 'utf8');
         const data = JSON.parse(raw);
-        if (Array.isArray(data.proxies)) {
-          const now = Date.now();
-          // Load verified fast (<3s) proxies immediately on boot
+        if (data && data.version === 3 && Array.isArray(data.proxies)) {
           this.verifiedPool = data.proxies.filter(p => p.latency <= 3000);
           console.log(`[ProxyScraper] Loaded ${this.verifiedPool.length} verified fast (<3s) proxies from disk cache.`);
+        } else {
+          console.log('[ProxyScraper] Cache invalidated (version upgrade). Starting with pre-verified clean proxies.');
+          this.verifiedPool = [...DEFAULT_SEED_PROXIES];
+          this.saveCache();
         }
       }
     } catch (e) {
@@ -61,6 +63,7 @@ class ProxyScraperService {
     try {
       if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
       fs.writeFileSync(PROXY_CACHE_FILE, JSON.stringify({
+        version: 3,
         updatedAt: new Date().toISOString(),
         count: this.verifiedPool.length,
         proxies: this.verifiedPool
@@ -155,7 +158,7 @@ class ProxyScraperService {
           const tlsSocket = tls.connect({
             socket,
             servername: 'opencode.ai',
-            rejectUnauthorized: true
+            rejectUnauthorized: false
           }, () => {
             // Fast HTTP/1.1 ping
             tlsSocket.write('GET /cdn-cgi/trace HTTP/1.1\r\nHost: opencode.ai\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n');
@@ -218,7 +221,7 @@ class ProxyScraperService {
         const tlsSocket = tls.connect({
           socket,
           servername: 'opencode.ai',
-          rejectUnauthorized: true
+          rejectUnauthorized: false
         }, () => {
           tlsSocket.write('GET /cdn-cgi/trace HTTP/1.1\r\nHost: opencode.ai\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n');
         });
@@ -451,7 +454,7 @@ class ProxyScraperService {
             const tlsSocket = tls.connect({
               socket,
               servername: options.servername || destHost,
-              rejectUnauthorized: true
+              rejectUnauthorized: false
             }, () => {
               callback(null, tlsSocket);
             });
@@ -487,7 +490,7 @@ class ProxyScraperService {
           const tlsSocket = tls.connect({
             socket,
             servername: options.servername || destHost,
-            rejectUnauthorized: true
+            rejectUnauthorized: false
           }, () => {
             callback(null, tlsSocket);
           });

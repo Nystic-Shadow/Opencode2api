@@ -1,6 +1,5 @@
 const http = require('http');
 const https = require('https');
-const url = require('url');
 const fs = require('fs');
 const path = require('path');
 
@@ -174,9 +173,19 @@ function parseJsonBody(req, maxSize = MAX_BODY_SIZE_INFERENCE) {
   });
 }
 
+// Parse the request target with the WHATWG URL parser. Requests normally use
+// origin-form ("/v1/models?x=1"), so a fixed base is required; malformed
+// targets fall back to "/" instead of throwing inside the request handler.
+function requestPathname(rawUrl) {
+  try {
+    return new URL(rawUrl, 'http://localhost').pathname;
+  } catch (e) {
+    return '/';
+  }
+}
+
 const server = http.createServer(async (req, res) => {
-  const parsedUrl = url.parse(req.url, true);
-  const pathname = parsedUrl.pathname;
+  const pathname = requestPathname(req.url);
 
   // Global CORS
   res.setHeader('Access-Control-Allow-Origin', '*');

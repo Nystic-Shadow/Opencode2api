@@ -30,7 +30,10 @@ class MetricsCollector {
   load() {
     try {
       if (fs.existsSync(STATS_FILE)) {
-        const raw = fs.readFileSync(STATS_FILE, 'utf8');
+        const raw = fs.readFileSync(STATS_FILE, 'utf8').trim();
+        // A zero-byte file is a normal first-boot state (or an interrupted
+        // write). Treat it as "no stats yet" rather than a parse error.
+        if (!raw) return;
         const data = JSON.parse(raw);
         this.totalRequests = data.totalRequests || 0;
         this.successfulRequests = data.successfulRequests || 0;

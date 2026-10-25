@@ -151,13 +151,15 @@ export default function Overview({ stats, onRefresh }) {
           </div>
           <div>
             <span style={{ color: 'var(--muted-foreground)' }}>Status: </span>
-            <span className="badge badge-success">Healthy (100%)</span>
+            <span className={`badge ${s.successRate >= 95 ? 'badge-success' : s.successRate >= 80 ? 'badge-warning' : 'badge-danger'}`}>
+              {s.successRate >= 95 ? 'Healthy' : s.successRate >= 80 ? 'Degraded' : 'Unhealthy'} ({s.successRate}%)
+            </span>
           </div>
           <button
             onClick={async () => {
               if (window.confirm('Reset all historical telemetry counters and start a clean test session?')) {
                 try {
-                  const token = localStorage.getItem('opencode_token');
+                  const token = localStorage.getItem('o2p_token');
                   await fetch('/api/stats/reset', {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${token}` }

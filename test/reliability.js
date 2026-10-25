@@ -201,6 +201,17 @@ async function main() {
     egress.recordSuccess(route);
   });
 
+  await test('resetRoute clears stale quota and notifies listeners', () => {
+    const route = { type: 'proxy', id: 'test://reset-route' };
+    let notified = null;
+    egress.onRouteReset(id => { notified = id; });
+    egress.recordFailure(route, 'quota', 60000);
+    assert.ok(egress.getQuotaRetryAfter(route) > 0);
+    egress.resetRoute(route, 'test');
+    assert.strictEqual(egress.getQuotaRetryAfter(route), 0);
+    assert.strictEqual(notified, 'test://reset-route');
+  });
+
   await test('three retryable failures open the circuit and success closes it', () => {
     const route = { type: 'proxy', id: 'test://retry-route' };
     egress.recordFailure(route, 'retry');
@@ -228,7 +239,9 @@ async function main() {
       await withConfig({
         proxies: ['http://user:pass@proxy-a.example:8080', 'socks5://proxy-b.example:1080'],
         egress_mode: 'auto',
-        allow_direct_fallback: false
+        allow_direct_fallback: false,
+        warp_engine: 'sidecar',
+        warp_mode: 'auto'
       }, () => {
         egress.reload();
         warp.isReady = () => true;
@@ -244,6 +257,30 @@ async function main() {
     } finally {
       warp.isReady = originalReady;
       warp.getBestPort = originalBestPort;
+      egress.reload();
+    }
+  });
+
+  await test('exposes every ready WARP port as a candidate', async () => {
+    const originalCandidatePorts = warp.getCandidatePorts;
+    const originalReady = warp.isReady;
+    try {
+      await withConfig({
+        proxies: [],
+        egress_mode: 'auto',
+        allow_direct_fallback: false,
+        warp_engine: 'sidecar',
+        warp_mode: 'auto'
+      }, () => {
+        egress.reload();
+        warp.isReady = () => true;
+        warp.getCandidatePorts = () => [40000, 40001];
+        const routes = egress.getCandidates();
+        assert.deepStrictEqual(routes.map(r => r.id), ['warp:40000', 'warp:40001']);
+      });
+    } finally {
+      warp.getCandidatePorts = originalCandidatePorts;
+      warp.isReady = originalReady;
       egress.reload();
     }
   });

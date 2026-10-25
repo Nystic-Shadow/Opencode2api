@@ -3,6 +3,18 @@ const path = require('path');
 
 const STATS_FILE = path.join(__dirname, '..', 'data', 'stats.json');
 
+function atomicWriteJson(file, value) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch (e) {}
+    throw err;
+  }
+}
+
 class MetricsCollector {
   constructor() {
     this.bootTime = Date.now();
@@ -14,10 +26,12 @@ class MetricsCollector {
     this.totalCompletionTokens = 0;
     this.totalReasoningTokens = 0;
     
-    this.dailyTokens = {}; // YYYY-MM-DD -> token count
+    this.dailyTokens = Object.create(null); // YYYY-MM-DD -> token count
     this.recentRequests = []; // last 50 requests
     this.history = []; // genuine recorded time points for chart
-    this.modelUsage = {}; // model -> { requests, tokens, reasoning_tokens }
+    this.modelUsage = Object.create(null); // model -> { requests, tokens, reasoning_tokens }
+    this.saveTimer = null;
+    this.dirty = false;
 
     // In-memory sliding windows (last 60s)
     this.requestTimestamps = [];
@@ -42,10 +56,10 @@ class MetricsCollector {
         this.totalPromptTokens = data.totalPromptTokens || 0;
         this.totalCompletionTokens = data.totalCompletionTokens || 0;
         this.totalReasoningTokens = data.totalReasoningTokens || 0;
-        this.dailyTokens = data.dailyTokens || {};
-        this.recentRequests = data.recentRequests || [];
-        this.history = data.history || [];
-        this.modelUsage = data.modelUsage || {};
+        this.dailyTokens = Object.assign(Object.create(null), data.dailyTokens || {});
+        this.recentRequests = Array.isArray(data.recentRequests) ? data.recentRequests : [];
+        this.history = Array.isArray(data.history) ? data.history : [];
+        this.modelUsage = Object.assign(Object.create(null), data.modelUsage || {});
       }
     } catch (e) {
       console.warn('[Metrics] Error loading stats:', e.message);
@@ -54,7 +68,11 @@ class MetricsCollector {
 
   save() {
     try {
-      fs.writeFileSync(STATS_FILE, JSON.stringify({
+      if (this.saveTimer) {
+        clearTimeout(this.saveTimer);
+        this.saveTimer = null;
+      }
+      atomicWriteJson(STATS_FILE, {
         totalRequests: this.totalRequests,
         successfulRequests: this.successfulRequests,
         failedRequests: this.failedRequests,
@@ -66,10 +84,30 @@ class MetricsCollector {
         recentRequests: this.recentRequests.slice(0, 50),
         history: this.history.slice(-60),
         modelUsage: this.modelUsage
-      }, null, 2), 'utf8');
+      });
+      this.dirty = false;
     } catch (e) {
+      this.dirty = true;
       console.error('[Metrics] Error saving stats:', e.message);
     }
+  }
+
+  scheduleSave() {
+    this.dirty = true;
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.save();
+    }, 500);
+    if (typeof this.saveTimer.unref === 'function') this.saveTimer.unref();
+  }
+
+  flush() {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    if (this.dirty) this.save();
   }
 
   startHistoryTicker() {
@@ -161,7 +199,7 @@ class MetricsCollector {
     if (this.history.length === 0) {
       this.recordSample();
     } else {
-      this.save();
+      this.scheduleSave();
     }
   }
 
@@ -211,10 +249,10 @@ class MetricsCollector {
     this.totalPromptTokens = 0;
     this.totalCompletionTokens = 0;
     this.totalReasoningTokens = 0;
-    this.dailyTokens = {};
+    this.dailyTokens = Object.create(null);
     this.recentRequests = [];
     this.history = [];
-    this.modelUsage = {};
+    this.modelUsage = Object.create(null);
     this.requestTimestamps = [];
     this.tokenTimestamps = [];
     this.save();

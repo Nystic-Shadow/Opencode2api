@@ -51,7 +51,7 @@ export default function Playground({ models = [], token }) {
   }, [messages, isStreaming]);
 
   const currentModelMeta = models.find(m => m.id === selectedModel);
-  const supportsVision = currentModelMeta?.supports_vision !== false;
+  const supportsVision = currentModelMeta?.supports_vision === true;
 
   const handleImageSelect = (e) => {
     const file = e.target.files?.[0];
@@ -612,8 +612,9 @@ export default function Playground({ models = [], token }) {
         <button
           className="btn-secondary"
           onClick={() => fileInputRef.current?.click()}
+          disabled={!supportsVision}
           title={supportsVision ? "Upload image for vision analysis" : "Vision not supported by current model"}
-          style={{ padding: '0.6rem', borderRadius: 'var(--radius)', opacity: supportsVision ? 1 : 0.4 }}
+          style={{ padding: '0.6rem', borderRadius: 'var(--radius)', opacity: supportsVision ? 1 : 0.4, cursor: supportsVision ? 'pointer' : 'not-allowed' }}
         >
           <FiImage size={18} />
         </button>

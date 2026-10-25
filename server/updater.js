@@ -1,6 +1,13 @@
 const https = require('https');
 const config = require('./config');
 const notifications = require('./notifications');
+const egress = require('./egress');
+
+function currentEgressAgent() {
+  const routes = egress.getCandidates();
+  if (routes.length === 0) return null;
+  return egress.getAgent(routes[0], 'https:');
+}
 
 function isNewerVersion(remote, current) {
   if (!remote || !current) return false;
@@ -105,10 +112,13 @@ class OpenCodeCliUpdater {
 
   queryNpmVersion() {
     return new Promise((resolve) => {
+      const agent = currentEgressAgent();
+      if (!agent) return resolve(null);
       const options = {
         hostname: 'registry.npmjs.org',
         path: '/@opencode%2Fcli/latest',
         method: 'GET',
+        agent,
         headers: {
           'User-Agent': 'OpenCode2API-Gateway-Agent',
           'Accept': 'application/json'
@@ -141,10 +151,13 @@ class OpenCodeCliUpdater {
 
   queryGitHubVersion() {
     return new Promise((resolve) => {
+      const agent = currentEgressAgent();
+      if (!agent) return resolve(null);
       const options = {
         hostname: 'api.github.com',
         path: '/repos/anomalyco/opencode/releases/latest',
         method: 'GET',
+        agent,
         headers: {
           'User-Agent': 'OpenCode2API-Gateway-Agent',
           'Accept': 'application/vnd.github.v3+json'

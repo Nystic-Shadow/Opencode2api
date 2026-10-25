@@ -5,6 +5,18 @@ const crypto = require('crypto');
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
+function atomicWriteJson(file, value) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch (e) {}
+    throw err;
+  }
+}
+
 const DEFAULT_UPSTREAM_INFERENCE_URL = 'https://opencode.ai/inference/v1/chat/completions';
 // This path was stored by older builds but was never used. Migrate it instead
 // of letting a stale cache point inference at a non-existent endpoint.
@@ -69,7 +81,7 @@ function loadEnv(force = false) {
 loadEnv();
 
 if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 }
 
 const DEFAULT_CONFIG = {
@@ -117,6 +129,17 @@ class ConfigManager {
     this.config = { ...DEFAULT_CONFIG };
     this.listeners = [];
     this.load();
+  }
+
+  ensureAdminPassword() {
+    if (this.config.admin_password && this.config.admin_password !== 'admin123') return;
+    const generated = crypto.randomBytes(18).toString('base64url');
+    this.config.admin_password = generated;
+    this.config._admin_password_generated = true;
+    try {
+      fs.writeFileSync(path.join(DATA_DIR, 'admin-password.txt'), generated + '\n', { mode: 0o600 });
+    } catch (e) {}
+    console.warn('[Config] Generated a random admin password. Set DASHBOARD_PASS to choose your own; the generated value is in data/admin-password.txt.');
   }
 
   refreshFromEnv() {
@@ -239,26 +262,19 @@ class ConfigManager {
         this.config.smart_fallback = process.env.SMART_FALLBACK !== 'false';
       }
 
-      if (!this.config.admin_password || this.config.admin_password === 'admin123') {
-        const generated = crypto.randomBytes(18).toString('base64url');
-        this.config.admin_password = generated;
-        this.config._admin_password_generated = true;
-        try {
-          fs.writeFileSync(path.join(DATA_DIR, 'admin-password.txt'), generated + '\n', { mode: 0o600 });
-        } catch (e) {}
-        console.warn('[Config] Generated a random admin password. Set DASHBOARD_PASS to choose your own; the generated value is in data/admin-password.txt.');
-      }
+      this.ensureAdminPassword();
 
       this.save();
     } catch (err) {
       console.error('[Config] Error loading config:', err.message);
       this.config = { ...DEFAULT_CONFIG };
+      this.ensureAdminPassword();
     }
   }
 
   save() {
     try {
-      fs.writeFileSync(CONFIG_FILE, JSON.stringify(this.config, null, 2), 'utf8');
+      atomicWriteJson(CONFIG_FILE, this.config);
     } catch (err) {
       console.error('[Config] Error saving config:', err.message);
     }

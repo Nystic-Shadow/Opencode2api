@@ -11,6 +11,7 @@ const warp = require('./warp');
 const egress = require('./egress');
 const requestQueue = require('./requestQueue');
 const adminRoutes = require('./adminRoutes');
+const metrics = require('./metrics');
 
 // Global exception protection to guarantee gateway 100% zero-crash uptime
 process.on('uncaughtException', (err) => {
@@ -111,7 +112,16 @@ function serveStatic(req, res, pathname) {
       'X-Content-Type-Options': 'nosniff'
     });
     if (req.method === 'HEAD') return res.end();
-    return fs.createReadStream(targetPath).pipe(res);
+    const stream = fs.createReadStream(targetPath);
+    stream.on('error', () => {
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Unable to read asset' } }));
+      } else {
+        try { res.end(); } catch (e) {}
+      }
+    });
+    return stream.pipe(res);
   }
 
   // Fallback placeholder if dist hasn't been built yet
@@ -195,6 +205,15 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
     return res.end();
+  }
+
+  // Baseline hardening headers for both API and dashboard responses.
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (pathname.startsWith('/api/') || pathname.startsWith('/v1/')) {
+    res.setHeader('Cache-Control', 'no-store');
   }
 
   try {
@@ -286,6 +305,13 @@ const server = http.createServer(async (req, res) => {
       const apiKeyHeader = req.headers['x-api-key'] || '';
       const token = authHeader.replace(/^Bearer\s+/i, '') || apiKeyHeader;
 
+      // Reject invalid/disabled/expired keys before reading a potentially 10 MB body.
+      const earlyAuth = keys.validateToken(token);
+      if (!earlyAuth.valid) {
+        res.writeHead(earlyAuth.status, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: earlyAuth.error, type: 'authentication_error' } }));
+      }
+
       let payload;
       try {
         payload = await parseJsonBody(req, MAX_BODY_SIZE_INFERENCE);
@@ -308,6 +334,15 @@ const server = http.createServer(async (req, res) => {
       const authHeader = req.headers['authorization'] || '';
       const apiKeyHeader = req.headers['x-api-key'] || '';
       const token = authHeader.replace(/^Bearer\s+/i, '') || apiKeyHeader;
+
+      const earlyAuth = keys.validateToken(token);
+      if (!earlyAuth.valid) {
+        res.writeHead(earlyAuth.status, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          type: 'error',
+          error: { type: 'authentication_error', message: earlyAuth.error }
+        }));
+      }
 
       let payload;
       try {
@@ -344,9 +379,17 @@ const server = http.createServer(async (req, res) => {
           type: 'internal_server_error'
         }
       }));
+    } else if (!res.writableEnded && !res.destroyed) {
+      // Never leave a client hanging if an unexpected error happens after the
+      // stream headers have already been sent.
+      try { res.end(); } catch (e) {}
     }
   }
 });
+
+// Bound slow clients without breaking legitimate long-running SSE streams.
+server.requestTimeout = 120000;
+server.headersTimeout = 30000;
 
 // Boot order: bind the HTTP port immediately, then establish WARP and sync
 // models in the background. A slow or restarting WARP sidecar must never make
@@ -400,6 +443,28 @@ async function boot() {
     .then(() => console.log(`[Boot] Model discovery complete: ${discovery.models.length} models.`))
     .catch((err) => console.warn('[Boot] Initial model discovery notice:', err.message));
 }
+
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[Process] ${signal} received; draining HTTP connections...`);
+  const forceTimer = setTimeout(() => {
+    console.error('[Process] Graceful shutdown timed out; exiting.');
+    process.exit(1);
+  }, 15000);
+  if (typeof forceTimer.unref === 'function') forceTimer.unref();
+  server.close(() => {
+    try { keys.flush(); } catch (e) {}
+    try { metrics.flush(); } catch (e) {}
+    try { warp.shutdown(); } catch (e) {}
+    clearTimeout(forceTimer);
+    process.exit(0);
+  });
+  if (server.closeIdleConnections) server.closeIdleConnections();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 boot().catch(err => {
   console.error('[Boot] Critical error during startup:', err);

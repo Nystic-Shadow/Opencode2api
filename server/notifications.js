@@ -4,6 +4,18 @@ const crypto = require('crypto');
 
 const NOTIFICATIONS_FILE = path.join(__dirname, '..', 'data', 'notifications.json');
 
+function atomicWriteJson(file, value) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch (e) {}
+    throw err;
+  }
+}
+
 class NotificationManager {
   constructor() {
     this.notifications = [];
@@ -14,7 +26,8 @@ class NotificationManager {
     try {
       if (fs.existsSync(NOTIFICATIONS_FILE)) {
         const raw = fs.readFileSync(NOTIFICATIONS_FILE, 'utf8');
-        this.notifications = JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        this.notifications = Array.isArray(parsed) ? parsed : [];
       } else {
         this.save();
       }
@@ -25,7 +38,7 @@ class NotificationManager {
 
   save() {
     try {
-      fs.writeFileSync(NOTIFICATIONS_FILE, JSON.stringify(this.notifications.slice(0, 100), null, 2), 'utf8');
+      atomicWriteJson(NOTIFICATIONS_FILE, this.notifications.slice(0, 100));
     } catch (e) {}
   }
 

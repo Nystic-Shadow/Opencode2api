@@ -13,7 +13,15 @@ const proxyScraper = require('./proxyScraper');
 const sessions = new Map(); // token -> { createdAt, lastActive, username }
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
+function pruneSessions() {
+  const now = Date.now();
+  for (const [token, session] of sessions) {
+    if (now - session.lastActive > SESSION_TTL_MS) sessions.delete(token);
+  }
+}
+
 function authenticateAdmin(req) {
+  pruneSessions();
   const auth = req.headers['authorization'] || '';
   const token = auth.replace(/^Bearer\s+/i, '');
   if (!token) return false;
@@ -33,11 +41,13 @@ const loginAttempts = new Map(); // ip -> { count, resetAt }
 function checkLoginThrottle(ip) {
   const now = Date.now();
   const record = loginAttempts.get(ip);
-  if (record && record.resetAt > now) {
-    if (record.count >= 5) {
-      const waitSec = Math.ceil((record.resetAt - now) / 1000);
-      return { throttled: true, waitSec };
-    }
+  if (record && record.resetAt <= now) {
+    loginAttempts.delete(ip);
+    return { throttled: false };
+  }
+  if (record && record.count >= 5) {
+    const waitSec = Math.ceil((record.resetAt - now) / 1000);
+    return { throttled: true, waitSec };
   }
   return { throttled: false };
 }
@@ -65,6 +75,36 @@ function constantTimeCompare(a, b) {
   const bufB = Buffer.from(b, 'utf8');
   if (bufA.length !== bufB.length) return false;
   return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function proxyIdentity(raw) {
+  try {
+    const value = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
+    const url = new URL(value);
+    return `${url.protocol}//${url.hostname}:${url.port || (url.protocol === 'https:' ? 443 : url.protocol === 'socks5:' ? 1080 : 80)}`;
+  } catch (e) {
+    return '';
+  }
+}
+
+function maskProxy(raw) {
+  try {
+    const value = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
+    const url = new URL(value);
+    if (!url.username && !url.password) return raw;
+    url.username = '***';
+    url.password = '***';
+    return url.toString().replace(/\/$/, '');
+  } catch (e) {
+    return raw;
+  }
+}
+
+function restoreMaskedProxy(masked, existing) {
+  if (typeof masked !== 'string' || !masked.includes('***')) return masked;
+  const identity = proxyIdentity(masked);
+  if (!identity) return masked;
+  return existing.find(entry => proxyIdentity(entry) === identity) || masked;
 }
 
 // Bounded JSON body parser with 1MB ceiling preventing Denial of Service (H1)
@@ -112,12 +152,18 @@ function parseBody(req, maxSize = MAX_ADMIN_BODY) {
 }
 
 function sendJson(res, statusCode, data) {
-  res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store'
+  });
   res.end(JSON.stringify(data));
 }
 
 async function handleAdminRoute(req, res, pathname) {
-  const clientIp = req.socket?.remoteAddress || req.headers['x-forwarded-for'] || '127.0.0.1';
+  const forwarded = req.headers['x-forwarded-for'];
+  const clientIp = (process.env.TRUST_PROXY === 'true' && typeof forwarded === 'string' && forwarded.trim())
+    ? forwarded.split(',')[0].trim()
+    : (req.socket?.remoteAddress || '127.0.0.1');
 
   // Login
   if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -249,12 +295,13 @@ async function handleAdminRoute(req, res, pathname) {
         maskedZenKey = '••••••••';
       }
     }
-    // Don't expose password or raw upstream keys directly (H5)
+    // Don't expose passwords, upstream keys, or proxy credentials directly.
     return sendJson(res, 200, {
       ...conf,
       admin_password: '••••••••',
       upstream_zen_key: maskedZenKey,
-      has_zen_key: !!conf.upstream_zen_key
+      has_zen_key: !!conf.upstream_zen_key,
+      proxies: Array.isArray(conf.proxies) ? conf.proxies.map(maskProxy) : []
     });
   }
 
@@ -301,14 +348,20 @@ async function handleAdminRoute(req, res, pathname) {
     }
     if (body.warp_port !== undefined) updates.warp_port = parseInt(body.warp_port, 10) || 40000;
     if (body.proxies !== undefined) {
+      const existingProxies = Array.isArray(config.get('proxies')) ? config.get('proxies') : [];
+      let incoming = [];
       if (Array.isArray(body.proxies)) {
-        updates.proxies = body.proxies.map(p => typeof p === 'string' ? p.trim() : '').filter(Boolean);
+        incoming = body.proxies.map(p => typeof p === 'string' ? p.trim() : '').filter(Boolean);
       } else if (typeof body.proxies === 'string') {
-        updates.proxies = body.proxies.split(/[\n,]/).map(p => p.trim()).filter(Boolean);
+        incoming = body.proxies.split(/[\n,]/).map(p => p.trim()).filter(Boolean);
       }
+      updates.proxies = incoming.map(entry => restoreMaskedProxy(entry, existingProxies));
     }
 
     config.update(updates);
+    if (updates.admin_password) {
+      sessions.clear();
+    }
     if (body.warp_auto_rotate_minutes !== undefined) {
       warp.startAutoRotateCron();
     }
@@ -329,7 +382,11 @@ async function handleAdminRoute(req, res, pathname) {
   if (pathname === '/api/warp/rotate' && req.method === 'POST') {
     const ok = await warp.rotateKeys();
     const status = await warp.getStatus();
-    notifications.add('WARP Keys Rotated', 'Cloudflare WARP tunnel keys were rotated to establish a fresh edge session.', 'info');
+    if (ok) {
+      notifications.add('WARP Rotation Requested', 'WARP tunnel rotation completed or was accepted.', 'info');
+    } else {
+      notifications.add('WARP Rotation Skipped', 'WARP rotation is owned by the sidecar or could not be performed.', 'warning');
+    }
     return sendJson(res, 200, { success: ok, ...status });
   }
 
@@ -337,13 +394,19 @@ async function handleAdminRoute(req, res, pathname) {
   if (pathname === '/api/warp/refresh-pool' && req.method === 'POST') {
     const ok = await warp.refreshPool();
     const status = await warp.getStatus();
-    notifications.add('WARP Pool Refreshed', 'Flushed old accounts and generated fresh Cloudflare WARP credentials.', 'info');
+    notifications.add(
+      ok ? 'WARP Pool Refreshed' : 'WARP Pool Refresh Failed',
+      ok ? 'Flushed old accounts and generated fresh Cloudflare WARP credentials.' : 'The WARP pool could not be refreshed.',
+      ok ? 'info' : 'warning'
+    );
     return sendJson(res, 200, { success: ok, ...status });
   }
 
   // Cloudflare WARP: Connect & Configure Proxy Mode
   if (pathname === '/api/warp/connect' && req.method === 'POST') {
-    const body = await parseBody(req);
+    let body = {};
+    try { body = await parseBody(req); } catch (e) { body = {}; }
+    warp.configureEndpoint(body.host, body.port);
     const ok = await warp.autoBootstrap(true);
     const status = await warp.getStatus();
     return sendJson(res, 200, { success: ok, ...status });

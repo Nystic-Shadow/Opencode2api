@@ -1,14 +1,55 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const config = require('./config');
 
-const KEYS_FILE = path.join(__dirname, '..', 'data', 'keys.json');
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const KEYS_FILE = path.join(DATA_DIR, 'keys.json');
+
+function atomicWriteJson(file, value, mode = 0o600) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch (e) {}
+    throw err;
+  }
+}
 
 class ApiKeyManager {
   constructor() {
     this.keys = [];
     this.rateWindows = new Map(); // keyId -> { timestamps: [], tokenBuckets: [] }
+    this.globalReqs = [];
+    this.globalTokens = [];
+    this.saveTimer = null;
+    this.dirty = false;
     this.load();
+  }
+
+  createMasterKey() {
+    const envKey = (process.env.INITIAL_KEY || process.env.MASTER_KEY || '').trim();
+    const initialKey = envKey || ('O2P-' + crypto.randomBytes(20).toString('hex'));
+    this.keys = [
+      {
+        id: 'key_master',
+        name: 'Master Admin Key',
+        key: initialKey,
+        rpm_limit: 0,
+        tpm_limit: 0,
+        total_tokens_budget: 0,
+        is_unlimited: true,
+        enabled: true,
+        created_at: new Date().toISOString(),
+        last_used: null,
+        requests_count: 0,
+        tokens_count: 0
+      }
+    ];
+    this.save();
+    return this.keys[0];
   }
 
   load() {
@@ -19,25 +60,7 @@ class ApiKeyManager {
       }
       if (!Array.isArray(this.keys) || this.keys.length === 0) {
         // Generate a cryptographically secure master key with O2P- prefix
-        const envKey = (process.env.INITIAL_KEY || process.env.MASTER_KEY || '').trim();
-        const initialKey = envKey || ('O2P-' + crypto.randomBytes(20).toString('hex'));
-        this.keys = [
-          {
-            id: 'key_master',
-            name: 'Master Admin Key',
-            key: initialKey,
-            rpm_limit: 0,
-            tpm_limit: 0,
-            total_tokens_budget: 0,
-            is_unlimited: true,
-            enabled: true,
-            created_at: new Date().toISOString(),
-            last_used: null,
-            requests_count: 0,
-            tokens_count: 0
-          }
-        ];
-        this.save();
+        this.createMasterKey();
       } else {
         // Upgrade legacy insecure default master keys if present and not intentionally configured in env
         const envKey = (process.env.INITIAL_KEY || process.env.MASTER_KEY || '').trim();
@@ -51,17 +74,73 @@ class ApiKeyManager {
         if (changed) this.save();
       }
     } catch (e) {
-      console.warn('[Keys] Error loading keys, resetting:', e.message);
+      console.warn('[Keys] Error loading keys, recovering with a new master key:', e.message);
+      try {
+        if (fs.existsSync(KEYS_FILE)) {
+          fs.renameSync(KEYS_FILE, `${KEYS_FILE}.corrupt-${Date.now()}`);
+        }
+      } catch (backupErr) {}
       this.keys = [];
+      this.createMasterKey();
     }
   }
 
   save() {
     try {
-      fs.writeFileSync(KEYS_FILE, JSON.stringify(this.keys, null, 2), 'utf8');
+      if (this.saveTimer) {
+        clearTimeout(this.saveTimer);
+        this.saveTimer = null;
+      }
+      atomicWriteJson(KEYS_FILE, this.keys);
+      this.dirty = false;
     } catch (e) {
+      this.dirty = true;
       console.error('[Keys] Error saving keys:', e.message);
     }
+  }
+
+  scheduleSave() {
+    this.dirty = true;
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.save();
+    }, 250);
+    if (typeof this.saveTimer.unref === 'function') this.saveTimer.unref();
+  }
+
+  flush() {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    if (this.dirty) this.save();
+  }
+
+  validateToken(token) {
+    if (!token) {
+      return { valid: false, status: 401, error: 'Missing API key. Provide Authorization: Bearer O2P-... or x-api-key: O2P-...' };
+    }
+
+    const envMaster = (process.env.INITIAL_KEY || process.env.MASTER_KEY || '').trim();
+    const key = this.keys.find(k => k.key === token) ||
+      (envMaster && token === envMaster
+        ? { id: 'key_master', name: 'Master Admin Key', key: token, enabled: true, is_unlimited: true }
+        : null);
+
+    if (!key) {
+      return { valid: false, status: 401, error: 'Invalid API key.' };
+    }
+
+    if (!key.enabled) {
+      return { valid: false, status: 403, error: 'API key has been disabled by admin.' };
+    }
+
+    if (key.expires_at && new Date(key.expires_at).getTime() < Date.now()) {
+      return { valid: false, status: 403, error: `API key expired on ${new Date(key.expires_at).toLocaleDateString()}.` };
+    }
+
+    return { valid: true, key };
   }
 
   getAll() {
@@ -154,26 +233,25 @@ class ApiKeyManager {
    * Returns { valid: true, key } or { valid: false, error, status }
    */
   validateAndCheckLimit(token, requestedModel = null) {
-    if (!token) {
-      return { valid: false, status: 401, error: 'Missing API key. Provide Authorization: Bearer O2P-... or x-api-key: O2P-...' };
+    const tokenResult = this.validateToken(token);
+    if (!tokenResult.valid) return tokenResult;
+    const key = tokenResult.key;
+
+    // Global rate limits are optional and apply across all keys.
+    const now = Date.now();
+    const cutoff = now - 60000;
+    this.globalReqs = this.globalReqs.filter(t => t > cutoff);
+    this.globalTokens = this.globalTokens.filter(e => e.t > cutoff);
+
+    const globalRpm = Math.max(0, parseInt(config.get('global_rpm_limit'), 10) || 0);
+    if (globalRpm > 0 && this.globalReqs.length >= globalRpm) {
+      return { valid: false, status: 429, error: `Global rate limit exceeded: RPM cap of ${globalRpm} reached.` };
     }
 
-    // Validate against stored keys or explicit env master key
-    const envMaster = (process.env.INITIAL_KEY || process.env.MASTER_KEY || '').trim();
-    const key = this.keys.find(k => k.key === token) || 
-                (envMaster && token === envMaster ? { id: 'key_master', name: 'Master Admin Key', key: token, enabled: true, is_unlimited: true } : null);
-
-    if (!key) {
-      return { valid: false, status: 401, error: 'Invalid API key.' };
-    }
-
-    if (!key.enabled) {
-      return { valid: false, status: 403, error: 'API key has been disabled by admin.' };
-    }
-
-    // Expiration check
-    if (key.expires_at && new Date(key.expires_at).getTime() < Date.now()) {
-      return { valid: false, status: 403, error: `API key expired on ${new Date(key.expires_at).toLocaleDateString()}.` };
+    const globalTpm = Math.max(0, parseInt(config.get('global_tpm_limit'), 10) || 0);
+    const globalTokensUsed = this.globalTokens.reduce((acc, curr) => acc + curr.count, 0);
+    if (globalTpm > 0 && globalTokensUsed >= globalTpm) {
+      return { valid: false, status: 429, error: `Global rate limit exceeded: TPM cap of ${globalTpm} reached.` };
     }
 
     // Total Token Quota check
@@ -224,6 +302,7 @@ class ApiKeyManager {
       window.reqs.push(now);
     }
 
+    this.globalReqs.push(now);
     return { valid: true, key };
   }
 
@@ -233,13 +312,16 @@ class ApiKeyManager {
       key.requests_count = (key.requests_count || 0) + 1;
       key.tokens_count = (key.tokens_count || 0) + tokens;
       key.last_used = new Date().toISOString();
-      this.save();
+      this.scheduleSave();
     }
+
+    const now = Date.now();
+    if (tokens > 0) this.globalTokens.push({ t: now, count: tokens });
 
     // Record token bucket for rate window
     const window = this.rateWindows.get(keyId);
     if (window && tokens > 0) {
-      window.tokens.push({ t: Date.now(), count: tokens });
+      window.tokens.push({ t: now, count: tokens });
     }
   }
 }

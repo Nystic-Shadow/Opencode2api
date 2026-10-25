@@ -563,3 +563,43 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .thinking-pulse {
   animation: pulseGlow 1.4s ease-in-out infinite;
 }
+
+/* Compact layout for narrow screens. The sidebar becomes icon-only, and
+   tables remain horizontally scrollable instead of forcing page overflow. */
+@media (max-width: 820px) {
+  aside {
+    width: 72px !important;
+    min-width: 72px !important;
+  }
+  aside nav button {
+    justify-content: center;
+    padding-left: 0.5rem !important;
+    padding-right: 0.5rem !important;
+  }
+  aside nav button span,
+  aside > div span,
+  aside > div div {
+    display: none;
+  }
+  main {
+    padding: 1rem !important;
+  }
+  .playground-container {
+    height: auto;
+    min-height: calc(100vh - 110px);
+  }
+  .message-bubble {
+    max-width: 94%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient-orb,
+  .thinking-pulse,
+  .spin {
+    animation: none !important;
+  }
+  .messages-stream {
+    scroll-behavior: auto;
+  }
+}

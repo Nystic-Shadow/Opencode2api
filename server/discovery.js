@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const notifications = require('./notifications');
-const warp = require('./warp');
+const egress = require('./egress');
 
 const MODELS_CACHE_FILE = path.join(__dirname, '..', 'data', 'models.json');
 
@@ -11,13 +11,14 @@ const MODELS_CACHE_FILE = path.join(__dirname, '..', 'data', 'models.json');
 function isUpstreamFreeModel(rawId) {
   if (!rawId) return false;
   const lower = rawId.toLowerCase();
-  return lower.endsWith('-free') || lower === 'big-pickle';
+  return lower.endsWith('-free') || lower.endsWith('_free') || lower === 'big-pickle';
 }
 
-// Suffix removal helper: ONLY strips -free at the end for models that are actually free
+// Suffix removal helper: strips the documented -free / _free suffix.
 function cleanModelId(rawId) {
   if (!rawId) return rawId;
-  if (rawId.toLowerCase().endsWith('-free')) {
+  const lower = rawId.toLowerCase();
+  if (lower.endsWith('-free') || lower.endsWith('_free')) {
     return rawId.slice(0, -5);
   }
   return rawId;
@@ -50,7 +51,8 @@ class ModelDiscoveryService {
       m.id.toLowerCase() === lower ||
       m.upstream_id.toLowerCase() === lower ||
       m.id.toLowerCase() === cleaned ||
-      m.upstream_id.toLowerCase() === cleaned + '-free'
+      m.upstream_id.toLowerCase() === cleaned + '-free' ||
+      m.upstream_id.toLowerCase() === cleaned + '_free'
     );
   }
 
@@ -117,58 +119,56 @@ class ModelDiscoveryService {
    * Fetch JSON from HTTPS endpoint with resilient WARP-to-direct auto-fallback.
    */
   async fetchJson(url, headers = {}) {
-    const doFetch = (useWarpAgent) => new Promise((resolve, reject) => {
-      const u = new URL(url);
-      const agent = useWarpAgent ? warp.getWarpAgent(warp.getActivePort(), config.get('warp_host')) : undefined;
-
-      const req = https.request({
-        hostname: u.hostname,
-        port: u.port || 443,
-        path: u.pathname + u.search,
-        method: 'GET',
-        agent,
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': `opencode/latest/${config.get('client_version')}/cli`,
-          ...headers
-        },
-        timeout: 15000
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            try {
-              resolve(JSON.parse(data));
-            } catch (err) {
-              reject(new Error(`Invalid JSON from ${url}: ${err.message}`));
-            }
-          } else {
-            reject(new Error(`HTTP ${res.statusCode} from ${url}`));
-          }
-        });
-      });
-
-      req.on('error', reject);
-      req.on('timeout', () => {
-        req.destroy();
-        reject(new Error(`Timeout fetching ${url}`));
-      });
-      req.end();
-    });
-
-    const warpMode = config.get('warp_mode') || 'auto';
-    const shouldUseWarp = warpMode !== 'disabled' && warp.isReady();
-
-    try {
-      return await doFetch(shouldUseWarp);
-    } catch (err) {
-      if (shouldUseWarp) {
-        // Fallback to direct route if WARP fetch failed
-        return await doFetch(false);
-      }
-      throw err;
+    const candidates = egress.getCandidates();
+    if (candidates.length === 0) {
+      throw new Error(`No egress route is available for discovery (${url})`);
     }
+
+    let lastError = null;
+    for (const route of candidates) {
+      try {
+        return await new Promise((resolve, reject) => {
+          const u = new URL(url);
+          const req = https.request({
+            hostname: u.hostname,
+            port: u.port || 443,
+            path: u.pathname + u.search,
+            method: 'GET',
+            agent: egress.getAgent(route, 'https:'),
+            headers: {
+              'Accept': 'application/json',
+              'User-Agent': `opencode/latest/${config.get('client_version')}/cli`,
+              ...headers
+            },
+            timeout: 15000
+          }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+              if (res.statusCode >= 200 && res.statusCode < 300) {
+                try {
+                  resolve(JSON.parse(data));
+                } catch (err) {
+                  reject(new Error(`Invalid JSON from ${url}: ${err.message}`));
+                }
+              } else {
+                reject(new Error(`HTTP ${res.statusCode} from ${url}`));
+              }
+            });
+          });
+
+          req.on('error', reject);
+          req.on('timeout', () => {
+            req.destroy();
+            reject(new Error(`Timeout fetching ${url}`));
+          });
+          req.end();
+        });
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw lastError || new Error(`Discovery failed for ${url}`);
   }
 
   /**
@@ -348,8 +348,8 @@ class ModelDiscoveryService {
       return this.cleanedToRaw.get(cleaned);
     }
 
-    // 4. If requestedId already ends with -free, return directly
-    if (requestedId.endsWith('-free')) {
+    // 4. If requestedId already ends with -free / _free, return directly
+    if (requestedId.endsWith('-free') || requestedId.endsWith('_free')) {
       return requestedId;
     }
 
@@ -359,8 +359,10 @@ class ModelDiscoveryService {
     }
 
     // 6. Check if appending '-free' matches any currently discovered upstream model
-    const freeCandidate = cleaned + '-free';
-    const freeModelMatch = this.models.find(m => m.upstream_id.toLowerCase() === freeCandidate.toLowerCase());
+    const freeCandidates = [cleaned + '-free', cleaned + '_free'];
+    const freeModelMatch = this.models.find(m =>
+      freeCandidates.some(candidate => m.upstream_id.toLowerCase() === candidate.toLowerCase())
+    );
     if (freeModelMatch) {
       return freeModelMatch.upstream_id;
     }
@@ -383,12 +385,15 @@ class ModelDiscoveryService {
   isModelFree(requestedId) {
     if (!requestedId) return false;
     const lower = requestedId.toLowerCase();
-    if (lower.endsWith('-free') || lower === 'big-pickle') return true;
+    if (lower.endsWith('-free') || lower.endsWith('_free') || lower === 'big-pickle') return true;
     const cleaned = cleanModelId(requestedId);
     const lowerClean = cleaned.toLowerCase();
 
-    // Check upstream_id candidate
-    if (this.models.some(m => m.upstream_id.toLowerCase() === lowerClean + '-free' && m.is_free)) {
+    // Check upstream_id candidates
+    if (this.models.some(m =>
+      (m.upstream_id.toLowerCase() === lowerClean + '-free' ||
+       m.upstream_id.toLowerCase() === lowerClean + '_free') && m.is_free
+    )) {
       return true;
     }
     // Check direct / case-insensitive match

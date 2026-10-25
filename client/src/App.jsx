@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import Overview from './pages/Overview';
@@ -73,6 +73,7 @@ export default function App() {
   const [notifications, setNotifications] = useState([]);
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const fetchingRef = useRef(false);
 
   // Theme Sync
   useEffect(() => {
@@ -125,7 +126,8 @@ export default function App() {
 
   // Sync All Data
   const fetchAllData = async () => {
-    if (!token) return;
+    if (!token || fetchingRef.current) return;
+    fetchingRef.current = true;
     try {
       // Stats
       const statsRes = await fetch('/api/stats', { headers: authHeaders });
@@ -162,6 +164,8 @@ export default function App() {
       }
     } catch (e) {
       console.warn('Sync error:', e.message);
+    } finally {
+      fetchingRef.current = false;
     }
   };
 
@@ -201,8 +205,10 @@ export default function App() {
         alert(data.message || 'Already running latest OpenCode CLI');
       }
       fetchAllData();
+      return data;
     } catch (e) {
       alert('Update check failed: ' + e.message);
+      throw e;
     } finally {
       setIsCheckingUpdate(false);
     }

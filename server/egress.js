@@ -136,15 +136,56 @@ class EgressManager {
     this.proxyAgents = new Map();
     this.health = new Map();
     this.proxies = parseProxyList();
+    this.proxyIds = new Set(this.proxies.map(p => p.id));
+    this.proxyFingerprint = JSON.stringify(this.proxies);
+    this.routeResetListeners = [];
     this.lastReload = Date.now();
 
     config.onChange(() => {
       this.reload();
     });
+
+    // WARP owns tunnel lifecycle; when a tunnel starts/reconnects/exits, clear
+    // any stale quota/circuit state associated with that local route.
+    if (typeof warp.onRouteChange === 'function') {
+      warp.onRouteChange((route, reason) => this.resetRoute(route, reason));
+    }
+  }
+
+  onRouteReset(fn) {
+    if (typeof fn === 'function') this.routeResetListeners.push(fn);
+  }
+
+  resetRoute(route, reason = 'route_reset') {
+    if (!route || !route.id) return;
+    this.health.delete(this._healthKey(route));
+    for (const fn of this.routeResetListeners) {
+      try { fn(route.id, reason); } catch (e) {}
+    }
   }
 
   reload() {
-    this.proxies = parseProxyList();
+    const nextProxies = parseProxyList();
+    const nextFingerprint = JSON.stringify(nextProxies);
+    if (nextFingerprint === this.proxyFingerprint) {
+      this.lastReload = Date.now();
+      return;
+    }
+
+    const oldIds = new Set(this.proxyIds);
+    const nextIds = new Set(nextProxies.map(p => p.id));
+
+    this.proxies = nextProxies;
+    this.proxyIds = nextIds;
+    this.proxyFingerprint = nextFingerprint;
+
+    for (const id of new Set([...oldIds, ...nextIds])) {
+      this.health.delete(id);
+      for (const fn of this.routeResetListeners) {
+        try { fn(id, 'proxy_reload'); } catch (e) {}
+      }
+    }
+
     for (const agent of this.proxyAgents.values()) {
       try { agent.destroy(); } catch (e) {}
     }
@@ -196,12 +237,23 @@ class EgressManager {
     return remaining > 0 ? remaining : 0;
   }
 
+  getWarpRoutes() {
+    if (config.get('warp_mode') === 'disabled' || config.get('warp_mode') === 'never') return [];
+    if (!warp.isReady()) return [];
+    let ports = typeof warp.getCandidatePorts === 'function'
+      ? warp.getCandidatePorts()
+      : [];
+    if (ports.length === 0) {
+      const fallback = warp.getBestPort();
+      if (fallback) ports = [fallback];
+    }
+    return ports
+      .filter(Boolean)
+      .map(port => ({ type: 'warp', port, id: `warp:${port}` }));
+  }
+
   getWarpRoute() {
-    if (config.get('warp_mode') === 'disabled' || config.get('warp_mode') === 'never') return null;
-    if (!warp.isReady()) return null;
-    const port = warp.getBestPort();
-    if (!port) return null;
-    return { type: 'warp', port, id: `warp:${port}` };
+    return this.getWarpRoutes()[0] || null;
   }
 
   _allowDirect() {
@@ -227,21 +279,19 @@ class EgressManager {
       proxyType: proxy.type,
       id: proxy.id
     }));
-    const warpRoute = this.getWarpRoute();
+    const warpRoutes = this.getWarpRoutes();
 
     let routes;
     if (mode === 'direct') {
       routes = [direct];
     } else if (mode === 'warp_only') {
-      routes = warpRoute ? [warpRoute] : [];
+      routes = warpRoutes;
     } else if (mode === 'proxy_only' || mode === 'scraped_only') {
       routes = proxyRoutes;
     } else {
       // auto / hybrid: stable WARP first, then user-owned proxies, then direct
       // only when explicitly allowed.
-      routes = [];
-      if (warpRoute) routes.push(warpRoute);
-      routes.push(...proxyRoutes);
+      routes = [...warpRoutes, ...proxyRoutes];
       if (this._allowDirect()) routes.push(direct);
     }
 

@@ -1,6 +1,7 @@
 const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
+const { StringDecoder } = require('string_decoder');
 const config = require('./config');
 const identity = require('./identity');
 const tools = require('./tools');
@@ -77,41 +78,83 @@ function sendAnthropicError(res, statusCode, type, message, headers = {}) {
   }));
 }
 
+function anthropicStopReason(openAiReason, hasToolCalls = false) {
+  if (hasToolCalls || openAiReason === 'tool_calls') return 'tool_use';
+  if (openAiReason === 'length') return 'max_tokens';
+  return 'end_turn';
+}
+
+const pausedUpstreams = new WeakSet();
+
+function writeStream(res, upstreamRes, chunk) {
+  if (res.destroyed || res.writableEnded) return false;
+  let ok = false;
+  try {
+    ok = res.write(chunk);
+  } catch (e) {
+    return false;
+  }
+  if (!ok && upstreamRes && !upstreamRes.destroyed && !pausedUpstreams.has(upstreamRes)) {
+    pausedUpstreams.add(upstreamRes);
+    upstreamRes.pause();
+    res.once('drain', () => {
+      pausedUpstreams.delete(upstreamRes);
+      if (!upstreamRes.destroyed) upstreamRes.resume();
+    });
+  }
+  return ok;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SESSION PERSISTENCE — Each egress route keeps a stable session ID to leverage
 // OpenCode's session affinity and prompt caching. Only rotated on quota/route
 // failure. Direct route gets its own stable session.
 // ═══════════════════════════════════════════════════════════════════════════
-const persistentSessions = {
-  sessions: new Map(), // routeKey -> { sessionId, projectId, createdAt }
+function sessionKey(keyId, routeKey) {
+  return `${keyId || 'anonymous'}\u0000${routeKey}`;
+}
 
-  getOrCreate(routeKey) {
-    if (this.sessions.has(routeKey)) {
-      return this.sessions.get(routeKey);
+const persistentSessions = {
+  sessions: new Map(), // keyId + routeKey -> { sessionId, projectId, createdAt }
+
+  getOrCreate(keyId, routeKey) {
+    const id = sessionKey(keyId, routeKey);
+    if (this.sessions.has(id)) {
+      return this.sessions.get(id);
     }
     const session = {
       sessionId: identity.generateCanonicalSessionId(),
       projectId: identity.generateProjectId(),
       createdAt: Date.now()
     };
-    this.sessions.set(routeKey, session);
+    this.sessions.set(id, session);
     return session;
   },
 
-  invalidate(routeKey) {
-    this.sessions.delete(routeKey);
+  invalidate(keyId, routeKey) {
+    this.sessions.delete(sessionKey(keyId, routeKey));
   },
 
-  // Rotate session for a route (e.g., after rate limit)
-  rotate(routeKey) {
-    this.sessions.set(routeKey, {
+  invalidateRoute(routeKey) {
+    const suffix = `\u0000${routeKey}`;
+    for (const key of [...this.sessions.keys()]) {
+      if (key.endsWith(suffix)) this.sessions.delete(key);
+    }
+  },
+
+  // Rotate one client's session for a route (e.g., after a quota response).
+  rotate(keyId, routeKey) {
+    const id = sessionKey(keyId, routeKey);
+    this.sessions.set(id, {
       sessionId: identity.generateCanonicalSessionId(),
       projectId: identity.generateProjectId(),
       createdAt: Date.now()
     });
-    return this.sessions.get(routeKey);
+    return this.sessions.get(id);
   }
 };
+
+egress.onRouteReset((routeId) => persistentSessions.invalidateRoute(routeId));
 
 // Adaptive Route Health & Intelligent Egress Router
 const routeHealth = {
@@ -335,11 +378,22 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   let lastStatus = 0;
   let lastBody = '';
   let currentUpstreamReq = null;
+  let deadlineExceeded = false;
 
+  const deadlineTimer = setTimeout(() => {
+    deadlineExceeded = true;
+    if (currentUpstreamReq) {
+      try { currentUpstreamReq.destroy(new Error('Request deadline exceeded')); } catch (e) {}
+    }
+  }, Math.max(1, deadline - Date.now()));
+  if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+
+  res.once('finish', () => clearTimeout(deadlineTimer));
   // Abort the in-flight upstream request if the client goes away. Listening on
   // the response (not the request) avoids destroying the upstream request when
   // the request body has merely finished being read.
   res.once('close', () => {
+    clearTimeout(deadlineTimer);
     if (!res.writableEnded && currentUpstreamReq) {
       try { currentUpstreamReq.destroy(); } catch (e) {}
     }
@@ -358,7 +412,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const routeKey = activeRoute.id;
 
-    const session = persistentSessions.getOrCreate(routeKey);
+    const session = persistentSessions.getOrCreate(keyObj?.id || 'anonymous', routeKey);
     const sessionId = (attempt === 1) ? session.sessionId : identity.generateCanonicalSessionId();
     const projectId = (attempt === 1) ? session.projectId : identity.generateProjectId();
 
@@ -459,8 +513,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         upstreamReq.on('error', (err) => {
           resolve({
             success: false,
-            statusCode: isTimedOut ? 504 : 502,
-            body: err.message
+            statusCode: (isTimedOut || deadlineExceeded) ? 504 : 502,
+            body: deadlineExceeded ? 'Request deadline exceeded' : err.message
           });
         });
 
@@ -510,35 +564,49 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         let completionTokens = 0;
         let totalTokens = 0;
         let reasoningTokens = 0;
+        let streamedContentChars = 0;
+        let streamedReasoningChars = 0;
         let buffer = '';
+        const decoder = new StringDecoder('utf8');
+        const estimatedPromptTokens = Math.ceil(Buffer.byteLength(payloadString) / 4);
         // index -> 'client' | 'injected'; argument-only chunks carry no name.
         const toolCallKinds = new Map();
         let streamFailed = false;
+        const writeSse = (chunk) => writeStream(res, upstreamRes, chunk);
 
         const failStream = (err) => {
           if (streamFailed) return;
           streamFailed = true;
           releaseSlot();
+          const status = deadlineExceeded ? 504 : 502;
+          const type = deadlineExceeded ? 'upstream_timeout' : 'upstream_stream_error';
+          const message = deadlineExceeded
+            ? 'Upstream request deadline exceeded.'
+            : 'Upstream stream interrupted before completion.';
           console.warn(`[Proxy] Upstream stream interrupted for ${requestedModel} (${routeLabel(activeRoute)}): ${err?.message || 'unknown error'}`);
           if (!res.writableEnded && !res.destroyed) {
             try {
-              res.write(`data: ${JSON.stringify({
-                error: {
-                  message: 'Upstream stream interrupted before completion.',
-                  type: 'upstream_stream_error',
-                  code: 502
-                }
-              })}\n\n`);
+              res.write(`data: ${JSON.stringify({ error: { message, type, code: status } })}\n\n`);
               res.write('data: [DONE]\n\n');
               res.end();
             } catch (e) {
               try { res.end(); } catch (e2) {}
             }
           }
+
+          const pTokens = promptTokens || estimatedPromptTokens;
+          const cTokens = completionTokens || Math.ceil((streamedContentChars + streamedReasoningChars) / 4);
+          const total = totalTokens || (pTokens + cTokens);
+          keys.recordUsage(keyObj.id, total);
           metrics.recordRequest({
             model: requestedModel,
-            status: 502,
-            tokens: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
+            status,
+            tokens: {
+              prompt_tokens: pTokens,
+              completion_tokens: cTokens,
+              total_tokens: total,
+              reasoning_tokens: reasoningTokens
+            },
             latencyMs: Date.now() - startTime,
             stream: true,
             keyId: keyObj.id
@@ -548,7 +616,11 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         upstreamRes.on('aborted', () => failStream(new Error('upstream aborted')));
 
         upstreamRes.on('data', (chunk) => {
-          let chunkStr = chunk.toString();
+          if (res.destroyed || res.writableEnded) {
+            try { upstreamRes.destroy(); } catch (e) {}
+            return;
+          }
+          let chunkStr = decoder.write(chunk);
           // Ensure model ID in chunks reflects the requested or resolved ID
           if (upstreamModel && resolvedModel && upstreamModel !== resolvedModel) {
             chunkStr = chunkStr.replaceAll(upstreamModel, requestedModel);
@@ -561,12 +633,12 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed.startsWith('data:')) {
-              if (line) res.write(line + '\n');
+              if (line) writeSse(line + '\n');
               continue;
             }
             const dataStr = trimmed.slice(5).trim();
             if (dataStr === '[DONE]') {
-              res.write('data: [DONE]\n\n');
+              writeSse('data: [DONE]\n\n');
               if (res.flush) res.flush();
               continue;
             }
@@ -577,6 +649,14 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
                 completionTokens = p.usage.completion_tokens || completionTokens;
                 totalTokens = p.usage.total_tokens || totalTokens;
                 reasoningTokens = p.usage.completion_tokens_details?.reasoning_tokens || reasoningTokens;
+              }
+              if (Array.isArray(p.choices)) {
+                for (const choice of p.choices) {
+                  const delta = choice?.delta;
+                  if (!delta) continue;
+                  if (typeof delta.content === 'string') streamedContentChars += delta.content.length;
+                  if (typeof delta.reasoning_content === 'string') streamedReasoningChars += delta.reasoning_content.length;
+                }
               }
 
               // Filter out injected tool calls from client stream (H2).
@@ -617,10 +697,10 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
                 }
               }
 
-              res.write(`data: ${JSON.stringify(p)}\n\n`);
+              writeSse(`data: ${JSON.stringify(p)}\n\n`);
               if (res.flush) res.flush();
             } catch (e) {
-              res.write(line + '\n');
+              writeSse(line + '\n');
               if (res.flush) res.flush();
             }
           }
@@ -631,12 +711,14 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           releaseSlot();
           if (!res.writableEnded && !res.destroyed) res.end();
           const latency = Date.now() - startTime;
-          const total = totalTokens || (promptTokens + completionTokens);
+          const pTokens = promptTokens || estimatedPromptTokens;
+          const cTokens = completionTokens || Math.ceil((streamedContentChars + streamedReasoningChars) / 4);
+          const total = totalTokens || (pTokens + cTokens);
           keys.recordUsage(keyObj.id, total);
           metrics.recordRequest({
             model: requestedModel,
             status: 200,
-            tokens: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: total, reasoning_tokens: reasoningTokens },
+            tokens: { prompt_tokens: pTokens, completion_tokens: cTokens, total_tokens: total, reasoning_tokens: reasoningTokens },
             latencyMs: latency,
             stream: true,
             keyId: keyObj.id
@@ -651,16 +733,29 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         let finalUsage = null;
         let completionId = 'chatcmpl-' + crypto.randomUUID();
         let finished = false;
+        let upstreamFinishReason = null;
+        const decoder = new StringDecoder('utf8');
+        const estimatedPromptTokens = Math.ceil(Buffer.byteLength(payloadString) / 4);
 
         function failAggregate(err) {
           if (finished) return;
           finished = true;
           releaseSlot();
+          const status = deadlineExceeded ? 504 : 502;
+          const type = deadlineExceeded ? 'upstream_timeout' : 'upstream_stream_error';
+          const message = deadlineExceeded
+            ? 'Upstream request deadline exceeded.'
+            : 'Upstream stream interrupted before completion.';
           console.warn(`[Proxy] Upstream stream interrupted for ${requestedModel} (${routeLabel(activeRoute)}): ${err?.message || 'unknown error'}`);
+
+          const pTokens = finalUsage?.prompt_tokens || estimatedPromptTokens;
+          const cTokens = finalUsage?.completion_tokens || Math.ceil((accumulatedContent.length + accumulatedReasoning.length) / 4);
+          const total = finalUsage?.total_tokens || (pTokens + cTokens);
+          keys.recordUsage(keyObj.id, total);
           metrics.recordRequest({
             model: requestedModel,
-            status: 502,
-            tokens: { prompt_tokens: 0, completion_tokens: 0 },
+            status,
+            tokens: { prompt_tokens: pTokens, completion_tokens: cTokens, total_tokens: total },
             latencyMs: Date.now() - startTime,
             stream: false,
             keyId: keyObj.id
@@ -669,14 +764,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
             try { res.end(); } catch (e) {}
             return;
           }
-          res.writeHead(502, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            error: {
-              message: 'Upstream stream interrupted before completion.',
-              type: 'upstream_stream_error',
-              code: 502
-            }
-          }));
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message, type, code: status } }));
         }
         upstreamRes.on('error', failAggregate);
         upstreamRes.on('aborted', () => failAggregate(new Error('upstream aborted')));
@@ -686,7 +775,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           finished = true;
           releaseSlot();
 
-          const pTokens = finalUsage?.prompt_tokens || 0;
+          const pTokens = finalUsage?.prompt_tokens || estimatedPromptTokens;
           const cTokens = finalUsage?.completion_tokens || Math.ceil((accumulatedContent.length + accumulatedReasoning.length) / 4);
           const rTokens = finalUsage?.completion_tokens_details?.reasoning_tokens || Math.ceil(accumulatedReasoning.length / 4);
           const total = finalUsage?.total_tokens || (pTokens + cTokens);
@@ -713,7 +802,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
                   reasoning_content: accumulatedReasoning || undefined,
                   tool_calls: realToolCalls.length > 0 ? realToolCalls : undefined
                 },
-                finish_reason: realToolCalls.length > 0 ? "tool_calls" : "stop"
+                finish_reason: realToolCalls.length > 0 ? "tool_calls" : (upstreamFinishReason || "stop")
               }
             ],
             usage: finalUsage || {
@@ -735,14 +824,18 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
             keyId: keyObj.id
           });
 
-          res.writeHead(200, { 'Content-Type': 'application/json' });
           if (!res.destroyed && !res.writableEnded) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(responseJson, null, 2));
           }
         }
 
         upstreamRes.on('data', (chunk) => {
-          buffer += chunk.toString();
+          if (res.destroyed || res.writableEnded) {
+            try { upstreamRes.destroy(); } catch (e) {}
+            return;
+          }
+          buffer += decoder.write(chunk);
           const lines = buffer.split('\n');
           buffer = lines.pop();
 
@@ -760,6 +853,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
               const parsed = JSON.parse(dataStr);
               if (parsed.id) completionId = parsed.id;
               if (parsed.usage) finalUsage = parsed.usage;
+              if (parsed.choices?.[0]?.finish_reason) upstreamFinishReason = parsed.choices[0].finish_reason;
 
               const delta = parsed.choices?.[0]?.delta;
               if (delta) {
@@ -799,7 +893,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
     if (failureKind === 'quota') {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
-      persistentSessions.rotate(routeKey);
+      persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
       const retryAfterSec = Math.max(1, Math.ceil((retryAfterMs || 60000) / 1000));
       console.warn(`[Proxy] Upstream quota/capacity limit on ${routeLabel(activeRoute)} for ${currentModel}. Failing fast (Retry-After ${retryAfterSec}s).`);
       metrics.recordRequest({
@@ -1045,11 +1139,22 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   let lastStatus = 0;
   let lastBody = '';
   let currentUpstreamReq = null;
+  let deadlineExceeded = false;
 
+  const deadlineTimer = setTimeout(() => {
+    deadlineExceeded = true;
+    if (currentUpstreamReq) {
+      try { currentUpstreamReq.destroy(new Error('Request deadline exceeded')); } catch (e) {}
+    }
+  }, Math.max(1, deadline - Date.now()));
+  if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+
+  res.once('finish', () => clearTimeout(deadlineTimer));
   // Abort the in-flight upstream request if the client goes away. Listening on
   // the response (not the request) avoids destroying the upstream request when
   // the request body has merely finished being read.
   res.once('close', () => {
+    clearTimeout(deadlineTimer);
     if (!res.writableEnded && currentUpstreamReq) {
       try { currentUpstreamReq.destroy(); } catch (e) {}
     }
@@ -1068,7 +1173,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     const upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const routeKey = activeRoute.id;
 
-    const session = persistentSessions.getOrCreate(routeKey);
+    const session = persistentSessions.getOrCreate(keyObj?.id || 'anonymous', routeKey);
     const sessionId = (attempt === 1) ? session.sessionId : identity.generateCanonicalSessionId();
     const projectId = (attempt === 1) ? session.projectId : identity.generateProjectId();
 
@@ -1167,23 +1272,21 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         upstreamReq.on('error', (err) => {
           resolve({
             success: false,
-            statusCode: isTimedOut ? 504 : 502,
-            body: err.message
+            statusCode: (isTimedOut || deadlineExceeded) ? 504 : 502,
+            body: deadlineExceeded ? 'Request deadline exceeded' : err.message
           });
-        });
-
-        req.on('close', () => {
-          if (!res.writableEnded) {
-            try { upstreamReq.destroy(); } catch (e) {}
-          }
         });
 
         upstreamReq.write(payloadString);
         upstreamReq.end();
       });
-    } finally {
-      releaseSlot();
+    } catch (err) {
+      attemptResult = { success: false, statusCode: 502, headers: {}, body: err.message };
     }
+
+    // The success path keeps the slot until the response closes. Failure paths
+    // must release it before retrying or returning.
+    if (!attemptResult.success) releaseSlot();
 
     if (attemptResult.success) {
       const { upstreamRes, upstreamReq, resolvedModel } = attemptResult;
@@ -1209,6 +1312,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
       if (isClientStream) {
         // Stream Anthropic SSE with zero buffering & extended thinking / tool call support
+        const estimatedPromptTokens = Math.ceil(Buffer.byteLength(payloadString) / 4);
+        const writeSse = (chunk) => writeStream(res, upstreamRes, chunk);
         res.writeHead(200, {
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache, no-transform',
@@ -1219,7 +1324,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         if (res.socket?.setNoDelay) res.socket.setNoDelay(true);
 
         // Send initial message_start
-        res.write(`event: message_start\ndata: ${JSON.stringify({
+        writeSse(`event: message_start\ndata: ${JSON.stringify({
           type: 'message_start',
           message: {
             id: messageId,
@@ -1237,10 +1342,14 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         let promptTokens = 0;
         let completionTokens = 0;
         let reasoningTokens = 0;
+        let streamedContentChars = 0;
+        let streamedReasoningChars = 0;
+        const decoder = new StringDecoder('utf8');
         let activeBlockIndex = -1;
         let activeBlockType = null;
         let activeToolIndex = null;
         let hasToolCalls = false;
+        let upstreamFinishReason = null;
         // index -> 'client' | 'injected'; argument-only chunks carry no name.
         const toolCallKinds = new Map();
         let streamFailed = false;
@@ -1249,14 +1358,18 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           if (streamFailed) return;
           streamFailed = true;
           releaseSlot();
+          const status = deadlineExceeded ? 504 : 502;
+          const message = deadlineExceeded
+            ? 'Upstream request deadline exceeded.'
+            : 'Upstream stream interrupted before completion.';
           console.warn(`[Proxy] Upstream Anthropic stream interrupted for ${requestedModel} (${routeLabel(activeRoute)}): ${err?.message || 'unknown error'}`);
           if (!res.writableEnded && !res.destroyed) {
             try {
-              res.write(`event: error\ndata: ${JSON.stringify({
+              writeSse(`event: error\ndata: ${JSON.stringify({
                 type: 'error',
                 error: {
                   type: 'api_error',
-                  message: 'Upstream stream interrupted before completion.'
+                  message
                 }
               })}\n\n`);
               res.end();
@@ -1264,10 +1377,20 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
               try { res.end(); } catch (e2) {}
             }
           }
+
+          const pTokens = promptTokens || estimatedPromptTokens;
+          const cTokens = completionTokens || Math.ceil((streamedContentChars + streamedReasoningChars) / 4);
+          const total = pTokens + cTokens;
+          keys.recordUsage(keyObj.id, total);
           metrics.recordRequest({
             model: requestedModel,
-            status: 502,
-            tokens: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
+            status,
+            tokens: {
+              prompt_tokens: pTokens,
+              completion_tokens: cTokens,
+              total_tokens: total,
+              reasoning_tokens: reasoningTokens
+            },
             latencyMs: Date.now() - startTime,
             stream: true,
             keyId: keyObj.id
@@ -1278,7 +1401,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
         function closeCurrentBlock() {
           if (activeBlockIndex >= 0 && activeBlockType !== null) {
-            res.write(`event: content_block_stop\ndata: ${JSON.stringify({
+            writeSse(`event: content_block_stop\ndata: ${JSON.stringify({
               type: 'content_block_stop',
               index: activeBlockIndex
             })}\n\n`);
@@ -1291,7 +1414,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             closeCurrentBlock();
             activeBlockIndex++;
             activeBlockType = 'thinking';
-            res.write(`event: content_block_start\ndata: ${JSON.stringify({
+            writeSse(`event: content_block_start\ndata: ${JSON.stringify({
               type: 'content_block_start',
               index: activeBlockIndex,
               content_block: {
@@ -1307,7 +1430,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             closeCurrentBlock();
             activeBlockIndex++;
             activeBlockType = 'text';
-            res.write(`event: content_block_start\ndata: ${JSON.stringify({
+            writeSse(`event: content_block_start\ndata: ${JSON.stringify({
               type: 'content_block_start',
               index: activeBlockIndex,
               content_block: {
@@ -1325,7 +1448,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             activeBlockType = 'tool_use';
             activeToolIndex = toolIndex;
             hasToolCalls = true;
-            res.write(`event: content_block_start\ndata: ${JSON.stringify({
+            writeSse(`event: content_block_start\ndata: ${JSON.stringify({
               type: 'content_block_start',
               index: activeBlockIndex,
               content_block: {
@@ -1339,7 +1462,11 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         }
 
         upstreamRes.on('data', (chunk) => {
-          buffer += chunk.toString();
+          if (res.destroyed || res.writableEnded) {
+            try { upstreamRes.destroy(); } catch (e) {}
+            return;
+          }
+          buffer += decoder.write(chunk);
           const lines = buffer.split('\n');
           buffer = lines.pop();
 
@@ -1356,11 +1483,14 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
                 completionTokens = parsed.usage.completion_tokens || completionTokens;
                 reasoningTokens = parsed.usage.completion_tokens_details?.reasoning_tokens || reasoningTokens;
               }
+              if (parsed.choices?.[0]?.finish_reason) upstreamFinishReason = parsed.choices[0].finish_reason;
               const delta = parsed.choices?.[0]?.delta;
               if (delta) {
+                if (typeof delta.reasoning_content === 'string') streamedReasoningChars += delta.reasoning_content.length;
+                if (typeof delta.content === 'string') streamedContentChars += delta.content.length;
                 if (delta.reasoning_content) {
                   ensureThinkingBlock();
-                  res.write(`event: content_block_delta\ndata: ${JSON.stringify({
+                  writeSse(`event: content_block_delta\ndata: ${JSON.stringify({
                     type: 'content_block_delta',
                     index: activeBlockIndex,
                     delta: { type: 'thinking_delta', thinking: delta.reasoning_content }
@@ -1370,7 +1500,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
                 if (delta.content) {
                   ensureTextBlock();
-                  res.write(`event: content_block_delta\ndata: ${JSON.stringify({
+                  writeSse(`event: content_block_delta\ndata: ${JSON.stringify({
                     type: 'content_block_delta',
                     index: activeBlockIndex,
                     delta: { type: 'text_delta', text: delta.content }
@@ -1391,7 +1521,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
                       ensureToolBlock(tIndex, tc.id, name);
                     }
                     if (tc.function?.arguments && activeBlockType === 'tool_use' && activeToolIndex === tIndex) {
-                      res.write(`event: content_block_delta\ndata: ${JSON.stringify({
+                      writeSse(`event: content_block_delta\ndata: ${JSON.stringify({
                         type: 'content_block_delta',
                         index: activeBlockIndex,
                         delta: { type: 'input_json_delta', partial_json: tc.function.arguments }
@@ -1412,32 +1542,34 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           closeCurrentBlock();
 
           if (activeBlockIndex < 0) {
-            res.write(`event: content_block_start\ndata: ${JSON.stringify({
+            writeSse(`event: content_block_start\ndata: ${JSON.stringify({
               type: 'content_block_start',
               index: 0,
               content_block: { type: 'text', text: '' }
             })}\n\n`);
-            res.write(`event: content_block_stop\ndata: ${JSON.stringify({
+            writeSse(`event: content_block_stop\ndata: ${JSON.stringify({
               type: 'content_block_stop',
               index: 0
             })}\n\n`);
           }
 
-          res.write(`event: message_delta\ndata: ${JSON.stringify({
+          writeSse(`event: message_delta\ndata: ${JSON.stringify({
             type: 'message_delta',
-            delta: { stop_reason: hasToolCalls ? 'tool_use' : 'end_turn', stop_sequence: null },
+            delta: { stop_reason: anthropicStopReason(upstreamFinishReason, hasToolCalls), stop_sequence: null },
             usage: { output_tokens: completionTokens }
           })}\n\n`);
-          res.write(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
+          writeSse(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
           res.end();
 
           const latency = Date.now() - startTime;
-          const total = promptTokens + completionTokens;
+          const pTokens = promptTokens || estimatedPromptTokens;
+          const cTokens = completionTokens || Math.ceil((streamedContentChars + streamedReasoningChars) / 4);
+          const total = pTokens + cTokens;
           keys.recordUsage(keyObj.id, total);
           metrics.recordRequest({
             model: requestedModel,
             status: 200,
-            tokens: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: total, reasoning_tokens: reasoningTokens },
+            tokens: { prompt_tokens: pTokens, completion_tokens: cTokens, total_tokens: total, reasoning_tokens: reasoningTokens },
             latencyMs: latency,
             stream: true,
             keyId: keyObj.id
@@ -1451,16 +1583,28 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         let accumulatedToolCalls = [];
         let finalUsage = null;
         let finished = false;
+        let upstreamFinishReason = null;
+        const decoder = new StringDecoder('utf8');
+        const estimatedPromptTokens = Math.ceil(Buffer.byteLength(payloadString) / 4);
 
         function failAggregate(err) {
           if (finished) return;
           finished = true;
           releaseSlot();
+          const status = deadlineExceeded ? 504 : 502;
+          const message = deadlineExceeded
+            ? 'Upstream request deadline exceeded.'
+            : 'Upstream stream interrupted before completion.';
           console.warn(`[Proxy] Upstream Anthropic stream interrupted for ${requestedModel} (${routeLabel(activeRoute)}): ${err?.message || 'unknown error'}`);
+
+          const pTokens = finalUsage?.prompt_tokens || estimatedPromptTokens;
+          const cTokens = finalUsage?.completion_tokens || Math.ceil((accumulatedContent.length + accumulatedReasoning.length) / 4);
+          const total = finalUsage?.total_tokens || (pTokens + cTokens);
+          keys.recordUsage(keyObj.id, total);
           metrics.recordRequest({
             model: requestedModel,
-            status: 502,
-            tokens: { prompt_tokens: 0, completion_tokens: 0 },
+            status,
+            tokens: { prompt_tokens: pTokens, completion_tokens: cTokens, total_tokens: total },
             latencyMs: Date.now() - startTime,
             stream: false,
             keyId: keyObj.id
@@ -1469,14 +1613,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             try { res.end(); } catch (e) {}
             return;
           }
-          res.writeHead(502, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            type: 'error',
-            error: {
-              type: 'api_error',
-              message: 'Upstream stream interrupted before completion.'
-            }
-          }));
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message } }));
         }
         upstreamRes.on('error', failAggregate);
         upstreamRes.on('aborted', () => failAggregate(new Error('upstream aborted')));
@@ -1486,7 +1624,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           finished = true;
           releaseSlot();
 
-          const pTokens = finalUsage?.prompt_tokens || 0;
+          const pTokens = finalUsage?.prompt_tokens || estimatedPromptTokens;
           const cTokens = finalUsage?.completion_tokens || Math.ceil((accumulatedContent.length + accumulatedReasoning.length) / 4);
           const rTokens = finalUsage?.completion_tokens_details?.reasoning_tokens || 0;
           const total = finalUsage?.total_tokens || (pTokens + cTokens);
@@ -1495,8 +1633,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           if (accumulatedReasoning) {
             content.push({
               type: 'thinking',
-              thinking: accumulatedReasoning,
-              signature: 'sig_' + crypto.randomBytes(8).toString('hex')
+              thinking: accumulatedReasoning
             });
           }
           if (accumulatedContent) {
@@ -1527,7 +1664,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             role: 'assistant',
             model: requestedModel,
             content: content,
-            stop_reason: realToolCalls.length > 0 ? 'tool_use' : 'end_turn',
+            stop_reason: anthropicStopReason(upstreamFinishReason, realToolCalls.length > 0),
             stop_sequence: null,
             usage: {
               input_tokens: pTokens,
@@ -1553,7 +1690,11 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         }
 
         upstreamRes.on('data', (chunk) => {
-          buffer += chunk.toString();
+          if (res.destroyed || res.writableEnded) {
+            try { upstreamRes.destroy(); } catch (e) {}
+            return;
+          }
+          buffer += decoder.write(chunk);
           const lines = buffer.split('\n');
           buffer = lines.pop();
 
@@ -1570,6 +1711,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             try {
               const parsed = JSON.parse(dataStr);
               if (parsed.usage) finalUsage = parsed.usage;
+              if (parsed.choices?.[0]?.finish_reason) upstreamFinishReason = parsed.choices[0].finish_reason;
               const delta = parsed.choices?.[0]?.delta;
               if (delta) {
                 if (delta.reasoning_content) accumulatedReasoning += delta.reasoning_content;
@@ -1608,7 +1750,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
     if (failureKind === 'quota') {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
-      persistentSessions.rotate(routeKey);
+      persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
       const retryAfterSec = Math.max(1, Math.ceil((retryAfterMs || 60000) / 1000));
       console.warn(`[Proxy] Upstream quota/capacity limit on ${routeLabel(activeRoute)} for ${currentModel}. Failing fast (Retry-After ${retryAfterSec}s).`);
       metrics.recordRequest({

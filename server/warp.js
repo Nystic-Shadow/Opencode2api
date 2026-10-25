@@ -71,6 +71,7 @@ class CloudflareWarpManager {
     this.statusCache = null;
     this.socketAlive = false;
     this.sidecarReady = false;
+    this.sidecarEgressIp = null;
     this.sidecarTimer = null;
     this.lastStatusCheck = 0;
     this.isBootstrapping = false;
@@ -80,6 +81,12 @@ class CloudflareWarpManager {
     this.regCooldownUntil = 0;
     this.lastRegTime = 0;
     this.poolAccountIndex = 0;
+    this.routeChangeListeners = [];
+    this.portHealth = new Map();
+    this.healthChecks = new Map();
+    this.portTraceOk = new Map();
+    this.externalPorts = new Set();
+    this.healthTimer = null;
     this.progress = {
       percent: 0,
       stage: 'idle',
@@ -89,6 +96,64 @@ class CloudflareWarpManager {
     // Fast initial background probe so socketAlive state is immediately populated
     this.probeSocks5().catch(() => {});
     this.startAutoRotateCron();
+    this.startPortHealthMonitor();
+  }
+
+  onRouteChange(fn) {
+    if (typeof fn === 'function') this.routeChangeListeners.push(fn);
+  }
+
+  notifyRouteChange(port, reason = 'changed') {
+    const route = { type: 'warp', port, id: `warp:${port}` };
+    for (const fn of this.routeChangeListeners) {
+      try { fn(route, reason); } catch (e) {}
+    }
+  }
+
+  startPortHealthMonitor() {
+    if (this.healthTimer) return;
+    this.healthTimer = setInterval(async () => {
+      if (this.sidecarTimer) return;
+      if (this.getEngineMode() !== 'embedded') return;
+      const trackedPorts = new Set([...this.portProcesses.keys(), ...this.externalPorts]);
+      for (const port of trackedPorts) {
+        let ok = await this.probeSocks5('127.0.0.1', port);
+        const checks = (this.healthChecks.get(port) || 0) + 1;
+        this.healthChecks.set(port, checks);
+        const lastTraceOk = this.portTraceOk.get(port);
+        if (ok && (checks % 4 === 0 || lastTraceOk === false)) {
+          const trace = await this.probeEgressTrace(port, 5000);
+          ok = Boolean(trace && trace.ip && ['on', 'plus'].includes(String(trace.warp || '').toLowerCase()));
+          this.portTraceOk.set(port, ok);
+        } else if (lastTraceOk === false) {
+          // Do not let a SOCKS-only check hide a previously failed WARP trace.
+          ok = false;
+        }
+        const previous = this.portHealth.get(port);
+        this.portHealth.set(port, { ok, lastCheck: Date.now() });
+        if (!ok && this.externalPorts.has(port)) this.externalPorts.delete(port);
+        if (previous && previous.ok !== ok) {
+          this.notifyRouteChange(port, ok ? 'health_ok' : 'health_failed');
+        }
+      }
+    }, 15000);
+    if (typeof this.healthTimer.unref === 'function') this.healthTimer.unref();
+  }
+
+  getCandidatePorts() {
+    if (this.getEngineMode() === 'sidecar') {
+      return this.isReady() ? [this.getActivePort()] : [];
+    }
+    const tracked = new Set([...this.portProcesses.keys(), ...this.externalPorts]);
+    return [...tracked].filter(port => this.isPortReady(port));
+  }
+
+  isPortReady(port) {
+    if (this.getEngineMode() === 'sidecar') return this.isReady();
+    if (!this.portProcesses.has(port) && !this.externalPorts.has(port)) return false;
+    const health = this.portHealth.get(port);
+    if (health && health.ok === false) return false;
+    return true;
   }
 
   startAutoRotateCron() {
@@ -167,8 +232,8 @@ class CloudflareWarpManager {
     }
 
     const ports = [this.basePort, this.basePort + 1, this.basePort + 2, this.basePort + 3];
-    const livePorts = ports.filter(p => this.portProcesses.has(p));
-    if (livePorts.length === 0) return this.getActivePort();
+    const livePorts = ports.filter(p => this.portProcesses.has(p) && this.isPortReady(p));
+    if (livePorts.length === 0) return null;
 
     const now = Date.now();
     // 1. Live ports not on cooldown and not in exclude list
@@ -234,6 +299,7 @@ class CloudflareWarpManager {
 
   async forceKillPort(port) {
     this.clearAgent(port);
+    this.externalPorts.delete(port);
     if (this.drainingTimers.has(port)) {
       clearTimeout(this.drainingTimers.get(port));
       this.drainingTimers.delete(port);
@@ -349,16 +415,9 @@ class CloudflareWarpManager {
     const engine = this.getEngineMode();
     if (engine === 'disabled') return false;
     if (engine === 'sidecar') {
-      if (this.sidecarReady === true) return true;
-      return this.socketAlive === true;
+      return this.sidecarReady === true;
     }
-    if (this.portProcesses && this.portProcesses.size > 0) {
-      return true;
-    }
-    if (this.statusCache && typeof this.statusCache.socketAlive === 'boolean') {
-      return this.statusCache.socketAlive;
-    }
-    return this.socketAlive === true;
+    return this.getCandidatePorts().length > 0;
   }
 
   /**
@@ -434,7 +493,7 @@ class CloudflareWarpManager {
 
             try {
               if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-              fs.writeFileSync(ACCOUNT_FILE, JSON.stringify(account, null, 2));
+              fs.writeFileSync(ACCOUNT_FILE, JSON.stringify(account, null, 2), { mode: 0o600 });
             } catch (fsErr) {
               console.warn('[WARP] Warning saving account file:', fsErr.message);
             }
@@ -610,7 +669,7 @@ class CloudflareWarpManager {
       fs.writeFileSync(POOL_FILE, JSON.stringify({
         updatedAt: new Date().toISOString(),
         accounts: this.accountPool
-      }, null, 2));
+      }, null, 2), { mode: 0o600 });
     } catch (e) {
       console.warn('[WARP Pool] Warning saving account pool:', e.message);
     }
@@ -730,7 +789,7 @@ BindAddress = ${bindHost}:${port}
 `;
 
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(confPath, confContent);
+    fs.writeFileSync(confPath, confContent, { mode: 0o600 });
 
     this.setProgress(75, 'launching_tunnel', `Starting userspace WireProxy SOCKS5 daemon on ${bindHost}:${port}...`);
     console.log(`[WARP] Starting userspace WireProxy SOCKS5 daemon on ${bindHost}:${port} (${endpointHost})...`);
@@ -775,6 +834,9 @@ BindAddress = ${bindHost}:${port}
       const current = this.portProcesses.get(port);
       if (current && current.proc === proc) {
         this.portProcesses.delete(port);
+        this.portHealth.set(port, { ok: false, lastCheck: Date.now() });
+        this.portTraceOk.set(port, false);
+        this.notifyRouteChange(port, 'exited');
       }
       if (port === this.getActivePort()) {
         this.socketAlive = false;
@@ -817,19 +879,24 @@ BindAddress = ${bindHost}:${port}
       await new Promise(r => setTimeout(r, 500));
     }
 
-    if (trace && trace.ip) {
+    const warpOn = trace && ['on', 'plus'].includes(String(trace.warp || '').toLowerCase());
+    if (trace && trace.ip && warpOn) {
       const ipFamily = trace.ip.includes(':') ? 'IPv6' : 'IPv4';
-      console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${bindHost}:${port} (warp=on • Egress: ${trace.ip} [${ipFamily} • ${trace.colo || 'Edge'}])`);
-      this.setProgress(100, 'connected', `Cloudflare WARP Egress Active on ${bindHost}:${port} (warp=on • ${trace.ip})`);
+      console.log(`[WARP] WireProxy SOCKS5 engine is LIVE on ${bindHost}:${port} (warp=${trace.warp} • Egress: ${trace.ip} [${ipFamily} • ${trace.colo || 'Edge'}])`);
+      this.setProgress(100, 'connected', `Cloudflare WARP Egress Active on ${bindHost}:${port} (warp=${trace.warp} • ${trace.ip})`);
       this.portProcesses.set(port, { proc, startedAt: Date.now(), account, egressIp: trace.ip });
+      this.portHealth.set(port, { ok: true, lastCheck: Date.now() });
+      this.portTraceOk.set(port, true);
       this.socketAlive = true;
       this.statusCache = null;
+      this.notifyRouteChange(port, 'started');
       return proc;
     }
 
-    // If edge trace timed out on this endpoint, cleanly stop process and propagate error so caller can try next candidate endpoint
+    // A SOCKS5 listener that is not actually tunnelling through WARP must not
+    // be reported as ready. Fail closed and clean up the process.
     try { proc.kill('SIGKILL'); } catch (e) {}
-    throw new Error(`WireProxy on port ${port} connected to SOCKS5 but failed Cloudflare edge handshake on endpoint ${endpointHost}`);
+    throw new Error(`WireProxy on port ${port} is not verified as WARP (warp=${trace?.warp || 'unknown'}) on endpoint ${endpointHost}`);
   }
 
   /**
@@ -893,21 +960,31 @@ BindAddress = ${bindHost}:${port}
       return false;
     }
 
-    // Verify that the SOCKS5 endpoint really reaches Cloudflare. The trace is
-    // allowed to fail transiently; it only affects the reported egress IP.
+    // Verify that the SOCKS5 endpoint really reaches Cloudflare through WARP.
+    // A reachable SOCKS5 port alone is not enough: a plain proxy must not be
+    // presented as an anonymous WARP route.
     const trace = await this.probeEgressTrace(port, 6000);
-    if (trace && trace.warp && !['on', 'plus'].includes(trace.warp)) {
-      console.warn(`[WARP] Sidecar SOCKS5 is reachable but reports warp=${trace.warp}; traffic may not be tunneled through WARP. Check the sidecar logs.`);
+    const warpOn = trace && ['on', 'plus'].includes(String(trace.warp || '').toLowerCase());
+    if (!warpOn) {
+      this.sidecarReady = false;
+      this.socketAlive = false;
+      this.statusCache = null;
+      this.setProgress(0, 'waiting_sidecar', `Sidecar at ${host}:${port} is reachable but not verified as WARP (warp=${trace?.warp || 'unknown'}).`);
+      console.warn(`[WARP] Sidecar SOCKS5 is reachable but reports warp=${trace?.warp || 'unknown'}; refusing to use it until WARP is verified.`);
+      this.startSidecarMonitor();
+      return false;
     }
     this.sidecarReady = true;
     this.socketAlive = true;
     this.activePort = port;
+    this.sidecarEgressIp = trace?.ip || null;
     this.statusCache = null;
     const egress = trace?.ip
       ? ` • Egress: ${trace.ip}${trace.colo ? ` (${trace.colo})` : ''}${trace.warp ? ` • warp=${trace.warp}` : ''}`
       : '';
     this.setProgress(100, 'connected', `Cloudflare WARP sidecar active on ${host}:${port}${egress}`);
     console.log(`[WARP] Sidecar SOCKS5 engine is LIVE on ${host}:${port}${egress}`);
+    this.notifyRouteChange(port, 'sidecar_connected');
     this.startSidecarMonitor();
     return true;
   }
@@ -915,6 +992,7 @@ BindAddress = ${bindHost}:${port}
   startSidecarMonitor() {
     if (this.sidecarTimer) return;
     let misses = 0;
+    let checks = 0;
     this.sidecarTimer = setInterval(async () => {
       if (this.getEngineMode() !== 'sidecar') {
         clearInterval(this.sidecarTimer);
@@ -925,15 +1003,41 @@ BindAddress = ${bindHost}:${port}
       const host = this._resolveWarpHost(port);
       const alive = await this.probeSocks5(host, port);
       if (alive) {
+        checks++;
+        const wasReady = this.sidecarReady;
+        // Re-verify the actual WARP trace periodically, not only after a
+        // reconnect. A SOCKS listener can stay up while the tunnel is down.
+        if (!wasReady || checks % 4 === 0) {
+          const trace = await this.probeEgressTrace(port, 6000);
+          const warpOn = trace && ['on', 'plus'].includes(String(trace.warp || '').toLowerCase());
+          if (!warpOn) {
+            this.sidecarReady = false;
+            this.socketAlive = false;
+            this.statusCache = null;
+            this.setProgress(0, 'waiting_sidecar', `Sidecar at ${host}:${port} is reachable but not verified as WARP.`);
+            if (wasReady) this.notifyRouteChange(port, 'sidecar_unverified');
+            return;
+          }
+          if (trace?.ip && this.sidecarEgressIp && trace.ip !== this.sidecarEgressIp) {
+            this.sidecarEgressIp = trace.ip;
+            this.notifyRouteChange(port, 'sidecar_ip_changed');
+          } else if (trace?.ip) {
+            this.sidecarEgressIp = trace.ip;
+          }
+        }
         misses = 0;
         this.sidecarReady = true;
+        this.socketAlive = true;
+        if (!wasReady) this.notifyRouteChange(port, 'sidecar_reconnected');
       } else {
         misses++;
         if (misses >= 2) {
+          const wasReady = this.sidecarReady;
           this.sidecarReady = false;
           this.socketAlive = false;
           this.statusCache = null;
           this.setProgress(0, 'waiting_sidecar', `WARP sidecar unreachable at ${host}:${port}`);
+          if (wasReady) this.notifyRouteChange(port, 'sidecar_lost');
         }
       }
     }, 15000);
@@ -976,9 +1080,20 @@ BindAddress = ${bindHost}:${port}
       this.setProgress(20, 'checking_socket', `Probing SOCKS5 proxy on ${host}:${port}...`);
       const alreadyAlive = await this.probeSocks5(host, port);
       if (alreadyAlive && !forceRestart) {
-        console.log(`[WARP] SOCKS5 proxy already active and answering on ${host}:${port}`);
-        this.setProgress(100, 'connected', `Cloudflare WARP active on ${host}:${port} (warp=on)`);
+        const trace = await this.probeEgressTrace(port, 5000);
+        const warpOn = trace && ['on', 'plus'].includes(String(trace.warp || '').toLowerCase());
+        if (!warpOn) {
+          console.warn(`[WARP] SOCKS5 listener on ${host}:${port} is not verified as WARP (warp=${trace?.warp || 'unknown'}); refusing to use it.`);
+          this.setProgress(0, 'error', `SOCKS5 on ${host}:${port} is reachable but not verified as WARP.`);
+          return false;
+        }
+        console.log(`[WARP] SOCKS5 proxy already active and verified as WARP on ${host}:${port}`);
+        this.externalPorts.add(port);
+        this.portHealth.set(port, { ok: true, lastCheck: Date.now() });
+        this.portTraceOk.set(port, true);
+        this.setProgress(100, 'connected', `Cloudflare WARP active on ${host}:${port} (warp=${trace.warp})`);
         this.statusCache = null;
+        this.notifyRouteChange(port, 'external_ready');
         return true;
       }
 
@@ -1161,13 +1276,21 @@ BindAddress = ${bindHost}:${port}
         ? 'Sidecar SOCKS5'
         : (this.wireproxyPath ? 'Userspace WireGuard' : (this.cliPath ? 'CLI Daemon' : 'SOCKS5 Proxy'));
       const trace = await this.probeEgressTrace(port);
+      const warpOn = trace && ['on', 'plus'].includes(String(trace.warp || '').toLowerCase());
+      if (warpOn && trace?.ip) {
+        if (this.sidecarEgressIp && trace.ip !== this.sidecarEgressIp) {
+          this.sidecarEgressIp = trace.ip;
+          this.notifyRouteChange(port, 'egress_ip_changed');
+        } else {
+          this.sidecarEgressIp = trace.ip;
+        }
+      }
       const egressDetail = trace?.ip ? ` • IP: ${trace.ip}${trace.colo ? ` (${trace.colo})` : ''}` : '';
-      this.setProgress(100, 'connected', `Cloudflare WARP Egress Active (${engine} • ${host}:${port}${egressDetail})`);
       const result = {
         available: true,
         installed: true,
-        status: 'Connected',
-        connected: true,
+        status: warpOn ? 'Connected' : 'Unverified',
+        connected: Boolean(warpOn),
         running: true,
         mode: 'proxy',
         engine_mode: engineMode,
@@ -1177,13 +1300,17 @@ BindAddress = ${bindHost}:${port}
         socketAlive: true,
         egressIp: trace?.ip || null,
         colo: trace?.colo || null,
-        reason: 'Active & Answering (warp=on)',
+        warp: trace?.warp || null,
+        reason: warpOn
+          ? `Active & verified (warp=${trace.warp})`
+          : `SOCKS5 reachable but not verified as WARP (warp=${trace?.warp || 'unknown'})`,
         bootstrapping: this.isBootstrapping,
         progress: this.progress
       };
       this.statusCache = result;
       this.lastStatusCheck = now;
-      if (engineMode === 'sidecar') this.sidecarReady = true;
+      if (engineMode === 'sidecar') this.sidecarReady = Boolean(warpOn);
+      if (warpOn) this.setProgress(100, 'connected', `Cloudflare WARP Egress Active (${engine} • ${host}:${port}${egressDetail})`);
       return result;
     }
 
@@ -1629,6 +1756,35 @@ BindAddress = ${bindHost}:${port}
 
     this.cachedAgents.set(cacheKey, agent);
     return agent;
+  }
+
+  configureEndpoint(host, port) {
+    const updates = {};
+    if (typeof host === 'string' && host.trim()) updates.warp_host = host.trim();
+    const parsedPort = parseInt(port, 10);
+    if (Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort < 65536) updates.warp_port = parsedPort;
+    if (Object.keys(updates).length > 0) {
+      config.update(updates);
+      if (updates.warp_port) {
+        this.basePort = updates.warp_port;
+        this.activePort = updates.warp_port;
+      }
+    }
+  }
+
+  shutdown() {
+    if (this.cronTimer) clearInterval(this.cronTimer);
+    if (this.sidecarTimer) clearInterval(this.sidecarTimer);
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.cronTimer = null;
+    this.sidecarTimer = null;
+    this.healthTimer = null;
+    for (const [port, info] of this.portProcesses) {
+      try { info.proc.kill('SIGTERM'); } catch (e) {}
+      this.clearAgent(port);
+    }
+    this.portProcesses.clear();
+    this.externalPorts.clear();
   }
 }
 

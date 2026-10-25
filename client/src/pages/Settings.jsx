@@ -9,15 +9,12 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [discoveryInterval, setDiscoveryInterval] = useState(settings.discovery_interval_seconds || 600);
   const [autoUpdateCli, setAutoUpdateCli] = useState(settings.auto_update_cli !== false);
   const [freeOnly, setFreeOnly] = useState(settings.free_only !== false);
-  const [smartFallback, setSmartFallback] = useState(settings.smart_fallback !== false);
-  const [maxRetries, setMaxRetries] = useState(settings.max_retries || 3);
+  const [maxRetries, setMaxRetries] = useState(settings.max_retries ?? 2);
   const [upstreamZenKey, setUpstreamZenKey] = useState(settings.upstream_zen_key || '');
   const [proxies, setProxies] = useState(Array.isArray(settings.proxies) ? settings.proxies.join('\n') : (settings.proxies || ''));
   const [warpMode, setWarpMode] = useState(settings.warp_mode || 'auto');
   const [warpHost, setWarpHost] = useState(settings.warp_host || '127.0.0.1');
-  const [warpAutoSwitch, setWarpAutoSwitch] = useState(settings.warp_auto_switch !== false);
-  const [warpRotateOnUnauth, setWarpRotateOnUnauth] = useState(settings.warp_rotate_on_unauth !== false);
-  const [warpAutoRotateMinutes, setWarpAutoRotateMinutes] = useState(settings.warp_auto_rotate_minutes !== undefined ? settings.warp_auto_rotate_minutes : 10);
+  const [warpAutoRotateMinutes, setWarpAutoRotateMinutes] = useState(settings.warp_auto_rotate_minutes ?? 0);
   const [warpPort, setWarpPort] = useState(settings.warp_port || 40000);
   const [warpStatus, setWarpStatus] = useState(null);
   const [isRotatingWarp, setIsRotatingWarp] = useState(false);
@@ -196,15 +193,11 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         discovery_interval_seconds: parseInt(discoveryInterval, 10),
         auto_update_cli: autoUpdateCli,
         free_only: freeOnly,
-        smart_fallback: smartFallback,
-        max_retries: parseInt(maxRetries, 10) || 3,
+        max_retries: parseInt(maxRetries, 10) || 0,
         upstream_zen_key: upstreamZenKey.trim(),
         proxies: proxies.split('\n').map(p => p.trim()).filter(Boolean),
         warp_mode: warpMode,
         warp_host: warpHost.trim() || '127.0.0.1',
-        warp_auto_switch: warpAutoSwitch,
-        warp_rotate_on_unauth: warpRotateOnUnauth,
-        warp_rotate_on_rate_limit: warpRotateOnUnauth,
         warp_auto_rotate_minutes: parseInt(warpAutoRotateMinutes, 10) || 0,
         warp_port: parseInt(warpPort, 10) || 40000,
         global_rpm_limit: parseInt(globalRpm, 10),
@@ -305,7 +298,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               )}
             </div>
             <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)' }}>
-              Routes through Cloudflare's global edge network via native SOCKS5 proxy to bypass anonymous IP limits and 403 blocks.
+              Routes through Cloudflare WARP only when the tunnel is verified with a `warp=on` trace. Direct egress and unverified SOCKS endpoints are refused.
             </p>
           </div>
           <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -468,37 +461,18 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               value={warpMode}
               onChange={setWarpMode}
               options={[
-                { value: 'auto', label: 'Auto (Recommended)', description: 'Direct connection first; auto-promotes WARP whenever direct route is blocked or degraded' },
-                { value: 'always', label: 'Always WARP', description: 'Route 100% of gateway traffic through Cloudflare WARP proxy' },
-                { value: 'disabled', label: 'Disabled', description: 'Do not use Cloudflare WARP proxy' }
+                { value: 'auto', label: 'Auto (Recommended)', description: 'Use verified WARP when ready; configured proxies follow. Direct is used only when ALLOW_DIRECT_FALLBACK permits it.' },
+                { value: 'always', label: 'Always WARP', description: 'Require verified WARP; no direct fallback' },
+                { value: 'disabled', label: 'Disabled', description: 'Do not use Cloudflare WARP' }
               ]}
             />
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
-            <div>
-              <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Auto-Switch to WARP on Block / Error</div>
-              <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-                Automatically routes to WARP proxy whenever upstream direct route is blocked (403), rate-limited (429), or errors
-              </div>
+          <div style={{ paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
+            <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>429 / 403 Handling</div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
+              Automatic identity rotation on rate limits is intentionally disabled. A 429 is returned to the client with Retry-After; a 403 is treated as an upstream error. This avoids unstable egress and repeated upstream violations.
             </div>
-            <CustomToggle
-              checked={warpAutoSwitch}
-              onChange={setWarpAutoSwitch}
-            />
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
-            <div>
-              <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Auto-Rotate WARP Keys on Rate Limit (429) & Unauth</div>
-              <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-                Seamlessly acquires fresh Cloudflare Anycast edge IP via zero-downtime hot-swap whenever rate-limited (429) or blocked (403)
-              </div>
-            </div>
-            <CustomToggle
-              checked={warpRotateOnUnauth}
-              onChange={setWarpRotateOnUnauth}
-            />
           </div>
 
           <div style={{ paddingTop: '0.6rem', borderTop: '1px solid var(--border)' }}>
@@ -506,7 +480,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               <div>
                 <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Scheduled Background Auto-Rotate (Cron Interval)</div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-                  Periodically hot-swaps to a fresh Cloudflare Anycast tunnel in the background even when idle (0 = disabled, default: 10m)
+                  Optional operator-controlled tunnel refresh (0 = disabled, server default: 0)
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
@@ -596,7 +570,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               </span>
             </div>
             <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', margin: 0 }}>
-              Autonomous global proxy scraper with strict 5-pass verification directly against <code>opencode.ai:443</code>. Guaranteed latency &lt;3000ms. Provides instant zero-downtime failover whenever Cloudflare WARP or direct IPs reach capacity limits.
+              Diagnostics only. The scraped proxy pool is not connected to inference egress and does not provide failover; production routing uses only explicitly configured <code>PROXIES</code>.
             </p>
           </div>
 
@@ -760,20 +734,6 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
           />
         </div>
 
-        {/* Smart Failover Toggle */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.5rem', borderTop: '1px solid var(--border)' }}>
-          <div>
-            <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Cross-Model Fallback (Smart Failover)</div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
-              When enabled, fails over across equivalent models on upstream errors. (Disabled by default to strictly preserve requested model identity).
-            </div>
-          </div>
-          <CustomToggle
-            checked={smartFallback}
-            onChange={setSmartFallback}
-          />
-        </div>
-
         {/* Max Retries */}
         <div>
           <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.35rem' }}>
@@ -785,8 +745,8 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             style={{ width: '100%' }}
             value={maxRetries}
             onChange={e => setMaxRetries(e.target.value)}
-            min="1"
-            max="6"
+            min="0"
+            max="3"
             required
           />
           <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
@@ -825,7 +785,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             onChange={e => setProxies(e.target.value)}
           />
           <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
-            Rotates exit IPs on rate limits or failures. Supports HTTP, HTTPS, and rotating pools.
+Explicit HTTP, HTTPS, or SOCKS5 proxies used in order after WARP. The gateway does not rotate identities on 429/403; a proxy is marked unhealthy only for transport/5xx failures.
           </span>
         </div>
 

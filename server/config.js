@@ -62,7 +62,7 @@ const DEFAULT_CONFIG = {
   warp_auto_rotate_minutes: parseInt(process.env.WARP_AUTO_ROTATE_MINUTES, 10) || 5, // 0 = disabled, default: every 5 minutes
   warp_port: parseInt(process.env.WARP_PORT, 10) || 40000,
   egress_mode: process.env.EGRESS_MODE || 'hybrid', // 'hybrid' | 'scraped_only' | 'warp_only' | 'direct'
-  proxy_scraper_enabled: process.env.PROXY_SCRAPER_ENABLED !== 'false',
+  proxy_scraper_enabled: process.env.PROXY_SCRAPER_ENABLED === 'true', // Secure by default: opt-in only
   proxy_scraper_strict_passes: parseInt(process.env.PROXY_SCRAPER_STRICT_PASSES, 10) || 5,
   proxy_scraper_max_latency_ms: parseInt(process.env.PROXY_SCRAPER_MAX_LATENCY_MS, 10) || 3000,
   upstream_models_url: 'https://opencode.ai/zen/v1/models',

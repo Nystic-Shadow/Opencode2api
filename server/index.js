@@ -21,38 +21,100 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const PORT = config.get('port') || 8080;
-const DIST_DIR = path.join(__dirname, '..', 'dist');
+const DIST_DIR = path.resolve(__dirname, '..', 'dist');
 
-// MIME types for static assets
+// Whitelisted MIME types for static assets
 const MIME_TYPES = {
-  '.html': 'text/html',
-  '.js': 'text/javascript',
-  '.css': 'text/css',
-  '.json': 'application/json',
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
   '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon'
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.map': 'application/json; charset=utf-8'
 };
 
+// Safe static file server protecting against path traversal (C1) and arbitrary file disclosure
 function serveStatic(req, res, pathname) {
-  let filePath = path.join(DIST_DIR, pathname === '/' ? 'index.html' : pathname);
-
-  // If path doesn't exist or doesn't have extension, fall back to index.html for SPA routing
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    filePath = path.join(DIST_DIR, 'index.html');
+  // Reject null bytes and non-printable control characters
+  if (!pathname || pathname.includes('\0') || /[\x00-\x1f]/.test(pathname)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: { message: 'Invalid path' } }));
   }
 
-  if (fs.existsSync(filePath)) {
-    const ext = path.extname(filePath).toLowerCase();
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': contentType });
+  // Safe path decoding and normalization
+  let decoded = '/';
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch (e) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: { message: 'Malformed URL encoding' } }));
+  }
+
+  // Strip leading traversal artifacts and normalize
+  const cleanRelative = path.normalize(decoded).replace(/^([.][.][/\\])+/, '');
+  let targetPath = path.resolve(DIST_DIR, '.' + path.sep + cleanRelative);
+
+  // Strict containment verification: targetPath MUST reside inside DIST_DIR
+  if (!targetPath.startsWith(DIST_DIR + path.sep) && targetPath !== path.join(DIST_DIR, 'index.html')) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: { message: 'Access denied: Path outside distribution root' } }));
+  }
+
+  // Ban dotfiles / hidden files
+  const baseName = path.basename(targetPath);
+  if (baseName.startsWith('.')) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: { message: 'Access denied: Hidden files are protected' } }));
+  }
+
+  let stat = null;
+  try {
+    stat = fs.statSync(targetPath);
+  } catch (e) {
+    stat = null;
+  }
+
+  // If path doesn't exist or is a directory, fall back to index.html for SPA routing
+  if (!stat || stat.isDirectory()) {
+    targetPath = path.join(DIST_DIR, 'index.html');
+    try {
+      stat = fs.statSync(targetPath);
+    } catch (e) {
+      stat = null;
+    }
+  }
+
+  if (stat && stat.isFile()) {
+    const ext = path.extname(targetPath).toLowerCase();
+    const contentType = MIME_TYPES[ext];
+
+    // Enforce whitelist: only serve recognised web asset types
+    if (!contentType && ext !== '') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: { message: 'Asset type not permitted' } }));
+    }
+
+    res.writeHead(200, {
+      'Content-Type': contentType || 'application/octet-stream',
+      'Content-Length': stat.size,
+      'X-Content-Type-Options': 'nosniff'
+    });
     if (req.method === 'HEAD') return res.end();
-    return fs.createReadStream(filePath).pipe(res);
+    return fs.createReadStream(targetPath).pipe(res);
   }
 
   // Fallback placeholder if dist hasn't been built yet
-  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(`
     <!DOCTYPE html>
     <html>
@@ -66,16 +128,46 @@ function serveStatic(req, res, pathname) {
   `);
 }
 
-function parseJsonBody(req) {
+// Bounded JSON body parser with strict size limits preventing Denial of Service (H1)
+const MAX_BODY_SIZE_INFERENCE = 10 * 1024 * 1024; // 10MB for vision payloads
+
+function parseJsonBody(req, maxSize = MAX_BODY_SIZE_INFERENCE) {
   return new Promise((resolve, reject) => {
+    const headerLen = parseInt(req.headers['content-length'], 10);
+    if (!isNaN(headerLen) && headerLen > maxSize) {
+      const err = new Error(`Payload too large. Exceeds ${Math.round(maxSize / (1024 * 1024))}MB limit.`);
+      err.statusCode = 413;
+      return reject(err);
+    }
+
     let body = '';
-    req.on('data', chunk => body += chunk);
+    let bytesReceived = 0;
+
+    const onData = (chunk) => {
+      bytesReceived += chunk.length;
+      if (bytesReceived > maxSize) {
+        req.pause();
+        req.removeListener('data', onData);
+        const err = new Error(`Payload too large. Exceeded ${Math.round(maxSize / (1024 * 1024))}MB limit.`);
+        err.statusCode = 413;
+        reject(err);
+        try { req.destroy(); } catch (e) {}
+      } else {
+        body += chunk;
+      }
+    };
+
+    req.on('data', onData);
     req.on('end', () => {
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch (err) {
+        err.statusCode = 400;
         reject(err);
       }
+    });
+    req.on('error', (err) => {
+      reject(err);
     });
   });
 }
@@ -94,104 +186,124 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
-  // 1. Health endpoint
-  if (pathname === '/healthz') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({
-      status: 'ok',
-      service: 'OpenCode2API',
-      cli_version: config.get('client_version'),
-      models_count: discovery.models.length
-    }));
-  }
-
-  // 2. Admin dashboard APIs (/api/...)
-  if (pathname.startsWith('/api/')) {
-    return adminRoutes.handleAdminRoute(req, res, pathname);
-  }
-
-  // 3. OpenAI Models List (/v1/models)
-  if (pathname === '/v1/models' && req.method === 'GET') {
-    const list = discovery.getAllModels().map(m => ({
-      id: m.id,
-      object: "model",
-      created: 1792240000,
-      owned_by: "opencode-zen",
-      context_window: m.context_window,
-      max_output: m.max_output,
-      modalities: m.modalities,
-      supports_vision: m.supports_vision,
-      supports_reasoning: m.supports_reasoning,
-      supports_tools: m.supports_tools,
-      is_free: m.is_free
-    }));
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ object: "list", data: list }));
-  }
-
-  // Model details (/v1/models/:model)
-  if (pathname.startsWith('/v1/models/') && req.method === 'GET') {
-    const modelId = pathname.replace('/v1/models/', '');
-    let model = discovery.getModel(modelId);
-    if (!model) {
-      await discovery.ensureModel(modelId);
-      model = discovery.getModel(modelId);
+  try {
+    // 1. Health endpoint
+    if (pathname === '/healthz') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        status: 'ok',
+        service: 'OpenCode2API',
+        cli_version: config.get('client_version'),
+        models_count: discovery.models.length
+      }));
     }
-    if (!model) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: { message: `Model '${modelId}' not found.` } }));
+
+    // 2. Admin dashboard APIs (/api/...)
+    if (pathname.startsWith('/api/')) {
+      return await adminRoutes.handleAdminRoute(req, res, pathname);
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ id: model.id, object: "model", ...model }));
-  }
 
-  // 4. OpenAI Chat Completions (/v1/chat/completions)
-  if (pathname === '/v1/chat/completions' && req.method === 'POST') {
-    const authHeader = req.headers['authorization'] || '';
-    const apiKeyHeader = req.headers['x-api-key'] || '';
-    const token = authHeader.replace(/^Bearer\s+/i, '') || apiKeyHeader;
+    // 3. OpenAI Models List (/v1/models)
+    if (pathname === '/v1/models' && req.method === 'GET') {
+      const list = discovery.getAllModels().map(m => ({
+        id: m.id,
+        object: "model",
+        created: 1792240000,
+        owned_by: "opencode-zen",
+        context_window: m.context_window,
+        max_output: m.max_output,
+        modalities: m.modalities,
+        supports_vision: m.supports_vision,
+        supports_reasoning: m.supports_reasoning,
+        supports_tools: m.supports_tools,
+        is_free: m.is_free
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ object: "list", data: list }));
+    }
 
-    try {
-      const payload = await parseJsonBody(req);
-      const authResult = keys.validateAndCheckLimit(token, payload.model);
+    // Model details (/v1/models/:model)
+    if (pathname.startsWith('/v1/models/') && req.method === 'GET') {
+      const modelId = pathname.replace('/v1/models/', '');
+      let model = discovery.getModel(modelId);
+      if (!model) {
+        await discovery.ensureModel(modelId);
+        model = discovery.getModel(modelId);
+      }
+      if (!model) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: `Model '${modelId}' not found.` } }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ id: model.id, object: "model", ...model }));
+    }
+
+    // 4. OpenAI Chat Completions (/v1/chat/completions)
+    if (pathname === '/v1/chat/completions' && req.method === 'POST') {
+      const authHeader = req.headers['authorization'] || '';
+      const apiKeyHeader = req.headers['x-api-key'] || '';
+      const token = authHeader.replace(/^Bearer\s+/i, '') || apiKeyHeader;
+
+      let payload;
+      try {
+        payload = await parseJsonBody(req, MAX_BODY_SIZE_INFERENCE);
+      } catch (err) {
+        const status = err.statusCode || 400;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: err.message } }));
+      }
+
+      const authResult = keys.validateAndCheckLimit(token, payload?.model);
       if (!authResult.valid) {
         res.writeHead(authResult.status, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: { message: authResult.error } }));
       }
-      return proxy.handleChatCompletions(payload, req, res, authResult.key);
-    } catch (err) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: { message: 'Invalid JSON request: ' + err.message } }));
+      return await proxy.handleChatCompletions(payload, req, res, authResult.key);
     }
-  }
 
-  // 5. Anthropic Messages (/v1/messages)
-  if (pathname === '/v1/messages' && req.method === 'POST') {
-    const authHeader = req.headers['authorization'] || '';
-    const apiKeyHeader = req.headers['x-api-key'] || '';
-    const token = authHeader.replace(/^Bearer\s+/i, '') || apiKeyHeader;
+    // 5. Anthropic Messages (/v1/messages)
+    if (pathname === '/v1/messages' && req.method === 'POST') {
+      const authHeader = req.headers['authorization'] || '';
+      const apiKeyHeader = req.headers['x-api-key'] || '';
+      const token = authHeader.replace(/^Bearer\s+/i, '') || apiKeyHeader;
 
-    try {
-      const payload = await parseJsonBody(req);
-      const authResult = keys.validateAndCheckLimit(token, payload.model);
+      let payload;
+      try {
+        payload = await parseJsonBody(req, MAX_BODY_SIZE_INFERENCE);
+      } catch (err) {
+        const status = err.statusCode || 400;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: err.message } }));
+      }
+
+      const authResult = keys.validateAndCheckLimit(token, payload?.model);
       if (!authResult.valid) {
         res.writeHead(authResult.status, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: { message: authResult.error } }));
       }
-      return proxy.handleAnthropicMessages(payload, req, res, authResult.key);
-    } catch (err) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: { message: 'Invalid JSON request: ' + err.message } }));
+      return await proxy.handleAnthropicMessages(payload, req, res, authResult.key);
+    }
+
+    // 6. Static Web UI / Dashboard
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      return serveStatic(req, res, pathname);
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Route not found' } }));
+  } catch (err) {
+    console.error(`[Server] Unhandled error handling ${req.method} ${pathname}:`, err);
+    if (!res.headersSent) {
+      const status = err.statusCode || 500;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: {
+          message: err.message || 'Internal server error',
+          type: 'internal_server_error'
+        }
+      }));
     }
   }
-
-  // 6. Static Web UI / Dashboard
-  if (req.method === 'GET' || req.method === 'HEAD') {
-    return serveStatic(req, res, pathname);
-  }
-
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: { message: 'Route not found' } }));
 });
 
 // Sequenced Boot: Ensure WARP is connected before dashboard/server starts
@@ -230,7 +342,7 @@ async function boot() {
     console.log(`\n=============================================================`);
     console.log(`🚀 OpenCode2API Gateway Live on http://127.0.0.1:${PORT}`);
     console.log(`📊 Admin Dashboard: http://127.0.0.1:${PORT}/`);
-    console.log(`🔑 Admin Credentials: ${config.get('admin_username')} / ${config.get('admin_password')}`);
+    console.log(`🔑 Admin Username: ${config.get('admin_username')} (Password protected via DASHBOARD_PASS / .env)`);
     console.log(`🌐 OpenAI Base URL: http://127.0.0.1:${PORT}/v1`);
     console.log(`🌐 Anthropic Messages URL: http://127.0.0.1:${PORT}/v1/messages`);
     console.log(`✨ Discovered Models: ${discovery.models.length} (clean IDs, free suffixes auto-removed)`);

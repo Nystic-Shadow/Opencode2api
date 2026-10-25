@@ -158,7 +158,7 @@ class ProxyScraperService {
           const tlsSocket = tls.connect({
             socket,
             servername: 'opencode.ai',
-            rejectUnauthorized: false
+            rejectUnauthorized: true
           }, () => {
             // Fast HTTP/1.1 ping
             tlsSocket.write('GET /cdn-cgi/trace HTTP/1.1\r\nHost: opencode.ai\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n');
@@ -221,7 +221,7 @@ class ProxyScraperService {
         const tlsSocket = tls.connect({
           socket,
           servername: 'opencode.ai',
-          rejectUnauthorized: false
+          rejectUnauthorized: true
         }, () => {
           tlsSocket.write('GET /cdn-cgi/trace HTTP/1.1\r\nHost: opencode.ai\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n');
         });
@@ -454,7 +454,7 @@ class ProxyScraperService {
             const tlsSocket = tls.connect({
               socket,
               servername: options.servername || destHost,
-              rejectUnauthorized: false
+              rejectUnauthorized: true
             }, () => {
               callback(null, tlsSocket);
             });
@@ -490,7 +490,7 @@ class ProxyScraperService {
           const tlsSocket = tls.connect({
             socket,
             servername: options.servername || destHost,
-            rejectUnauthorized: false
+            rejectUnauthorized: true
           }, () => {
             callback(null, tlsSocket);
           });

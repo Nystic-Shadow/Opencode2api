@@ -9,26 +9,104 @@ const proxy = require('./proxy');
 const warp = require('./warp');
 const proxyScraper = require('./proxyScraper');
 
-// In-memory admin sessions
-const sessions = new Set();
+// In-memory admin sessions with 24-hour TTL (H4)
+const sessions = new Map(); // token -> { createdAt, lastActive, username }
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 function authenticateAdmin(req) {
   const auth = req.headers['authorization'] || '';
   const token = auth.replace(/^Bearer\s+/i, '');
   if (!token) return false;
-  return sessions.has(token);
+  const session = sessions.get(token);
+  if (!session) return false;
+  if (Date.now() - session.lastActive > SESSION_TTL_MS) {
+    sessions.delete(token);
+    return false;
+  }
+  session.lastActive = Date.now();
+  return true;
 }
 
-function parseBody(req) {
-  return new Promise((resolve) => {
+// Rate limiting for admin login attempts: max 5 failed attempts per IP per 5 minutes
+const loginAttempts = new Map(); // ip -> { count, resetAt }
+
+function checkLoginThrottle(ip) {
+  const now = Date.now();
+  const record = loginAttempts.get(ip);
+  if (record && record.resetAt > now) {
+    if (record.count >= 5) {
+      const waitSec = Math.ceil((record.resetAt - now) / 1000);
+      return { throttled: true, waitSec };
+    }
+  }
+  return { throttled: false };
+}
+
+function recordLoginFailure(ip) {
+  const now = Date.now();
+  const record = loginAttempts.get(ip) || { count: 0, resetAt: now + 5 * 60 * 1000 };
+  if (record.resetAt <= now) {
+    record.count = 1;
+    record.resetAt = now + 5 * 60 * 1000;
+  } else {
+    record.count++;
+  }
+  loginAttempts.set(ip, record);
+}
+
+function recordLoginSuccess(ip) {
+  loginAttempts.delete(ip);
+}
+
+// Constant-time string comparison preventing timing attacks (C2)
+function constantTimeCompare(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+// Bounded JSON body parser with 1MB ceiling preventing Denial of Service (H1)
+const MAX_ADMIN_BODY = 1 * 1024 * 1024;
+
+function parseBody(req, maxSize = MAX_ADMIN_BODY) {
+  return new Promise((resolve, reject) => {
+    const headerLen = parseInt(req.headers['content-length'], 10);
+    if (!isNaN(headerLen) && headerLen > maxSize) {
+      const err = new Error(`Payload too large. Maximum size is ${Math.round(maxSize / (1024 * 1024))}MB.`);
+      err.statusCode = 413;
+      return reject(err);
+    }
+
     let body = '';
-    req.on('data', chunk => body += chunk);
+    let bytesReceived = 0;
+
+    const onData = (chunk) => {
+      bytesReceived += chunk.length;
+      if (bytesReceived > maxSize) {
+        req.pause();
+        req.removeListener('data', onData);
+        const err = new Error(`Payload too large. Exceeded ${Math.round(maxSize / (1024 * 1024))}MB limit.`);
+        err.statusCode = 413;
+        reject(err);
+        try { req.destroy(); } catch (e) {}
+      } else {
+        body += chunk;
+      }
+    };
+
+    req.on('data', onData);
     req.on('end', () => {
       try {
         resolve(body ? JSON.parse(body) : {});
-      } catch (e) {
-        resolve({});
+      } catch (err) {
+        err.statusCode = 400;
+        reject(err);
       }
+    });
+    req.on('error', (err) => {
+      reject(err);
     });
   });
 }
@@ -39,18 +117,40 @@ function sendJson(res, statusCode, data) {
 }
 
 async function handleAdminRoute(req, res, pathname) {
+  const clientIp = req.socket?.remoteAddress || req.headers['x-forwarded-for'] || '127.0.0.1';
+
   // Login
   if (pathname === '/api/auth/login' && req.method === 'POST') {
+    const throttle = checkLoginThrottle(clientIp);
+    if (throttle.throttled) {
+      return sendJson(res, 429, { error: `Too many failed login attempts. Please wait ${throttle.waitSec} seconds.` });
+    }
+
     config.refreshFromEnv();
-    const { username, password } = await parseBody(req);
+    let body;
+    try {
+      body = await parseBody(req);
+    } catch (err) {
+      return sendJson(res, err.statusCode || 400, { error: err.message });
+    }
+
+    const { username, password } = body;
     const expectedUser = config.get('admin_username');
     const expectedPass = config.get('admin_password');
 
-    if (username === expectedUser && password === expectedPass) {
+    if (constantTimeCompare(username, expectedUser) && constantTimeCompare(password, expectedPass)) {
+      recordLoginSuccess(clientIp);
       const token = 'adm_' + crypto.randomUUID();
-      sessions.add(token);
+      sessions.set(token, {
+        token,
+        username,
+        createdAt: Date.now(),
+        lastActive: Date.now()
+      });
       return sendJson(res, 200, { success: true, token, username });
     }
+
+    recordLoginFailure(clientIp);
     return sendJson(res, 401, { error: 'Invalid admin credentials' });
   }
 
@@ -141,10 +241,20 @@ async function handleAdminRoute(req, res, pathname) {
   // Settings: Get
   if (pathname === '/api/settings' && req.method === 'GET') {
     const conf = config.getAll();
-    // Don't expose password directly, return masked
+    let maskedZenKey = '';
+    if (conf.upstream_zen_key) {
+      if (conf.upstream_zen_key.length > 8) {
+        maskedZenKey = conf.upstream_zen_key.slice(0, 4) + '••••••••' + conf.upstream_zen_key.slice(-4);
+      } else {
+        maskedZenKey = '••••••••';
+      }
+    }
+    // Don't expose password or raw upstream keys directly (H5)
     return sendJson(res, 200, {
       ...conf,
-      admin_password: '••••••••'
+      admin_password: '••••••••',
+      upstream_zen_key: maskedZenKey,
+      has_zen_key: !!conf.upstream_zen_key
     });
   }
 
@@ -163,7 +273,14 @@ async function handleAdminRoute(req, res, pathname) {
     if (body.max_retries !== undefined) updates.max_retries = parseInt(body.max_retries, 10) || 3;
     if (body.global_rpm_limit !== undefined) updates.global_rpm_limit = parseInt(body.global_rpm_limit, 10) || 0;
     if (body.global_tpm_limit !== undefined) updates.global_tpm_limit = parseInt(body.global_tpm_limit, 10) || 0;
-    if (body.upstream_zen_key !== undefined) updates.upstream_zen_key = body.upstream_zen_key.trim();
+    if (body.upstream_zen_key !== undefined) {
+      const zk = body.upstream_zen_key.trim();
+      if (zk && !zk.includes('••••')) {
+        updates.upstream_zen_key = zk;
+      } else if (zk === '') {
+        updates.upstream_zen_key = '';
+      }
+    }
     if (body.warp_mode !== undefined) updates.warp_mode = body.warp_mode;
     if (body.warp_host !== undefined) updates.warp_host = (body.warp_host || '127.0.0.1').trim();
     if (body.warp_auto_switch !== undefined) updates.warp_auto_switch = !!body.warp_auto_switch;

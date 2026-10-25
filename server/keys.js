@@ -18,8 +18,9 @@ class ApiKeyManager {
         this.keys = JSON.parse(raw);
       }
       if (!Array.isArray(this.keys) || this.keys.length === 0) {
-        // Create initial master key with predictable O2P prefix
-        const initialKey = process.env.INITIAL_KEY || process.env.MASTER_KEY || 'O2P-master-key';
+        // Generate a cryptographically secure master key with O2P- prefix
+        const envKey = (process.env.INITIAL_KEY || process.env.MASTER_KEY || '').trim();
+        const initialKey = envKey || ('O2P-' + crypto.randomBytes(20).toString('hex'));
         this.keys = [
           {
             id: 'key_master',
@@ -37,6 +38,17 @@ class ApiKeyManager {
           }
         ];
         this.save();
+      } else {
+        // Upgrade legacy insecure default master keys if present and not intentionally configured in env
+        const envKey = (process.env.INITIAL_KEY || process.env.MASTER_KEY || '').trim();
+        let changed = false;
+        for (const k of this.keys) {
+          if (k.key === 'O2P-master-key' && envKey !== 'O2P-master-key') {
+            k.key = 'O2P-' + crypto.randomBytes(20).toString('hex');
+            changed = true;
+          }
+        }
+        if (changed) this.save();
       }
     } catch (e) {
       console.warn('[Keys] Error loading keys, resetting:', e.message);
@@ -146,10 +158,10 @@ class ApiKeyManager {
       return { valid: false, status: 401, error: 'Missing API key. Provide Authorization: Bearer O2P-... or x-api-key: O2P-...' };
     }
 
-    // Support master key & local legacy keys
-    const masterEnvKey = process.env.INITIAL_KEY || process.env.MASTER_KEY || 'O2P-master-key';
+    // Validate against stored keys or explicit env master key
+    const envMaster = (process.env.INITIAL_KEY || process.env.MASTER_KEY || '').trim();
     const key = this.keys.find(k => k.key === token) || 
-                ((token === masterEnvKey || token === 'O2P-master-key' || token === 'sk-opencode-free-master') ? { id: 'key_master', name: 'Master Admin Key', key: token, enabled: true, is_unlimited: true } : null);
+                (envMaster && token === envMaster ? { id: 'key_master', name: 'Master Admin Key', key: token, enabled: true, is_unlimited: true } : null);
 
     if (!key) {
       return { valid: false, status: 401, error: 'Invalid API key.' };

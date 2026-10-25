@@ -166,8 +166,15 @@ class CloudflareWarpManager {
     return portPool[(idx + 1) % portPool.length];
   }
 
+  _resolveWarpHost(port, host = null) {
+    if (host) return host;
+    // Multi-port embedded wireproxy pool (40000..40009) always runs on container loopback (H6)
+    if (port >= 40000 && port <= 40009) return '127.0.0.1';
+    return config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+  }
+
   clearAgent(port) {
-    const targetHost = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+    const targetHost = this._resolveWarpHost(port);
     const cacheKey = `${targetHost}:${port}`;
     if (this.cachedAgents && this.cachedAgents.has(cacheKey)) {
       const agent = this.cachedAgents.get(cacheKey);
@@ -623,7 +630,8 @@ class CloudflareWarpManager {
   }
 
   async _doStartWireproxy(account, port) {
-    const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
+    // Embedded WireProxy daemon must strictly bind to loopback inside container (H6)
+    const bindHost = '127.0.0.1';
     const confPath = path.join(DATA_DIR, `wireproxy_${port}.conf`);
 
     // Ensure port is completely free and clean before spawning!
@@ -633,7 +641,7 @@ class CloudflareWarpManager {
     // Even ports (40000, 40002) = Dual-Stack IPv6 (AllowedIPs = 0.0.0.0/0, ::/0 with dedicated IPv6 address)
     // Odd ports (40001, 40003) = Pure IPv4 (AllowedIPs = 0.0.0.0/0 to route via Cloudflare's 104.28.x.x IPv4 pool)
     const isIpv4Only = (port % 2 !== 0);
-    this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${host}:${port} (${isIpv4Only ? 'Pure IPv4' : 'Dual-Stack IPv6'})...`);
+    this.setProgress(65, 'configuring_tunnel', `Configuring WireGuard profile for ${bindHost}:${port} (${isIpv4Only ? 'Pure IPv4' : 'Dual-Stack IPv6'})...`);
 
     const addresses = [];
     if (account.addressV4) addresses.push(`${account.addressV4}/32`);
@@ -656,13 +664,13 @@ AllowedIPs = ${allowedIps}
 KeepAlive = 25
 
 [Socks5]
-BindAddress = ${host}:${port}
+BindAddress = ${bindHost}:${port}
 `;
 
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(confPath, confContent);
 
-    this.setProgress(75, 'launching_tunnel', `Starting userspace WireProxy SOCKS5 daemon on ${host}:${port}...`);
+    this.setProgress(75, 'launching_tunnel', `Starting userspace WireProxy SOCKS5 daemon on ${bindHost}:${port}...`);
     console.log(`[WARP] Starting userspace WireProxy SOCKS5 daemon on ${host}:${port} (${endpointHost})...`);
 
     let procExited = false;
@@ -766,8 +774,8 @@ BindAddress = ${host}:${port}
    * Fast SOCKS5 socket probe (RFC 1928) to test if proxy is answering on host:port
    */
   probeSocks5(host, port) {
-    const targetHost = host || config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const targetPort = port || this.getActivePort();
+    const targetHost = this._resolveWarpHost(targetPort, host);
 
     return new Promise((resolve) => {
       const socket = net.connect({ host: targetHost, port: targetPort, timeout: 2000 }, () => {
@@ -812,8 +820,8 @@ BindAddress = ${host}:${port}
     this.isBootstrapping = true;
     this.setProgress(10, 'initializing', 'Initializing Cloudflare WARP engine...');
 
-    const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const port = this.getActivePort();
+    const host = this._resolveWarpHost(port);
 
     try {
       // 1. Check if SOCKS5 port is already answering
@@ -944,8 +952,8 @@ BindAddress = ${host}:${port}
   }
 
   async probeEgressTrace(port, timeoutMs = 5000) {
-    const targetHost = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const targetPort = port || this.getActivePort();
+    const targetHost = this._resolveWarpHost(targetPort);
 
     return new Promise((resolve) => {
       let resolved = false;
@@ -993,8 +1001,8 @@ BindAddress = ${host}:${port}
       return this.statusCache;
     }
 
-    const host = config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const port = this.getActivePort();
+    const host = this._resolveWarpHost(port);
 
     // Fast socket check
     const socketAlive = await this.probeSocks5(host, port);
@@ -1323,8 +1331,8 @@ BindAddress = ${host}:${port}
    */
   createSocks5Connection(targetHost, targetPort, proxyHost, proxyPort, timeoutMs = 12000) {
     const self = this;
-    const pHost = proxyHost || config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const pPort = proxyPort || this.getActivePort();
+    const pHost = proxyHost || this._resolveWarpHost(pPort);
 
     return new Promise((resolve, reject) => {
       let resolved = false;
@@ -1410,8 +1418,8 @@ BindAddress = ${host}:${port}
    * Returns an https.Agent routed through Cloudflare WARP SOCKS5.
    */
   getWarpAgent(port, host) {
-    const targetHost = host || config.get('warp_host') || process.env.WARP_HOST || '127.0.0.1';
     const targetPort = port || this.getBestPort();
+    const targetHost = this._resolveWarpHost(targetPort, host);
     const cacheKey = `${targetHost}:${targetPort}`;
 
     if (!this.cachedAgents) this.cachedAgents = new Map();

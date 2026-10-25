@@ -30,6 +30,7 @@ let proxyIndex = 0;
 const localRateLimiter = {
   // Sliding window: track request timestamps per route
   windows: new Map(), // routeKey -> [timestamps]
+  burnedUntil: new Map(), // routeKey -> timestamp (H3)
   maxPerMinute: 60,
   windowMs: 60 * 1000,
   queue: [],
@@ -39,6 +40,9 @@ const localRateLimiter = {
 
   canProceed(routeKey) {
     const now = Date.now();
+    const burned = this.burnedUntil.get(routeKey);
+    if (burned && burned > now) return false;
+
     if (!this.windows.has(routeKey)) this.windows.set(routeKey, []);
     const win = this.windows.get(routeKey);
     while (win.length > 0 && (now - win[0]) > this.windowMs) win.shift();
@@ -52,15 +56,23 @@ const localRateLimiter = {
   },
 
   waitTime(routeKey) {
-    return 0; // Never artificial sleep! Egress immediately on live tunnels
+    const now = Date.now();
+    const burned = this.burnedUntil.get(routeKey);
+    if (burned && burned > now) {
+      return burned - now;
+    }
+    if (!this.windows.has(routeKey)) return 0;
+    const win = this.windows.get(routeKey);
+    while (win.length > 0 && (now - win[0]) > this.windowMs) win.shift();
+    if (win.length >= this.maxPerMinute) {
+      return Math.max(0, (win[0] + this.windowMs) - now);
+    }
+    return 0;
   },
 
   markBurned(routeKey, durationMs = 30000) {
-    // Only brief cooldown so ports can be retested
-    if (!this.windows.has(routeKey)) this.windows.set(routeKey, []);
-    const win = this.windows.get(routeKey);
     const now = Date.now();
-    win.push(now + durationMs);
+    this.burnedUntil.set(routeKey, now + durationMs);
   }
 };
 
@@ -411,6 +423,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const toolResult = tools.mergeTools(clientPayload.tools, clientPayload.tool_choice);
   const mergedTools = toolResult.tools;
   const mergedToolChoice = toolResult.toolChoice;
+  const clientToolNames = toolResult.clientToolNames;
+  const injectedToolNames = toolResult.injectedToolNames;
 
   let currentModel = requestedModel;
   const hasImages = payloadHasImages(clientPayload);
@@ -421,13 +435,15 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const triedWarpPorts = new Set();
   let warpRotatedInThisRequest = false;
 
+  const hasZenKey = !!(config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY);
+  const scraperEnabled = !hasZenKey && config.get('proxy_scraper_enabled') === true; // Never egress secrets over third-party proxies (C3)
   const egressMode = config.get('egress_mode') || 'hybrid';
   let activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
-  if (egressMode === 'scraped_only') {
+  if (scraperEnabled && egressMode === 'scraped_only') {
     const p = proxyScraper.getBestProxy();
     activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
   } else if (!warp.isReady() || config.get('warp_mode') === 'disabled' || routeHealth.isWarpDegraded()) {
-    const p = proxyScraper.getBestProxy();
+    const p = scraperEnabled ? proxyScraper.getBestProxy() : null;
     activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
   }
 
@@ -598,19 +614,23 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           if (upstreamModel && resolvedModel && upstreamModel !== resolvedModel) {
             chunkStr = chunkStr.replaceAll(upstreamModel, requestedModel);
           }
-          res.write(chunkStr);
-          if (res.flush) res.flush();
 
-          // Inspect usage events
           buffer += chunkStr;
           const lines = buffer.split('\n');
           buffer = lines.pop();
 
           for (const line of lines) {
             const trimmed = line.trim();
-            if (!trimmed.startsWith('data:')) continue;
+            if (!trimmed.startsWith('data:')) {
+              if (line) res.write(line + '\n');
+              continue;
+            }
             const dataStr = trimmed.slice(5).trim();
-            if (dataStr === '[DONE]') continue;
+            if (dataStr === '[DONE]') {
+              res.write('data: [DONE]\n\n');
+              if (res.flush) res.flush();
+              continue;
+            }
             try {
               const p = JSON.parse(dataStr);
               if (p.usage) {
@@ -619,7 +639,39 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
                 totalTokens = p.usage.total_tokens || totalTokens;
                 reasoningTokens = p.usage.completion_tokens_details?.reasoning_tokens || reasoningTokens;
               }
-            } catch (e) {}
+
+              // Filter out injected tool calls from client stream (H2)
+              if (p.choices && Array.isArray(p.choices)) {
+                let skipChunk = false;
+                for (const choice of p.choices) {
+                  if (choice.delta?.tool_calls && Array.isArray(choice.delta.tool_calls)) {
+                    choice.delta.tool_calls = choice.delta.tool_calls.filter(tc => {
+                      const name = tc.function?.name;
+                      if (!name) return clientToolNames && clientToolNames.size > 0;
+                      return clientToolNames && clientToolNames.has(name);
+                    });
+                    if (choice.delta.tool_calls.length === 0) {
+                      delete choice.delta.tool_calls;
+                      if (choice.finish_reason === 'tool_calls') {
+                        choice.finish_reason = 'stop';
+                      }
+                      if (!choice.delta.content && !choice.delta.reasoning_content && !choice.finish_reason) {
+                        skipChunk = true;
+                      }
+                    }
+                  }
+                }
+                if (skipChunk && !p.choices.some(c => c.delta?.content || c.finish_reason)) {
+                  continue;
+                }
+              }
+
+              res.write(`data: ${JSON.stringify(p)}\n\n`);
+              if (res.flush) res.flush();
+            } catch (e) {
+              res.write(line + '\n');
+              if (res.flush) res.flush();
+            }
           }
         });
 
@@ -656,7 +708,14 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           const rTokens = finalUsage?.completion_tokens_details?.reasoning_tokens || Math.ceil(accumulatedReasoning.length / 4);
           const total = finalUsage?.total_tokens || (pTokens + cTokens);
 
-          const realToolCalls = accumulatedToolCalls.filter(tc => tc.function?.name !== 'read');
+          const realToolCalls = accumulatedToolCalls.filter(tc => {
+            const name = tc.function?.name;
+            if (!name || name === 'read') return false;
+            if (clientToolNames && clientToolNames.size > 0) {
+              return clientToolNames.has(name);
+            }
+            return false;
+          });
           const responseJson = {
             id: completionId,
             object: "chat.completion",
@@ -1058,6 +1117,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const toolResult = tools.mergeTools(clientTools, clientToolChoice);
   const mergedTools = toolResult.tools;
   const mergedToolChoice = toolResult.toolChoice;
+  const clientToolNames = toolResult.clientToolNames;
+  const injectedToolNames = toolResult.injectedToolNames;
 
   const isFreeOnly = config.get('free_only') !== false;
   const isRequestedFree = discovery.isModelFree(requestedModel);
@@ -1098,13 +1159,15 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const triedWarpPorts = new Set();
   let warpRotatedInThisRequest = false;
 
+  const hasZenKey = !!(config.get('upstream_zen_key') || process.env.OPENCODE_ZEN_KEY || process.env.OPENCODE_API_KEY);
+  const scraperEnabled = !hasZenKey && config.get('proxy_scraper_enabled') === true; // Never egress secrets over third-party proxies (C3)
   const egressMode = config.get('egress_mode') || 'hybrid';
   let activeRoute = { type: 'warp', port: warp.getBestPort(), proxy: null };
-  if (egressMode === 'scraped_only') {
+  if (scraperEnabled && egressMode === 'scraped_only') {
     const p = proxyScraper.getBestProxy();
     activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
   } else if (!warp.isReady() || config.get('warp_mode') === 'disabled' || routeHealth.isWarpDegraded()) {
-    const p = proxyScraper.getBestProxy();
+    const p = scraperEnabled ? proxyScraper.getBestProxy() : null;
     activeRoute = p ? { type: 'scraped', port: null, proxy: p } : { type: 'direct', port: null, proxy: null };
   }
 
@@ -1389,7 +1452,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
                 if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
                   for (const tc of delta.tool_calls) {
-                    if (tc.function?.name === 'read') continue;
+                    const name = tc.function?.name;
+                    if (!name || name === 'read' || (clientToolNames && !clientToolNames.has(name))) continue;
                     const tIndex = tc.index !== undefined ? tc.index : 0;
                     ensureToolBlock(tIndex, tc.id, tc.function?.name);
                     if (tc.function?.arguments) {
@@ -1474,7 +1538,11 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
               text: accumulatedContent
             });
           }
-          const realToolCalls = accumulatedToolCalls.filter(tc => tc.function?.name !== 'read');
+          const realToolCalls = accumulatedToolCalls.filter(tc => {
+            const name = tc.function?.name;
+            if (!name || name === 'read') return false;
+            return clientToolNames && clientToolNames.has(name);
+          });
           for (const tc of realToolCalls) {
             let parsedInput = {};
             try { parsedInput = JSON.parse(tc.function.arguments); } catch (e) {}

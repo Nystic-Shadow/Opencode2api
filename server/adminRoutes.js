@@ -8,6 +8,7 @@ const notifications = require('./notifications');
 const proxy = require('./proxy');
 const egress = require('./egress');
 const proxyDiscovery = require('./proxyDiscovery');
+const upstreamQuota = require('./upstreamQuota');
 
 // In-memory admin sessions with 24-hour TTL (H4)
 const sessions = new Map(); // token -> { createdAt, lastActive, username }
@@ -410,7 +411,8 @@ async function handleAdminRoute(req, res, pathname) {
   if (pathname === '/api/proxies/status' && req.method === 'GET') {
     return sendJson(res, 200, {
       ...egress.getProxyStatus(),
-      autoDiscovery: proxyDiscovery.getStatus()
+      autoDiscovery: proxyDiscovery.getStatus(),
+      upstreamQuota: upstreamQuota.getStatus()
     });
   }
 
@@ -425,7 +427,8 @@ async function handleAdminRoute(req, res, pathname) {
       success: true,
       message: 'Proxy health checks and discovery started',
       ...egress.getProxyStatus(),
-      autoDiscovery: proxyDiscovery.getStatus()
+      autoDiscovery: proxyDiscovery.getStatus(),
+      upstreamQuota: upstreamQuota.getStatus()
     });
   }
 
@@ -446,7 +449,8 @@ async function handleAdminRoute(req, res, pathname) {
       success: true,
       ...result,
       ...egress.getProxyStatus(),
-      autoDiscovery: proxyDiscovery.getStatus()
+      autoDiscovery: proxyDiscovery.getStatus(),
+      upstreamQuota: upstreamQuota.getStatus()
     });
   }
 

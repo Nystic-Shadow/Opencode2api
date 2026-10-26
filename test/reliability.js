@@ -6,6 +6,7 @@ const config = require('../server/config');
 const egress = require('../server/egress');
 const proxyDiscoveryModule = require('../server/proxyDiscovery');
 const requestQueue = require('../server/requestQueue');
+const upstreamQuota = require('../server/upstreamQuota');
 
 const { ProxyDiscovery } = proxyDiscoveryModule;
 const discoveryHelpers = proxyDiscoveryModule._test;
@@ -833,7 +834,99 @@ async function main() {
     egress.reload();
   });
 
-  console.log('\n[Test 11] Bounded admission queue');
+  console.log('\n[Test 11] Upstream free-quota gate');
+  await test('ignores generic rate limits and only gates FreeUsageLimitError', () => {
+    upstreamQuota._test.reset();
+    assert.strictEqual(upstreamQuota.recordFailure({
+      statusCode: 429,
+      body: '{"error":{"type":"server_error","message":"too many requests"}}',
+      retryAfterMs: 5000
+    }), null);
+    assert.strictEqual(upstreamQuota.recordFailure({
+      statusCode: 500,
+      body: '{"error":{"type":"FreeUsageLimitError"}}',
+      retryAfterMs: 5000
+    }), null);
+    assert.strictEqual(upstreamQuota.isBlocked(), null);
+
+    const status = upstreamQuota.recordFailure({
+      statusCode: 429,
+      body: '{"error":{"type":"FreeUsageLimitError","message":"Free usage limit reached"}}',
+      retryAfterMs: 5000
+    });
+    assert.strictEqual(status.blocked, true);
+    assert.strictEqual(status.upstreamError, 'FreeUsageLimitError');
+    upstreamQuota._test.reset();
+  });
+
+  await test('reports the exact upstream reset and expires on time', () => {
+    upstreamQuota._test.reset();
+    const now = 1_000_000;
+    const retryMs = 62758000;
+    const status = upstreamQuota.recordFailure({
+      statusCode: 429,
+      body: 'FreeUsageLimitError',
+      retryAfterMs: retryMs,
+      model: 'big-pickle',
+      now
+    });
+
+    assert.strictEqual(status.blocked, true);
+    assert.strictEqual(status.retryAfterSeconds, 62758);
+    assert.strictEqual(status.resetAt, new Date(now + retryMs).toISOString());
+    assert.strictEqual(status.model, 'big-pickle');
+    assert.match(status.message, /global upstream limit/);
+    assert.match(status.message, /proxies cannot bypass/);
+
+    assert.strictEqual(upstreamQuota.isBlocked(now + 1000).blocked, true);
+    assert.strictEqual(upstreamQuota.isBlocked(now + retryMs), null);
+    assert.strictEqual(upstreamQuota.getStatus(now + retryMs).blocked, false);
+  });
+
+  await test('never shortens an existing reset with a shorter Retry-After', () => {
+    upstreamQuota._test.reset();
+    const now = 2_000_000;
+    const first = upstreamQuota.recordFailure({
+      statusCode: 429,
+      body: 'FreeUsageLimitError',
+      retryAfterMs: 120000,
+      now
+    });
+    assert.strictEqual(first.retryAfterSeconds, 120);
+
+    const second = upstreamQuota.recordFailure({
+      statusCode: 429,
+      body: 'FreeUsageLimitError',
+      retryAfterMs: 5000,
+      now: now + 5000
+    });
+    assert.ok(second.retryAfterSeconds >= 115, `reset shortened to ${second.retryAfterSeconds}s`);
+    assert.strictEqual(second.resetAt, first.resetAt);
+    upstreamQuota._test.reset();
+  });
+
+  await test('defaults to a 15-minute block when Retry-After is missing', () => {
+    upstreamQuota._test.reset();
+    const now = 2_000_000;
+    const fallback = upstreamQuota.recordFailure({
+      statusCode: 429,
+      body: 'FreeUsageLimitError',
+      now
+    });
+    assert.strictEqual(fallback.retryAfterSeconds, 900);
+    assert.strictEqual(fallback.retryAfterSource, 'default');
+    upstreamQuota._test.reset();
+  });
+
+  await test('clears the gate after a successful free-tier request', () => {
+    upstreamQuota._test.reset();
+    upstreamQuota.recordFailure({ statusCode: 429, body: 'FreeUsageLimitError', retryAfterMs: 60000 });
+    assert.strictEqual(upstreamQuota.isBlocked().blocked, true);
+    assert.strictEqual(upstreamQuota.clear(), true);
+    assert.strictEqual(upstreamQuota.isBlocked(), null);
+  });
+
+  console.log('\n[Test 12] Bounded admission queue');
   await test('enforces global concurrency and makes release idempotent', async () => {
     await withConfig({ queue_max_concurrent: 1, queue_max_per_key: 1, queue_max_size: 1, queue_wait_ms: 30 }, async () => {
       const queue = new requestQueue.RequestQueue();

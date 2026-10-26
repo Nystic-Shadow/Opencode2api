@@ -28,13 +28,14 @@ It is designed for **maximum best-effort availability** within upstream limits. 
 - spreads requests round-robin across verified routes,
 - rechecks the full pool in the background every 30 minutes by default, even while idle,
 - cools a proxy briefly when it returns `429`, then tries the next routable proxy (bounded by `PROXY_QUOTA_FAILOVERS`),
+- detects a global `FreeUsageLimitError` and fails fast with the exact upstream reset time instead of rotating proxies against a shared bucket,
 - rotates the anonymous session identity on retries so a per-session limit does not pin one request forever,
 - never routes through an unverified candidate,
 - fails over immediately when a proxy tunnel dies and keeps dead routes out of rotation until a later sweep passes,
 - auto-removes failed routes after two consecutive failed sweeps (configurable, one manual entry is retained),
 - exposes `/readyz` so a scheduler or load balancer can stop sending traffic when no route or model is available.
 
-> **Best effort, not a capacity guarantee.** Proxies change the egress IP; they cannot manufacture upstream quota. If OpenCode meters the free tier per account/key rather than per IP (or the limit applies globally), every proxy can still receive `429`. In that case the gateway returns `429` with the earliest real `Retry-After` after exhausting the pool. For predictable capacity, use an upstream Zen key or a provider you are authorized to use.
+> **Best effort, not a capacity guarantee.** Proxies change the egress IP; they cannot manufacture upstream quota. If OpenCode meters the free tier per account/key rather than per IP (or the limit applies globally), every proxy can still receive `429`. The gateway detects the anonymous free-tier `FreeUsageLimitError` specifically and, because that bucket is shared across egress IPs, returns `429` immediately with the exact upstream reset time instead of exhausting the pool. For predictable capacity, use an upstream Zen key or a provider you are authorized to use.
 
 ---
 
@@ -104,7 +105,7 @@ select egress route: round-robin over verified discovered routes and manual rout
 upstream request with timeout and overall deadline
     │
     ├── 2xx ──► stream/non-stream response (slot held until close)
-    ├── 429 / quota 403 ──► cool route, try next routable proxy (bounded), else 429
+    ├── 429 / quota 403 ──► cool route, try next (bounded); FreeUsageLimitError → fail fast with upstream reset
     ├── network / 5xx ──► next route or retry, then 502/504
     └── fatal 4xx ──► return the upstream error
 ```
@@ -124,7 +125,7 @@ Key properties:
 | Overall deadline | `90s` by default |
 | Queue | `8` concurrent globally, `4` per key, `100` waiting, `15s` wait |
 | Stream admission | Slot held for the full response, not released when headers arrive |
-| Quota | Cooling route is skipped; next routable proxy is tried; `429` only after the pool is exhausted |
+| Quota | Route-level `429` cools and rotates; a global `FreeUsageLimitError` fails fast with the exact upstream reset |
 | Route failover | Round-robin for routing; network errors and `5xx` rotate to the next route |
 | Direct egress | Disabled by compose (`ALLOW_DIRECT_FALLBACK=false`) |
 
@@ -388,13 +389,13 @@ Compose uses `/readyz` for its healthcheck. The Docker image itself uses `/healt
 | Status | Type | Meaning |
 | :--- | :--- | :--- |
 | `401` | authentication | Missing/invalid API key, expired key, or paid model without a Zen key |
-| `429` | `free_tier_rate_limit` | Upstream quota/capacity on every routable proxy; honor `Retry-After` |
+| `429` | `free_tier_rate_limit` | Upstream quota/capacity. Global `FreeUsageLimitError` includes the exact reset time; honor `Retry-After` |
 | `429` | `queue_full` | Gateway concurrency limit; retry shortly |
 | `502` | upstream/stream | Upstream connection or stream failed |
 | `503` | `no_egress_route` | No healthy proxy route and direct fallback disabled |
 | `504` | deadline | Overall request deadline exceeded |
 
-On upstream quota, the gateway cools that route and retries the next routable proxy within the `PROXY_QUOTA_FAILOVERS` budget. It returns `429` only when no routable proxy remains (or the budget/deadline is exhausted), using the earliest real `Retry-After`. Proxies cannot create quota when the upstream limit is account- or key-global.
+On route-level upstream quota, the gateway cools that route and retries the next routable proxy within the `PROXY_QUOTA_FAILOVERS` budget. A `FreeUsageLimitError` from the anonymous free tier is different: that bucket is shared across egress IPs, so the gateway records the upstream reset and fails subsequent free-tier requests immediately with `429`, `Retry-After`, `reset_at`, and `retry_after_seconds`. It clears the gate after a successful free-tier request or when the reset passes. Proxies cannot create quota when the upstream limit is account- or key-global.
 
 ---
 
@@ -458,11 +459,11 @@ Create a new scoped key in the dashboard, or edit `data/keys.json` while the gat
 
 ### Proxy failover
 
-Healthy routes are selected round-robin, with freshly verified proxies preferred. Automatic discovery keeps the pool replenished without operator action; manual entries are optional and take precedence. A proxy tunnel failure pulls that route out of rotation immediately with exponential backoff (30 seconds, doubling, capped at the sweep interval), and the request continues on the next routable proxy. A network error or repeated `5xx` also rotates to the next route. An upstream `429` marks a quota cooldown but keeps the route in `/readyz`; the request then tries the next routable proxy within `PROXY_QUOTA_FAILOVERS`. When every route is cooling, the gateway returns `429` with the earliest retry hint instead of hammering the upstream.
+Healthy routes are selected round-robin, with freshly verified proxies preferred. Automatic discovery keeps the pool replenished without operator action; manual entries are optional and take precedence. A proxy tunnel failure pulls that route out of rotation immediately with exponential backoff (30 seconds, doubling, capped at the sweep interval), and the request continues on the next routable proxy. A network error or repeated `5xx` also rotates to the next route. An upstream `429` marks a quota cooldown but keeps the route in `/readyz`; the request then tries the next routable proxy within `PROXY_QUOTA_FAILOVERS`. A global `FreeUsageLimitError` short-circuits that loop and returns the upstream reset immediately. When every route is cooling, the gateway returns `429` with the earliest retry hint instead of hammering the upstream.
 
 The full pool is swept every 30 minutes by default (`PROXY_CHECK_INTERVAL_MINUTES`). Each route gets five sequential probes with a 5-second timeout; all five must pass. A failed sweep keeps the route out of rotation until a later sweep passes. With `PROXY_AUTO_PRUNE_DEAD=true` (default), two consecutive failed sweeps remove the entry; automatic routes are replenished by discovery, and one manual entry is retained for recovery. Settings exposes the discovery toggle, interval, auto-prune toggle, failed-route list, and a manual remove button; `POST /api/proxies/recheck` and `POST /api/proxies/prune` provide the same actions over the API. Manual proxies injected through `PROXIES` reappear after a restart even if pruned from `data/config.json`.
 
-Because quota attribution is controlled by the upstream, proxy rotation is a best-effort mitigation, not a guarantee. If the free tier is limited per account/key, no proxy pool can remove the limit.
+Because quota attribution is controlled by the upstream, proxy rotation is a best-effort mitigation, not a guarantee. The anonymous free tier currently reports `FreeUsageLimitError` with an identical `Retry-After` across direct connections and unrelated proxy IPs, which means the bucket is global; the gateway treats it that way and fails fast. For capacity, use an upstream Zen key or another provider.
 
 ### Docker resilience
 
@@ -475,7 +476,7 @@ Because quota attribution is controlled by the upstream, proxy rotation is a bes
 
 ## Limitations and security notes
 
-- **Free-tier capacity is upstream-controlled.** No gateway can guarantee zero `429` responses. Round-robin and quota failover reduce them when the limit is per-IP; if it is per account/key, the pool cannot help. There is no 99%/100% availability guarantee without authorized upstream capacity.
+- **Free-tier capacity is upstream-controlled.** No gateway can guarantee zero `429` responses. The anonymous free tier is currently a single global bucket; when it is exhausted, every proxy receives the same `FreeUsageLimitError` and reset time. The gateway fails fast with that reset instead of pretending another IP can help. For predictable capacity, use an upstream Zen key or another provider.
 - **Anonymity depends on egress.** With `ALLOW_DIRECT_FALLBACK=false`, the gateway will return `503` rather than silently leak the host IP. Automatic discovery uses public proxies, which are untrusted and may log traffic metadata. TLS certificate validation is enabled and private/reserved proxy targets are rejected, but public proxies are still best-effort infrastructure.
 - **Public proxies can be unstable or malicious.** The gateway never routes through an unverified candidate and requires five consecutive TLS probes, but it cannot audit a proxy operator's logging or reliability. Use manual, authorized proxies when traffic confidentiality is critical.
 - **Do not expose the dashboard without TLS and strong credentials.** Use a reverse proxy, firewall, or private network.

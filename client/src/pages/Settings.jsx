@@ -219,8 +219,9 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               full pool every {proxyStatus?.checkIntervalMinutes || 30} minutes. Failed routes leave rotation until a
               later sweep passes; two failed sweeps remove them when auto-prune is on. Requests use healthy routes
               round-robin and fail over immediately when a tunnel dies. An upstream 429 cools that route and tries the
-              next routable one (bounded by <code>PROXY_QUOTA_FAILOVERS</code>). Manual proxies below are optional and
-              take precedence. Proxies mitigate per-IP limits; they cannot remove account-wide quota.
+              next routable one (bounded by <code>PROXY_QUOTA_FAILOVERS</code>); a global <code>FreeUsageLimitError</code>
+              fails fast with its real reset time. Manual proxies below are optional and take precedence. Proxies
+              mitigate per-IP limits; they cannot remove account-wide quota.
             </p>
           </div>
 
@@ -234,6 +235,25 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             <span>{isRescanningProxies || proxyStatus?.isScanning ? 'Checking 5x...' : 'Recheck Pool 5x'}</span>
           </button>
         </div>
+
+        {proxyStatus?.upstreamQuota?.blocked && (
+          <div style={{
+            padding: '0.75rem',
+            backgroundColor: 'rgba(224, 85, 85, 0.08)',
+            borderRadius: 'var(--radius)',
+            borderLeft: '3px solid #e05555',
+            fontSize: '0.8rem',
+            lineHeight: 1.5
+          }}>
+            <strong>Upstream free quota exhausted.</strong>{' '}
+            OpenCode's anonymous free tier resets at{' '}
+            {proxyStatus.upstreamQuota.resetAt
+              ? new Date(proxyStatus.upstreamQuota.resetAt).toLocaleString()
+              : proxyStatus.upstreamQuota.resetAtUtc}
+            {' '}({proxyStatus.upstreamQuota.retryAfterSeconds}s). This is a global upstream limit:
+            rotating proxies cannot bypass it. Add an Upstream Zen key and disable free-only, or wait for the reset.
+          </div>
+        )}
 
         {proxyStatus?.configuredCount === 0 && (
           <div style={{

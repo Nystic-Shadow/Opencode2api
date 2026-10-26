@@ -9,6 +9,7 @@ const discovery = require('./discovery');
 const proxy = require('./proxy');
 const egress = require('./egress');
 const proxyDiscovery = require('./proxyDiscovery');
+const upstreamQuota = require('./upstreamQuota');
 const requestQueue = require('./requestQueue');
 const adminRoutes = require('./adminRoutes');
 const metrics = require('./metrics');
@@ -258,6 +259,7 @@ const server = http.createServer(async (req, res) => {
           manual_proxies: manualProxies,
           allow_direct: egress.getStatus().allowDirect
         },
+        upstream_quota: upstreamQuota.getStatus(),
         queue: requestQueue.getStats()
       };
       res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json' });

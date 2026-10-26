@@ -10,6 +10,7 @@ const keys = require('./keys');
 const metrics = require('./metrics');
 const egress = require('./egress');
 const requestQueue = require('./requestQueue');
+const upstreamQuota = require('./upstreamQuota');
 
 function routeLabel(route) {
   if (!route) return 'no egress route';
@@ -65,7 +66,7 @@ function upstreamTarget() {
   };
 }
 
-function sendJsonError(res, statusCode, type, message, headers = {}) {
+function sendJsonError(res, statusCode, type, message, headers = {}, extra = {}) {
   if (res.headersSent) {
     try { res.end(); } catch (e) {}
     return;
@@ -75,12 +76,13 @@ function sendJsonError(res, statusCode, type, message, headers = {}) {
     error: {
       message,
       type,
-      code: statusCode
+      code: statusCode,
+      ...extra
     }
   }));
 }
 
-function sendAnthropicError(res, statusCode, type, message, headers = {}) {
+function sendAnthropicError(res, statusCode, type, message, headers = {}, extra = {}) {
   if (res.headersSent) {
     try { res.end(); } catch (e) {}
     return;
@@ -90,9 +92,26 @@ function sendAnthropicError(res, statusCode, type, message, headers = {}) {
     type: 'error',
     error: {
       type,
-      message
+      message,
+      ...extra
     }
   }));
+}
+
+function freeQuotaHeaders(block) {
+  return {
+    'Retry-After': String(block.retryAfterSeconds),
+    'x-opencode2api-free-quota-reset': block.resetAt,
+    'x-opencode2api-upstream-error': 'FreeUsageLimitError'
+  };
+}
+
+function freeQuotaFields(block) {
+  return {
+    upstream_error: 'FreeUsageLimitError',
+    reset_at: block.resetAt,
+    retry_after_seconds: block.retryAfterSeconds
+  };
 }
 
 function anthropicStopReason(openAiReason, hasToolCalls = false) {
@@ -292,6 +311,24 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     return;
   }
 
+  // The anonymous free bucket is global across proxy IPs. Once the upstream
+  // has reported FreeUsageLimitError, fail immediately with its real reset
+  // time instead of spending the request on routes that cannot recover quota.
+  const freeQuotaBlock = isRequestedFree ? upstreamQuota.isBlocked() : null;
+  if (freeQuotaBlock) {
+    metrics.recordRequest({
+      model: requestedModel,
+      status: 429,
+      tokens: {},
+      latencyMs: Date.now() - startTime,
+      stream: isClientStream,
+      keyId: keyObj.id
+    });
+    sendJsonError(res, 429, 'free_tier_rate_limit', freeQuotaBlock.message,
+      freeQuotaHeaders(freeQuotaBlock), freeQuotaFields(freeQuotaBlock));
+    return;
+  }
+
   const baseSanitized = sanitizeClientPayload(clientPayload);
   const toolResult = tools.mergeTools(clientPayload.tools, clientPayload.tool_choice);
   const mergedTools = toolResult.tools;
@@ -318,7 +355,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         keyId: keyObj.id
       });
       sendJsonError(res, 429, 'free_tier_rate_limit',
-        'OpenCode Free Tier capacity limit reached on every available proxy route. Retry after the indicated delay, add more proxies, or configure an upstream Zen key.',
+        'OpenCode Free Tier capacity limit reached. Retry after the indicated delay, or configure an upstream Zen key. If the upstream reported FreeUsageLimitError, the limit is global and more proxies will not help.',
         { 'Retry-After': String(retryAfterSec) });
       return;
     }
@@ -507,6 +544,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       // the concurrency being bounded, not just header latency.
       upstreamRes.once('close', releaseSlot);
       egress.recordSuccess(activeRoute);
+      if (isRequestedFree) upstreamQuota.clear();
 
       // Set fallback headers if auto-failover occurred
       if (resolvedModel !== requestedModel) {
@@ -869,6 +907,23 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     if (failureKind === 'quota') {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
+      const globalFreeQuota = isRequestedFree
+        ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
+        : null;
+      if (globalFreeQuota) {
+        console.warn(`[Proxy] Upstream free quota for ${currentModel} is global; reset at ${globalFreeQuota.resetAt}. Not trying other routes.`);
+        metrics.recordRequest({
+          model: requestedModel,
+          status: 429,
+          tokens: {},
+          latencyMs: Date.now() - startTime,
+          stream: isClientStream,
+          keyId: keyObj.id
+        });
+        sendJsonError(res, 429, 'free_tier_rate_limit', globalFreeQuota.message,
+          freeQuotaHeaders(globalFreeQuota), freeQuotaFields(globalFreeQuota));
+        return;
+      }
       const nextRoute = egress.getNextRoutableRoute(attemptedRoutes);
       if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
         quotaFailovers++;
@@ -889,7 +944,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         keyId: keyObj.id
       });
       sendJsonError(res, 429, 'free_tier_rate_limit',
-        'OpenCode Free Tier capacity limit reached on every available proxy route. Retry after the indicated delay, add more proxies, or configure an upstream Zen key.',
+        'OpenCode Free Tier capacity limit reached. Retry after the indicated delay, or configure an upstream Zen key. If the upstream reported FreeUsageLimitError, the limit is global and more proxies will not help.',
         { 'Retry-After': String(retryAfterSec) });
       return;
     }
@@ -1091,6 +1146,23 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     return;
   }
 
+  // See handleChatCompletions: the anonymous free bucket is global across
+  // proxy IPs, so a known block fails fast with the upstream reset time.
+  const freeQuotaBlock = isRequestedFree ? upstreamQuota.isBlocked() : null;
+  if (freeQuotaBlock) {
+    metrics.recordRequest({
+      model: requestedModel,
+      status: 429,
+      tokens: {},
+      latencyMs: Date.now() - startTime,
+      stream: isClientStream,
+      keyId: keyObj.id
+    });
+    sendAnthropicError(res, 429, 'rate_limit_error', freeQuotaBlock.message,
+      freeQuotaHeaders(freeQuotaBlock), freeQuotaFields(freeQuotaBlock));
+    return;
+  }
+
   let currentModel = requestedModel;
   const maxRetries = Math.min(3, configInt('max_retries', 0));
   const requestTimeout = configInt('request_timeout_ms', 30000, 5000);
@@ -1111,7 +1183,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         keyId: keyObj.id
       });
       sendAnthropicError(res, 429, 'rate_limit_error',
-        'OpenCode Free Tier capacity limit reached on every available proxy route. Retry after the indicated delay, add more proxies, or configure an upstream Zen key.',
+        'OpenCode Free Tier capacity limit reached. Retry after the indicated delay, or configure an upstream Zen key. If the upstream reported FreeUsageLimitError, the limit is global and more proxies will not help.',
         { 'Retry-After': String(retryAfterSec) });
       return;
     }
@@ -1301,6 +1373,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       // Hold the admission slot until the stream finishes or aborts.
       upstreamRes.once('close', releaseSlot);
       egress.recordSuccess(activeRoute);
+      if (isRequestedFree) upstreamQuota.clear();
 
       if (resolvedModel !== requestedModel) {
         res.setHeader('x-opencode2api-fallback', `${requestedModel} -> ${resolvedModel}`);
@@ -1758,6 +1831,23 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     if (failureKind === 'quota') {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
+      const globalFreeQuota = isRequestedFree
+        ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
+        : null;
+      if (globalFreeQuota) {
+        console.warn(`[Proxy] Upstream free quota for Anthropic model ${currentModel} is global; reset at ${globalFreeQuota.resetAt}. Not trying other routes.`);
+        metrics.recordRequest({
+          model: requestedModel,
+          status: 429,
+          tokens: {},
+          latencyMs: Date.now() - startTime,
+          stream: isClientStream,
+          keyId: keyObj.id
+        });
+        sendAnthropicError(res, 429, 'rate_limit_error', globalFreeQuota.message,
+          freeQuotaHeaders(globalFreeQuota), freeQuotaFields(globalFreeQuota));
+        return;
+      }
       const nextRoute = egress.getNextRoutableRoute(attemptedRoutes);
       if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
         quotaFailovers++;
@@ -1778,7 +1868,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         keyId: keyObj.id
       });
       sendAnthropicError(res, 429, 'rate_limit_error',
-        'OpenCode Free Tier capacity limit reached on every available proxy route. Retry after the indicated delay, add more proxies, or configure an upstream Zen key.',
+        'OpenCode Free Tier capacity limit reached. Retry after the indicated delay, or configure an upstream Zen key. If the upstream reported FreeUsageLimitError, the limit is global and more proxies will not help.',
         { 'Retry-After': String(retryAfterSec) });
       return;
     }

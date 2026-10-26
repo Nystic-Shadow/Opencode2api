@@ -120,6 +120,9 @@ function classifyUpstreamFailure(statusCode, body) {
   if (code === 403 && /(freeusage|freetier|capacity|rate.?limit|quota|too many)/i.test(text)) {
     return 'quota';
   }
+  if (code === 403 && /(regionerror|not available in your country)/i.test(text)) {
+    return 'retry';
+  }
   if (code === 0 || code === 408 || code === 425 || code === 500 || code === 502 || code === 503 || code === 504) {
     return 'retry';
   }

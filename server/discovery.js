@@ -449,8 +449,10 @@ class ModelDiscoveryService {
       'space-bunny'
     ];
 
+    const upstreamQuota = require('./upstreamQuota');
+
     for (const candidateId of fallbackPriority) {
-      if (!tried.has(candidateId)) {
+      if (!tried.has(candidateId) && !upstreamQuota.isBlocked(candidateId)) {
         const found = this.models.find(m =>
           (m.id === candidateId || m.upstream_id === candidateId || m.upstream_id === `${candidateId}-free`) &&
           m.is_free
@@ -461,7 +463,7 @@ class ModelDiscoveryService {
 
     // Secondary fallback: any other discovered free model
     for (const m of this.models) {
-      if (m.is_free && !tried.has(m.id) && !tried.has(m.upstream_id)) {
+      if (m.is_free && !tried.has(m.id) && !tried.has(m.upstream_id) && !upstreamQuota.isBlocked(m.id)) {
         return m.id;
       }
     }

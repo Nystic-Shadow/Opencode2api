@@ -194,17 +194,20 @@ function sessionKey(keyId, routeKey) {
 }
 
 const persistentSessions = {
-  sessions: new Map(), // keyId + routeKey -> { sessionId, projectId, createdAt }
+  sessions: new Map(), // keyId + routeKey -> { sessionId, projectId, createdAt, requestCount }
 
   getOrCreate(keyId, routeKey) {
     const id = sessionKey(keyId, routeKey);
-    if (this.sessions.has(id)) {
-      return this.sessions.get(id);
+    const existing = this.sessions.get(id);
+    if (existing && (Date.now() - existing.createdAt < 5 * 60 * 1000) && (existing.requestCount || 0) < 10) {
+      existing.requestCount = (existing.requestCount || 0) + 1;
+      return existing;
     }
     const session = {
       sessionId: identity.generateCanonicalSessionId(),
       projectId: identity.generateProjectId(),
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      requestCount: 1
     };
     this.sessions.set(id, session);
     return session;
@@ -224,12 +227,14 @@ const persistentSessions = {
   // Rotate one client's session for a route (e.g., after a quota response).
   rotate(keyId, routeKey) {
     const id = sessionKey(keyId, routeKey);
-    this.sessions.set(id, {
+    const session = {
       sessionId: identity.generateCanonicalSessionId(),
       projectId: identity.generateProjectId(),
-      createdAt: Date.now()
-    });
-    return this.sessions.get(id);
+      createdAt: Date.now(),
+      requestCount: 1
+    };
+    this.sessions.set(id, session);
+    return session;
   }
 };
 
@@ -708,6 +713,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           const cTokens = completionTokens || Math.ceil((streamedContentChars + streamedReasoningChars) / 4);
           const total = totalTokens || (pTokens + cTokens);
           keys.recordUsage(keyObj.id, total);
+          upstreamQuota.clear(currentModel);
+          upstreamQuota.clear(requestedModel);
           metrics.recordRequest({
             model: requestedModel,
             status,
@@ -825,6 +832,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           const cTokens = completionTokens || Math.ceil((streamedContentChars + streamedReasoningChars) / 4);
           const total = totalTokens || (pTokens + cTokens);
           keys.recordUsage(keyObj.id, total);
+          upstreamQuota.clear(currentModel);
+          upstreamQuota.clear(requestedModel);
           metrics.recordRequest({
             model: requestedModel,
             status: 200,
@@ -925,6 +934,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
           const latency = Date.now() - startTime;
           keys.recordUsage(keyObj.id, total);
+          upstreamQuota.clear(currentModel);
+          upstreamQuota.clear(requestedModel);
           metrics.recordRequest({
             model: requestedModel,
             status: 200,
@@ -1019,18 +1030,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     if (failureKind === 'quota') {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
-      // A 429 from a direct Node request to the official host is a TLS-gate
-      // rejection, not a genuine quota signal. Only record quota when the
-      // request actually traversed the Bun bridge (or a custom upstream).
-      const officialDirect = isDirectOfficialAttempt(officialUpstream, attemptResult);
-      if (officialDirect) {
-        console.warn(`[Proxy] Ignoring direct Node 429 for official upstream (${routeLabel(activeRoute)}); Bun bridge did not carry this request.`);
-      }
-      const globalFreeQuota = isRequestedFree && !officialDirect
-        ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
-        : null;
 
-      // Fast Direct Fallback: if a proxy route returned quota, try direct route for this model before trying other proxies or models
+      // Fast Direct Fallback: if a proxy route returned quota, try direct route for this model before marking the model blocked
       if (activeRoute && activeRoute.type !== 'direct' && (config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct')) {
         const failedRoute = activeRoute;
         activeRoute = { type: 'direct', id: 'direct' };
@@ -1038,6 +1039,18 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         console.warn(`[Proxy] Route ${routeLabel(failedRoute)} returned quota for ${currentModel}; attempting direct egress route.`);
         continue;
       }
+
+      // A 429 from a direct Node request to the official host is a TLS-gate
+      // rejection, not a genuine quota signal. Only record quota when the
+      // request actually traversed the Bun bridge (or a custom upstream).
+      const officialDirect = isDirectOfficialAttempt(officialUpstream, attemptResult);
+      if (officialDirect) {
+        console.warn(`[Proxy] Ignoring direct Node 429 for official upstream (${routeLabel(activeRoute)}); Bun bridge did not carry this request.`);
+      }
+      const isDirectRoute = activeRoute && activeRoute.type === 'direct';
+      const globalFreeQuota = isRequestedFree && !officialDirect && isDirectRoute
+        ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
+        : null;
 
       // Smart Fallback: if model hit free usage limit or quota 429, auto-failover to next healthy free model
       if (config.get('smart_fallback') !== false && isRequestedFree) {
@@ -1660,6 +1673,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           const cTokens = completionTokens || Math.ceil((streamedContentChars + streamedReasoningChars) / 4);
           const total = pTokens + cTokens;
           keys.recordUsage(keyObj.id, total);
+          upstreamQuota.clear(currentModel);
+          upstreamQuota.clear(requestedModel);
           metrics.recordRequest({
             model: requestedModel,
             status,
@@ -1844,6 +1859,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           const cTokens = completionTokens || Math.ceil((streamedContentChars + streamedReasoningChars) / 4);
           const total = pTokens + cTokens;
           keys.recordUsage(keyObj.id, total);
+          upstreamQuota.clear(currentModel);
+          upstreamQuota.clear(requestedModel);
           metrics.recordRequest({
             model: requestedModel,
             status: 200,
@@ -1952,6 +1969,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
           const latency = Date.now() - startTime;
           keys.recordUsage(keyObj.id, total);
+          upstreamQuota.clear(currentModel);
+          upstreamQuota.clear(requestedModel);
           metrics.recordRequest({
             model: requestedModel,
             status: 200,
@@ -2044,15 +2063,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     if (failureKind === 'quota') {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
-      const officialDirect = isDirectOfficialAttempt(officialUpstream, attemptResult);
-      if (officialDirect) {
-        console.warn(`[Proxy] Ignoring direct Node 429 for official Anthropic upstream (${routeLabel(activeRoute)}); Bun bridge did not carry this request.`);
-      }
-      const globalFreeQuota = isRequestedFree && !officialDirect
-        ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
-        : null;
 
-      // Fast Direct Fallback: if a proxy route returned quota, try direct route for this model before trying other proxies or models
+      // Fast Direct Fallback: if a proxy route returned quota, try direct route for this model before marking the model blocked
       if (activeRoute && activeRoute.type !== 'direct' && (config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct')) {
         const failedRoute = activeRoute;
         activeRoute = { type: 'direct', id: 'direct' };
@@ -2060,6 +2072,15 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         console.warn(`[Proxy] Route ${routeLabel(failedRoute)} returned quota for Anthropic model ${currentModel}; attempting direct egress route.`);
         continue;
       }
+
+      const officialDirect = isDirectOfficialAttempt(officialUpstream, attemptResult);
+      if (officialDirect) {
+        console.warn(`[Proxy] Ignoring direct Node 429 for official Anthropic upstream (${routeLabel(activeRoute)}); Bun bridge did not carry this request.`);
+      }
+      const isDirectRoute = activeRoute && activeRoute.type === 'direct';
+      const globalFreeQuota = isRequestedFree && !officialDirect && isDirectRoute
+        ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
+        : null;
 
       // Smart Fallback to another free model on Anthropic 429 quota
       if (config.get('smart_fallback') !== false && isRequestedFree) {

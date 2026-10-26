@@ -22,6 +22,7 @@ const MAX_SOURCE_LINES = 1500;
 // High-speed, US-targeted proxy discovery sources. OpenCode models, early access,
 // and regional capacity perform with highest reliability from United States routes,
 // eliminating "RegionError: This model is not available in your country" (403).
+// Focus on HTTP/HTTPS tunneling proxies for 100% compatibility with Bun TLS bridge.
 const DEFAULT_SOURCES = [
   {
     name: 'proxifly-us',
@@ -30,28 +31,16 @@ const DEFAULT_SOURCES = [
     url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/US/data.txt'
   },
   {
-    name: 'proxyscrape-us-all',
-    protocol: 'http',
-    maxLines: 600,
-    url: 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=us'
-  },
-  {
     name: 'proxyscrape-us-http',
     protocol: 'http',
-    maxLines: 500,
+    maxLines: 600,
     url: 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&country=us&proxy_format=ipport&format=text'
   },
   {
-    name: 'proxyscrape-us-socks5',
-    protocol: 'socks5',
-    maxLines: 500,
-    url: 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&country=us&proxy_format=ipport&format=text'
-  },
-  {
-    name: 'geonode-us',
+    name: 'geonode-us-http',
     protocol: 'http',
     maxLines: 500,
-    url: 'https://proxylist.geonode.com/api/proxy-list?country=US&limit=500&page=1&sort_by=lastChecked&sort_type=desc'
+    url: 'https://proxylist.geonode.com/api/proxy-list?country=US&protocols=http%2Chttps&limit=500&page=1&sort_by=lastChecked&sort_type=desc'
   },
   {
     name: 'spys-me-us-http',
@@ -61,23 +50,34 @@ const DEFAULT_SOURCES = [
     url: 'https://spys.me/proxy.txt'
   },
   {
-    name: 'spys-me-us-socks5',
-    protocol: 'socks5',
-    maxLines: 500,
-    countryFilter: 'US',
-    url: 'https://spys.me/socks.txt'
-  },
-  {
     name: 'proxyscrape-v2-us-http',
     protocol: 'http',
-    maxLines: 400,
+    maxLines: 500,
     url: 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=US&ssl=all&anonymity=all'
   },
   {
-    name: 'proxyscrape-v2-us-socks5',
-    protocol: 'socks5',
-    maxLines: 400,
-    url: 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=US'
+    name: 'thespeedx-http',
+    protocol: 'http',
+    maxLines: 500,
+    url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'
+  },
+  {
+    name: 'monosans-http',
+    protocol: 'http',
+    maxLines: 300,
+    url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'
+  },
+  {
+    name: 'vakhov-http',
+    protocol: 'http',
+    maxLines: 250,
+    url: 'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt'
+  },
+  {
+    name: 'aliilapro-http',
+    protocol: 'http',
+    maxLines: 300,
+    url: 'https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt'
   }
 ];
 
@@ -183,7 +183,7 @@ function parseSourceText(text, protocol, maxLines = 500, countryFilter = null) {
         if (countryFilter && item.country && String(item.country).toUpperCase() !== countryFilter.toUpperCase()) {
           continue;
         }
-        const proto = (item.protocols && item.protocols.includes('socks5')) ? 'socks5' : (protocol || 'http');
+        const proto = (item.protocols && item.protocols.includes('https')) ? 'https' : (protocol || 'http');
         const candidate = `${proto}://${item.ip}:${item.port}`;
         const parsed = parseCandidateLine(candidate, proto);
         if (!parsed.proxy) {
@@ -206,6 +206,7 @@ function parseSourceText(text, protocol, maxLines = 500, countryFilter = null) {
   for (let index = 0; index < scanLimit && result.proxies.length < limit; index++) {
     const line = lines[index].trim();
     if (!line) continue;
+    if (protocol === 'http' && /^socks[45]h?:\/\//i.test(line)) continue;
     result.scanned++;
 
     // Country verification for sources with explicit country metadata (e.g., spys.me "ip:port CC-ANON")

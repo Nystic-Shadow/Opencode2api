@@ -65,7 +65,8 @@ function decodeProxy(value) {
   if (!value) return '';
   try {
     const decoded = Buffer.from(String(value), 'base64url').toString('utf8');
-    if (!/^(https?|socks5h?):\/\//i.test(decoded)) return '';
+    // Bun's native fetch() supports http:// and https:// tunneling; socks5 results in UnsupportedProxyProtocol
+    if (!/^https?:\/\//i.test(decoded)) return '';
     return decoded;
   } catch (e) {
     return '';

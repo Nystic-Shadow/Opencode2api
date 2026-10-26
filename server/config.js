@@ -232,6 +232,16 @@ class ConfigManager {
         ? egressMode
         : 'auto';
 
+      // Auto-migrate legacy proxy_only deployments without configured proxies:
+      // If no proxies are configured and EGRESS_MODE is not in process.env,
+      // default to auto mode and allow direct fallback so initial boot is never stranded.
+      if (!process.env.EGRESS_MODE && (!this.config.proxies || this.config.proxies.length === 0)) {
+        this.config.egress_mode = 'auto';
+        if (process.env.ALLOW_DIRECT_FALLBACK === undefined) {
+          this.config.allow_direct_fallback = true;
+        }
+      }
+
       // Retry budget: fail fast instead of spending minutes per request.
       const envRetries = process.env.MAX_RETRIES !== undefined ? parseInt(process.env.MAX_RETRIES, 10) : NaN;
       if (Number.isFinite(envRetries)) {

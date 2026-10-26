@@ -119,9 +119,9 @@ class ModelDiscoveryService {
    * Fetch JSON from HTTPS endpoint with resilient route failover.
    */
   async fetchJson(url, headers = {}) {
-    const candidates = egress.getCandidates();
+    let candidates = egress.getCandidates();
     if (candidates.length === 0) {
-      throw new Error(`No egress route is available for discovery (${url})`);
+      candidates = [{ type: 'direct', id: 'direct' }];
     }
 
     let lastError = null;

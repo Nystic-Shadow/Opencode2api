@@ -423,6 +423,51 @@ class ModelDiscoveryService {
     const free = this.models.find(m => m.is_free);
     return free ? free.id : (this.models[0]?.id || 'big-pickle');
   }
+
+  /**
+   * Return the best available fallback model for high-availability auto-failover
+   * when a model hits temporary upstream rate limits (429) or capacity issues.
+   */
+  getNextFallbackModel(currentModel, triedModels = new Set()) {
+    const tried = triedModels instanceof Set ? triedModels : new Set(triedModels || []);
+    if (currentModel) {
+      tried.add(currentModel);
+      tried.add(cleanModelId(currentModel));
+      const up = this.resolveUpstreamModel(currentModel);
+      if (up) tried.add(up);
+    }
+
+    // High quality verified roster ordered by general capability and stability:
+    const fallbackPriority = [
+      'big-pickle',
+      'mimo-v2.6-flash',
+      'nemotron-3.5-super-vl',
+      'beam',
+      'flint-40b',
+      'glm-5.3-flash',
+      'deepseek-v4.1-flash',
+      'space-bunny'
+    ];
+
+    for (const candidateId of fallbackPriority) {
+      if (!tried.has(candidateId)) {
+        const found = this.models.find(m =>
+          (m.id === candidateId || m.upstream_id === candidateId || m.upstream_id === `${candidateId}-free`) &&
+          m.is_free
+        );
+        if (found) return found.id;
+      }
+    }
+
+    // Secondary fallback: any other discovered free model
+    for (const m of this.models) {
+      if (m.is_free && !tried.has(m.id) && !tried.has(m.upstream_id)) {
+        return m.id;
+      }
+    }
+
+    return null;
+  }
 }
 
 module.exports = new ModelDiscoveryService();

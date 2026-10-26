@@ -16,6 +16,7 @@ const MAX_FREE_LIMIT_MS = 7 * 24 * 60 * 60 * 1000;
 const FREE_LIMIT_PATTERN = /FreeUsageLimitError/i;
 
 let state = null;
+const modelStates = new Map(); // modelId -> state object
 
 function hasFreeLimitBody(body) {
   if (body === undefined || body === null) return false;
@@ -24,9 +25,26 @@ function hasFreeLimitBody(body) {
 }
 
 function buildMessage(status) {
-  return `OpenCode's anonymous free tier is exhausted upstream. It resets at ${status.resetAtUtc} ` +
+  const modelText = status.model ? ` for ${status.model}` : '';
+  return `OpenCode's anonymous free tier is exhausted upstream${modelText}. It resets at ${status.resetAtUtc} ` +
     `(${status.retryAfterSeconds}s). This is a global upstream limit, so rotating proxies cannot bypass it; ` +
     'configure an OpenCode Go/Zen key or wait for the reset.';
+}
+
+function getModelStatus(mState, now = Date.now()) {
+  if (!mState || mState.until <= now) return { blocked: false };
+  const status = {
+    blocked: true,
+    retryAfterSeconds: Math.max(1, Math.ceil((mState.until - now) / 1000)),
+    resetAt: mState.resetAt,
+    resetAtUtc: mState.resetAtUtc,
+    recordedAt: new Date(mState.recordedAt).toISOString(),
+    upstreamError: mState.upstreamError,
+    model: mState.model,
+    retryAfterSource: mState.retryAfterSource
+  };
+  status.message = buildMessage(status);
+  return status;
 }
 
 function recordFailure({ statusCode, body, retryAfterMs, model, now = Date.now() } = {}) {
@@ -54,6 +72,16 @@ function recordFailure({ statusCode, body, retryAfterMs, model, now = Date.now()
     retryAfterSource: hasUpstreamRetry ? 'upstream' : 'default'
   };
 
+  if (model) {
+    const prevModelUntil = modelStates.has(model) && modelStates.get(model).until > now
+      ? modelStates.get(model).until
+      : 0;
+    modelStates.set(model, {
+      ...state,
+      until: Math.max(now + durationMs, prevModelUntil)
+    });
+  }
+
   return getStatus(now);
 }
 
@@ -78,14 +106,41 @@ function getStatus(now = Date.now()) {
   return status;
 }
 
-function isBlocked(now = Date.now()) {
+function isBlocked(modelOrNow = Date.now(), nowParam = null) {
+  let model = null;
+  let now = Date.now();
+  if (typeof modelOrNow === 'string') {
+    model = modelOrNow;
+    now = typeof nowParam === 'number' ? nowParam : Date.now();
+  } else if (typeof modelOrNow === 'number') {
+    now = modelOrNow;
+  }
+
+  // If a specific model is requested, check its specific state
+  if (model && modelStates.has(model)) {
+    const mStatus = getModelStatus(modelStates.get(model), now);
+    if (mStatus.blocked) return mStatus;
+    modelStates.delete(model);
+    return null;
+  }
+
+  // If a specific model was requested and is not in modelStates, it is not blocked
+  if (model) {
+    return null;
+  }
+
+  // Fallback to global state
   const status = getStatus(now);
   return status.blocked ? status : null;
 }
 
-function clear() {
+function clear(model = null) {
+  if (model && modelStates.has(model)) {
+    modelStates.delete(model);
+  }
   const hadState = Boolean(state);
   state = null;
+  if (!model) modelStates.clear();
   return hadState;
 }
 

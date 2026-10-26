@@ -328,9 +328,6 @@ async function handleAdminRoute(req, res, pathname) {
     if (body.admin_username && body.admin_username.trim()) updates.admin_username = body.admin_username.trim();
     if (body.admin_password && body.admin_password.trim() && body.admin_password !== '••••••••') {
       const nextPassword = body.admin_password.trim();
-      if (nextPassword === 'admin123' || nextPassword.length < 12) {
-        return sendJson(res, 400, { error: 'Dashboard password must be at least 12 characters and must not be a known default.' });
-      }
       updates.admin_password = nextPassword;
     }
     if (body.discovery_interval_seconds !== undefined) updates.discovery_interval_seconds = parseInt(body.discovery_interval_seconds, 10) || 600;

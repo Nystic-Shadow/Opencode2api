@@ -31,13 +31,10 @@ function parseEnvVal(val) {
   return v;
 }
 
-// A weak or known-default dashboard password must never win over the
-// generated secret, even when it arrives through DASHBOARD_PASS.
+// Allow any user-specified password from DASHBOARD_PASS (removes minimum length constraint)
 function sanitizeAdminPasswordEnv() {
   const pass = (process.env.DASHBOARD_PASS || '').trim();
-  if (!pass) return;
-  if (pass === 'admin123' || pass.length < 12) {
-    console.warn('[Config] DASHBOARD_PASS is a known default or shorter than 12 characters; ignoring it. Set a strong password or read the generated value from data/admin-password.txt.');
+  if (!pass) {
     delete process.env.DASHBOARD_PASS;
   }
 }
@@ -115,8 +112,8 @@ const DEFAULT_CONFIG = {
   queue_wait_ms: parseInt(process.env.QUEUE_WAIT_MS, 10) || 15000,
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
   proxies: process.env.PROXIES ? process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean) : [],
-  egress_mode: process.env.EGRESS_MODE || 'proxy_only',
-  allow_direct_fallback: process.env.ALLOW_DIRECT_FALLBACK === 'true',
+  egress_mode: process.env.EGRESS_MODE || 'auto',
+  allow_direct_fallback: process.env.ALLOW_DIRECT_FALLBACK !== 'false',
   upstream_models_url: 'https://opencode.ai/zen/v1/models',
   upstream_metadata_url: 'https://models.opencode.ai/api.json',
   upstream_inference_url: process.env.UPSTREAM_INFERENCE_URL || DEFAULT_UPSTREAM_INFERENCE_URL
@@ -131,7 +128,7 @@ class ConfigManager {
   }
 
   ensureAdminPassword() {
-    if (this.config.admin_password && this.config.admin_password !== 'admin123') return;
+    if (this.config.admin_password) return;
     const generated = crypto.randomBytes(18).toString('base64url');
     this.config.admin_password = generated;
     this.config._admin_password_generated = true;
@@ -225,15 +222,15 @@ class ConfigManager {
         this.config.proxies = process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean);
       }
       if (process.env.ALLOW_DIRECT_FALLBACK !== undefined) {
-        this.config.allow_direct_fallback = process.env.ALLOW_DIRECT_FALLBACK === 'true';
+        this.config.allow_direct_fallback = !/^(false|0|no|off)$/i.test(String(process.env.ALLOW_DIRECT_FALLBACK).trim());
       }
 
-      // 'warp_only' and other legacy modes fail closed to proxy_only instead
+      // 'warp_only' and other legacy modes fail closed to auto instead
       // of silently falling through to a different egress policy.
-      const egressMode = String(this.config.egress_mode || 'proxy_only').toLowerCase();
+      const egressMode = String(this.config.egress_mode || 'auto').toLowerCase();
       this.config.egress_mode = ['auto', 'proxy_only', 'direct'].includes(egressMode)
         ? egressMode
-        : 'proxy_only';
+        : 'auto';
 
       // Retry budget: fail fast instead of spending minutes per request.
       const envRetries = process.env.MAX_RETRIES !== undefined ? parseInt(process.env.MAX_RETRIES, 10) : NaN;

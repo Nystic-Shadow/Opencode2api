@@ -1042,32 +1042,31 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
 
-      // Fast Direct Fallback: if a proxy route returned quota, try direct route for this model before marking the model blocked
-      if (activeRoute && activeRoute.type !== 'direct' && (config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct')) {
+      // 1. Rotate to next routable proxy in pool (fast failover across pool before direct fallback)
+      const nextProxy = egress.getNextRoutableRoute(attemptedRoutes);
+      if (nextProxy && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
+        quotaFailovers++;
         const failedRoute = activeRoute;
-        activeRoute = { type: 'direct', id: 'direct' };
-        attemptedRoutes.add('direct');
-        console.warn(`[Proxy] Route ${routeLabel(failedRoute)} returned quota for ${currentModel}; attempting direct egress route.`);
+        activeRoute = nextProxy;
+        attemptedRoutes.add(activeRoute.id);
+        console.warn(`[Proxy] Upstream quota on ${routeLabel(failedRoute)} for ${currentModel}; rotating to proxy ${routeLabel(activeRoute)} (${quotaFailovers}/${quotaFailoverLimit}).`);
         continue;
       }
 
-      // A 429 from a direct Node request to the official host is a TLS-gate
-      // rejection, not a genuine quota signal. Only record quota when the
-      // request actually traversed the Bun bridge (or a custom upstream).
-      const officialDirect = isDirectOfficialAttempt(officialUpstream, attemptResult);
-      if (officialDirect) {
-        console.warn(`[Proxy] Ignoring direct Node 429 for official upstream (${routeLabel(activeRoute)}); Bun bridge did not carry this request.`);
+      // 2. If all proxies in pool have been tried, try direct route as a fallback if permitted
+      if ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') && Date.now() < deadline) {
+        const failedRoute = activeRoute;
+        activeRoute = { type: 'direct', id: 'direct' };
+        attemptedRoutes.add('direct');
+        console.warn(`[Proxy] All proxies attempted for ${currentModel}; trying direct egress route.`);
+        continue;
       }
-      const isDirectRoute = activeRoute && activeRoute.type === 'direct';
-      const globalFreeQuota = isRequestedFree && !officialDirect && isDirectRoute
-        ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
-        : null;
 
-      // Smart Fallback: if model hit free usage limit or quota 429, auto-failover to next healthy free model
-      if (config.get('smart_fallback') !== false && isRequestedFree) {
+      // 3. Only if all proxies AND direct failed for currentModel, attempt Smart Fallback to another free model
+      if (config.get('smart_fallback') !== false && isRequestedFree && Date.now() < deadline) {
         const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
         if (fallback) {
-          console.warn(`[Proxy] Model ${currentModel} returned quota 429 on ${routeLabel(activeRoute)}. Smart failover to ${fallback}...`);
+          console.warn(`[Proxy] Model ${currentModel} exhausted all routes. Smart failover to ${fallback}...`);
           currentModel = fallback;
           upstreamModel = discovery.resolveUpstreamModel(currentModel);
           triedModels.add(fallback);
@@ -1078,33 +1077,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         }
       }
 
-      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
-      if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
-        quotaFailovers++;
-        const failedRoute = activeRoute;
-        activeRoute = nextRoute;
-        attemptedRoutes.add(activeRoute.id);
-        console.warn(`[Proxy] Upstream quota on ${routeLabel(failedRoute)} for ${currentModel}; trying ${routeLabel(activeRoute)} (${quotaFailovers}/${quotaFailoverLimit}).`);
-        continue;
-      }
-
-      if (globalFreeQuota) {
-        console.warn(`[Proxy] Upstream free quota for ${currentModel} is global; reset at ${globalFreeQuota.resetAt}.`);
-        metrics.recordRequest({
-          model: requestedModel,
-          status: 429,
-          tokens: {},
-          latencyMs: Date.now() - startTime,
-          stream: isClientStream,
-          keyId: keyObj.id
-        });
-        sendJsonError(res, 429, 'free_tier_rate_limit', globalFreeQuota.message,
-          freeQuotaHeaders(globalFreeQuota), freeQuotaFields(globalFreeQuota));
-        return;
-      }
-
       const retryAfterSec = Math.max(1, Math.ceil((retryAfterMs || egress.getEarliestQuotaRetryAfter() || 60000) / 1000));
-      console.warn(`[Proxy] Upstream quota on ${routeLabel(activeRoute)} for ${currentModel}; all routable proxies are exhausted (Retry-After ${retryAfterSec}s).`);
+      console.warn(`[Proxy] Upstream quota for ${currentModel}; all routable routes and models exhausted (Retry-After ${retryAfterSec}s).`);
       metrics.recordRequest({
         model: requestedModel,
         status: 429,
@@ -1114,7 +1088,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         keyId: keyObj.id
       });
       sendJsonError(res, 429, 'free_tier_rate_limit',
-        'OpenCode Free Tier capacity limit reached. Retry after the indicated delay, or configure an upstream Zen key. If the upstream reported FreeUsageLimitError, the limit is global and more proxies will not help.',
+        'OpenCode Free Tier capacity limit reached. Retry after the indicated delay, or configure an upstream Zen key.',
         { 'Retry-After': String(retryAfterSec) });
       return;
     }
@@ -2091,29 +2065,31 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
 
-      // Fast Direct Fallback: if a proxy route returned quota, try direct route for this model before marking the model blocked
-      if (activeRoute && activeRoute.type !== 'direct' && (config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct')) {
+      // 1. Rotate to next routable proxy in pool (fast failover across pool before direct fallback)
+      const nextProxy = egress.getNextRoutableRoute(attemptedRoutes);
+      if (nextProxy && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
+        quotaFailovers++;
         const failedRoute = activeRoute;
-        activeRoute = { type: 'direct', id: 'direct' };
-        attemptedRoutes.add('direct');
-        console.warn(`[Proxy] Route ${routeLabel(failedRoute)} returned quota for Anthropic model ${currentModel}; attempting direct egress route.`);
+        activeRoute = nextProxy;
+        attemptedRoutes.add(activeRoute.id);
+        console.warn(`[Proxy] Upstream quota on ${routeLabel(failedRoute)} for Anthropic model ${currentModel}; rotating to proxy ${routeLabel(activeRoute)} (${quotaFailovers}/${quotaFailoverLimit}).`);
         continue;
       }
 
-      const officialDirect = isDirectOfficialAttempt(officialUpstream, attemptResult);
-      if (officialDirect) {
-        console.warn(`[Proxy] Ignoring direct Node 429 for official Anthropic upstream (${routeLabel(activeRoute)}); Bun bridge did not carry this request.`);
+      // 2. If all proxies in pool have been tried, try direct route as a fallback if permitted
+      if ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') && Date.now() < deadline) {
+        const failedRoute = activeRoute;
+        activeRoute = { type: 'direct', id: 'direct' };
+        attemptedRoutes.add('direct');
+        console.warn(`[Proxy] All proxies attempted for Anthropic model ${currentModel}; trying direct egress route.`);
+        continue;
       }
-      const isDirectRoute = activeRoute && activeRoute.type === 'direct';
-      const globalFreeQuota = isRequestedFree && !officialDirect && isDirectRoute
-        ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
-        : null;
 
-      // Smart Fallback to another free model on Anthropic 429 quota
-      if (config.get('smart_fallback') !== false && isRequestedFree) {
+      // 3. Only if all proxies AND direct failed for currentModel, attempt Smart Fallback to another free model
+      if (config.get('smart_fallback') !== false && isRequestedFree && Date.now() < deadline) {
         const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
         if (fallback) {
-          console.warn(`[Proxy] Anthropic model ${currentModel} returned quota 429 on ${routeLabel(activeRoute)}. Smart failover to ${fallback}...`);
+          console.warn(`[Proxy] Anthropic model ${currentModel} exhausted all routes. Smart failover to ${fallback}...`);
           currentModel = fallback;
           upstreamModel = discovery.resolveUpstreamModel(currentModel);
           triedModels.add(fallback);
@@ -2124,33 +2100,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         }
       }
 
-      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
-      if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
-        quotaFailovers++;
-        const failedRoute = activeRoute;
-        activeRoute = nextRoute;
-        attemptedRoutes.add(activeRoute.id);
-        console.warn(`[Proxy] Upstream quota on ${routeLabel(failedRoute)} for Anthropic model ${currentModel}; trying ${routeLabel(activeRoute)} (${quotaFailovers}/${quotaFailoverLimit}).`);
-        continue;
-      }
-
-      if (globalFreeQuota) {
-        console.warn(`[Proxy] Upstream free quota for Anthropic model ${currentModel} is global; reset at ${globalFreeQuota.resetAt}.`);
-        metrics.recordRequest({
-          model: requestedModel,
-          status: 429,
-          tokens: {},
-          latencyMs: Date.now() - startTime,
-          stream: isClientStream,
-          keyId: keyObj.id
-        });
-        sendAnthropicError(res, 429, 'rate_limit_error', globalFreeQuota.message,
-          freeQuotaHeaders(globalFreeQuota), freeQuotaFields(globalFreeQuota));
-        return;
-      }
-
       const retryAfterSec = Math.max(1, Math.ceil((retryAfterMs || egress.getEarliestQuotaRetryAfter() || 60000) / 1000));
-      console.warn(`[Proxy] Upstream quota on ${routeLabel(activeRoute)} for Anthropic model ${currentModel}; all routable proxies are exhausted (Retry-After ${retryAfterSec}s).`);
+      console.warn(`[Proxy] Upstream quota for Anthropic model ${currentModel}; all routable routes and models exhausted (Retry-After ${retryAfterSec}s).`);
       metrics.recordRequest({
         model: requestedModel,
         status: 429,
@@ -2160,7 +2111,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         keyId: keyObj.id
       });
       sendAnthropicError(res, 429, 'rate_limit_error',
-        'OpenCode Free Tier capacity limit reached. Retry after the indicated delay, or configure an upstream Zen key. If the upstream reported FreeUsageLimitError, the limit is global and more proxies will not help.',
+        'OpenCode Free Tier capacity limit reached. Retry after the indicated delay, or configure an upstream Zen key.',
         { 'Retry-After': String(retryAfterSec) });
       return;
     }

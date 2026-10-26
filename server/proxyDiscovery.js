@@ -10,15 +10,15 @@ const VERIFY_TIMEOUT_MS = 3000;
 const VERIFY_CHECKS = 5;
 const MAX_VERIFIED_LATENCY_MS = 2000;
 const AUTO_TARGET = 100;
-const MAX_SCREEN_CANDIDATES = 4000;
-const SCREEN_CONCURRENCY = 80;
-const VERIFY_CONCURRENCY = 20;
+const MAX_SCREEN_CANDIDATES = 6000;
+const SCREEN_CONCURRENCY = 100;
+const VERIFY_CONCURRENCY = 30;
 const SCREEN_FAIL_COOLDOWN_MS = 15 * 60 * 1000;
 const VERIFY_FAIL_COOLDOWN_MS = 30 * 60 * 1000;
 const REMOVED_COOLDOWN_MS = 30 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 12000;
 const MAX_SOURCE_BYTES = 5 * 1024 * 1024;
-const MAX_SOURCE_LINES = 1500;
+const MAX_SOURCE_LINES = 2000;
 
 // High-speed, US-targeted proxy discovery sources. OpenCode models, early access,
 // and regional capacity perform with highest reliability from United States routes,
@@ -28,13 +28,13 @@ const DEFAULT_SOURCES = [
   {
     name: 'proxifly-us',
     protocol: 'http',
-    maxLines: 1500,
+    maxLines: 2000,
     url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/US/data.txt'
   },
   {
     name: 'proxyscrape-us-http',
     protocol: 'http',
-    maxLines: 600,
+    maxLines: 800,
     url: 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&country=us&proxy_format=ipport&format=text'
   },
   {
@@ -42,6 +42,12 @@ const DEFAULT_SOURCES = [
     protocol: 'http',
     maxLines: 500,
     url: 'https://proxylist.geonode.com/api/proxy-list?country=US&protocols=http%2Chttps&limit=500&page=1&sort_by=lastChecked&sort_type=desc'
+  },
+  {
+    name: 'geonode-us-http-p2',
+    protocol: 'http',
+    maxLines: 500,
+    url: 'https://proxylist.geonode.com/api/proxy-list?country=US&protocols=http%2Chttps&limit=500&page=2&sort_by=lastChecked&sort_type=desc'
   },
   {
     name: 'spys-me-us-http',
@@ -59,26 +65,44 @@ const DEFAULT_SOURCES = [
   {
     name: 'thespeedx-http',
     protocol: 'http',
-    maxLines: 500,
+    maxLines: 600,
     url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'
   },
   {
     name: 'monosans-http',
     protocol: 'http',
-    maxLines: 300,
+    maxLines: 400,
     url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'
   },
   {
     name: 'vakhov-http',
     protocol: 'http',
-    maxLines: 250,
+    maxLines: 350,
     url: 'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt'
   },
   {
     name: 'aliilapro-http',
     protocol: 'http',
-    maxLines: 300,
+    maxLines: 400,
     url: 'https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt'
+  },
+  {
+    name: 'zevtyardt-http',
+    protocol: 'http',
+    maxLines: 500,
+    url: 'https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt'
+  },
+  {
+    name: 'roosterkid-https',
+    protocol: 'http',
+    maxLines: 500,
+    url: 'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt'
+  },
+  {
+    name: 'sunny-http',
+    protocol: 'http',
+    maxLines: 400,
+    url: 'https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt'
   }
 ];
 

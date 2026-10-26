@@ -1010,6 +1010,153 @@ async function main() {
     });
   });
 
+  console.log('\n[Test 13] Bun bridge and upstream context gate');
+  const bunBridge = require('../server/bunBridge');
+  const upstreamContext = require('../server/upstreamContext');
+  const bridgeHelpers = bunBridge._test;
+
+  await test('injects the CLI <env> block into an empty system prompt', async () => {
+    const block = upstreamContext.buildEnvBlock({
+      cwd: 'D:\\work',
+      platform: 'win32',
+      gitRepo: true
+    });
+    assert.ok(block.startsWith('<env>'));
+    assert.ok(block.includes('Working directory: D:\\work'));
+    assert.ok(block.includes('Is directory a git repo: yes'));
+    assert.ok(block.includes('Platform: win32'));
+
+    const input = [{ role: 'user', content: 'hi' }];
+    const messages = upstreamContext.ensureUpstreamEnv(input, { block });
+
+    assert.strictEqual(messages.length, 2);
+    assert.strictEqual(messages[0].role, 'system');
+    assert.strictEqual(messages[0].content, block);
+    assert.strictEqual(messages[1].role, 'user');
+    assert.strictEqual(input.length, 1, 'input array must not be mutated');
+  });
+
+  await test('appends the gate once without replacing the caller system prompt', async () => {
+    const block = upstreamContext.buildEnvBlock({
+      cwd: 'D:\\work',
+      platform: 'linux',
+      gitRepo: false
+    });
+    const original = 'You are a helpful assistant.';
+    const first = upstreamContext.ensureUpstreamEnv([
+      { role: 'system', content: original },
+      { role: 'user', content: 'hi' }
+    ], { block });
+
+    assert.ok(first[0].content.startsWith(original));
+    assert.ok(first[0].content.includes('Working directory: D:\\work'));
+    assert.strictEqual(upstreamContext.contentHasEnvBlock(first[0].content), true);
+
+    const again = upstreamContext.ensureUpstreamEnv(first, { block });
+    assert.strictEqual(again, first, 'already-gated messages should be returned unchanged');
+    assert.strictEqual(again[0].content, first[0].content);
+
+    const blocks = upstreamContext.ensureUpstreamEnv([
+      { role: 'system', content: [{ type: 'text', text: 'Existing prompt.' }] },
+      { role: 'user', content: 'hi' }
+    ], { block });
+    assert.strictEqual(blocks[0].content.length, 2);
+    assert.deepStrictEqual(blocks[0].content[1], { type: 'text', text: block });
+    assert.strictEqual(upstreamContext.contentHasEnvBlock(blocks[0].content), true);
+    assert.strictEqual(upstreamContext.contentHasEnvBlock([{ type: 'text', text: 'no gate' }]), false);
+  });
+
+  await test('recognizes only official inference targets as bridge-required', async () => {
+    assert.strictEqual(
+      bridgeHelpers.isOfficialUpstream('https://opencode.ai/inference/openai/v1/chat/completions'),
+      true
+    );
+    assert.strictEqual(
+      bridgeHelpers.isOfficialUpstream('https://opencode.ai/inference/v1/chat/completions'),
+      true
+    );
+    assert.strictEqual(bridgeHelpers.isOfficialUpstream('https://opencode.ai/zen/v1/models'), false);
+    assert.strictEqual(
+      bridgeHelpers.isOfficialUpstream('https://example.com/inference/v1/chat/completions'),
+      false
+    );
+    assert.strictEqual(
+      bridgeHelpers.isOfficialUpstream({ hostname: 'opencode.ai', path: '/inference/v1/chat/completions' }),
+      true
+    );
+    assert.strictEqual(bridgeHelpers.isOfficialUpstream(''), false);
+    assert.strictEqual(bridgeHelpers.isOfficialUpstream(null), false);
+  });
+
+  await test('marks the bridge required only for an enabled official upstream', async () => {
+    await withConfig({
+      bun_bridge_enabled: true,
+      upstream_inference_url: 'https://opencode.ai/inference/openai/v1/chat/completions'
+    }, async () => {
+      assert.strictEqual(bunBridge.isRequired(), true);
+      const status = bunBridge.getStatus();
+      assert.strictEqual(status.enabled, true);
+      assert.strictEqual(status.required, true);
+      assert.strictEqual(typeof status.ready, 'boolean');
+    });
+
+    await withConfig({
+      bun_bridge_enabled: true,
+      upstream_inference_url: 'http://127.0.0.1:19090/inference/v1/chat/completions'
+    }, async () => {
+      assert.strictEqual(bunBridge.isRequired(), false);
+    });
+
+    await withConfig({
+      bun_bridge_enabled: false,
+      upstream_inference_url: 'https://opencode.ai/inference/openai/v1/chat/completions'
+    }, async () => {
+      assert.strictEqual(bunBridge.isRequired(), false);
+      assert.strictEqual(bunBridge.getStatus().required, false);
+    });
+  });
+
+  await test('builds and round-trips per-request proxy headers', async () => {
+    const route = {
+      type: 'proxy',
+      proxyType: 'socks5',
+      host: '127.0.0.1',
+      port: 1080,
+      username: 'user name',
+      password: 'p@ss:word'
+    };
+    const url = bunBridge.buildProxyUrl(route);
+    assert.strictEqual(url, 'socks5://user%20name:p%40ss%3Aword@127.0.0.1:1080');
+
+    const header = bunBridge.encodeProxyHeader(route);
+    assert.strictEqual(bunBridge.decodeProxyHeader(header), url);
+    assert.strictEqual(bunBridge.decodeProxyHeader(''), '');
+    assert.strictEqual(bunBridge.decodeProxyHeader('***'), '');
+
+    assert.strictEqual(
+      bunBridge.buildProxyUrl({ type: 'proxy', proxyType: 'https', host: '::1', port: 8443 }),
+      'https://[::1]:8443'
+    );
+    assert.strictEqual(bunBridge.buildProxyUrl({ type: 'direct' }), '');
+    assert.strictEqual(bunBridge.encodeProxyHeader({ type: 'direct' }), '');
+  });
+
+  await test('discovers the configured CLI binary without accepting directories', async () => {
+    assert.strictEqual(bunBridge.findCliBinary(__filename), __filename);
+    assert.notStrictEqual(bunBridge.findCliBinary(__dirname), __dirname);
+    assert.notStrictEqual(
+      bunBridge.findCliBinary('Z:\\does\\not\\exist\\opencode.exe'),
+      'Z:\\does\\not\\exist\\opencode.exe'
+    );
+  });
+
+  await test('never poisons the quota gate from a direct Node 429', async () => {
+    assert.strictEqual(bridgeHelpers.isDirectOfficialAttempt(true, { viaBridge: false }), true);
+    assert.strictEqual(bridgeHelpers.isDirectOfficialAttempt(true, { viaBridge: true }), false);
+    assert.strictEqual(bridgeHelpers.isDirectOfficialAttempt(false, { viaBridge: false }), false);
+    assert.strictEqual(bridgeHelpers.isDirectOfficialAttempt(true, null), false);
+  });
+
   console.log(`\n${failed === 0 ? '🎉' : '❌'} Reliability suite finished: ${passed} passed, ${failed} failed.\n`);
   clearTimeout(watchdog);
   process.exit(failed === 0 ? 0 : 1);

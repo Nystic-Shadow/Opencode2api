@@ -17,10 +17,10 @@ function atomicWriteJson(file, value) {
   }
 }
 
-const DEFAULT_UPSTREAM_INFERENCE_URL = 'https://opencode.ai/inference/v1/chat/completions';
-// This path was stored by older builds but was never used. Migrate it instead
-// of letting a stale cache point inference at a non-existent endpoint.
-const LEGACY_UPSTREAM_INFERENCE_URL = 'https://opencode.ai/inference/openai/v1/chat/completions';
+const DEFAULT_UPSTREAM_INFERENCE_URL = 'https://opencode.ai/inference/openai/v1/chat/completions';
+// Older builds persisted this path. It still works, but the canonical CLI path
+// is preferred so the outbound request shape matches the captured CLI traffic.
+const LEGACY_UPSTREAM_INFERENCE_URL = 'https://opencode.ai/inference/v1/chat/completions';
 
 // Clean and strip quotes from .env values
 function parseEnvVal(val) {
@@ -89,6 +89,13 @@ const DEFAULT_CONFIG = {
   admin_username: process.env.DASHBOARD_USER || 'admin',
   admin_password: process.env.DASHBOARD_PASS || '',
   client_version: '2.1.4',
+  // Node's TLS fingerprint is rejected by the official inference gate. The
+  // bridge runs the OpenCode CLI's embedded Bun runtime on loopback so free
+  // tier requests use the accepted fingerprint.
+  bun_bridge_enabled: process.env.BUN_BRIDGE_ENABLED !== 'false',
+  bun_bridge_cli_path: process.env.BUN_BRIDGE_CLI_PATH || '',
+  bun_bridge_start_timeout_ms: parseInt(process.env.BUN_BRIDGE_START_TIMEOUT_MS, 10) || 15000,
+  bun_bridge_ready_wait_ms: parseInt(process.env.BUN_BRIDGE_READY_WAIT_MS, 10) || 12000,
   discovery_interval_seconds: 600,
   auto_update_cli: true,
   free_only: true,
@@ -192,6 +199,25 @@ class ConfigManager {
       } else if (!this.config.upstream_inference_url || this.config.upstream_inference_url === LEGACY_UPSTREAM_INFERENCE_URL) {
         this.config.upstream_inference_url = DEFAULT_UPSTREAM_INFERENCE_URL;
       }
+
+      // Bun bridge controls. The CLI path can be overridden for non-standard
+      // installs; timeouts are bounded so boot and request handling stay fast.
+      this.config.bun_bridge_enabled = process.env.BUN_BRIDGE_ENABLED !== undefined
+        ? !/^(false|0|no|off)$/i.test(String(process.env.BUN_BRIDGE_ENABLED).trim())
+        : this.config.bun_bridge_enabled !== false;
+      if (process.env.BUN_BRIDGE_CLI_PATH !== undefined) {
+        this.config.bun_bridge_cli_path = process.env.BUN_BRIDGE_CLI_PATH.trim();
+      } else {
+        this.config.bun_bridge_cli_path = String(this.config.bun_bridge_cli_path || '').trim();
+      }
+      const bridgeStartTimeout = parseInt(this.config.bun_bridge_start_timeout_ms, 10);
+      this.config.bun_bridge_start_timeout_ms = Number.isFinite(bridgeStartTimeout)
+        ? Math.min(60000, Math.max(2000, bridgeStartTimeout))
+        : 15000;
+      const bridgeReadyWait = parseInt(this.config.bun_bridge_ready_wait_ms, 10);
+      this.config.bun_bridge_ready_wait_ms = Number.isFinite(bridgeReadyWait)
+        ? Math.min(60000, Math.max(0, bridgeReadyWait))
+        : 12000;
       if (process.env.EGRESS_MODE) {
         this.config.egress_mode = process.env.EGRESS_MODE.trim();
       }

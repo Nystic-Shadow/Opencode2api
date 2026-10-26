@@ -13,6 +13,7 @@ const upstreamQuota = require('./upstreamQuota');
 const requestQueue = require('./requestQueue');
 const adminRoutes = require('./adminRoutes');
 const metrics = require('./metrics');
+const bunBridge = require('./bunBridge');
 
 // Global exception protection to guarantee gateway 100% zero-crash uptime
 process.on('uncaughtException', (err) => {
@@ -235,7 +236,8 @@ const server = http.createServer(async (req, res) => {
         uptime_seconds: Math.round(process.uptime()),
         cli_version: config.get('client_version'),
         models_count: discovery.models.length,
-        egress_ready: egress.getCandidates().length > 0
+        egress_ready: egress.getCandidates().length > 0,
+        bun_bridge: bunBridge.getStatus()
       }));
     }
 
@@ -243,7 +245,8 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/readyz') {
       const routes = egress.getCandidates();
       const modelsCount = discovery.models.length;
-      const ready = routes.length > 0 && modelsCount > 0;
+      const bridgeStatus = bunBridge.getStatus();
+      const ready = routes.length > 0 && modelsCount > 0 && (!bridgeStatus.required || bridgeStatus.ready);
       const autoProxies = egress.getAutoProxyIds().length;
       const manualProxies = egress.getManualProxyIds().length;
       const body = {
@@ -260,7 +263,8 @@ const server = http.createServer(async (req, res) => {
           allow_direct: egress.getStatus().allowDirect
         },
         upstream_quota: upstreamQuota.getStatus(),
-        queue: requestQueue.getStats()
+        queue: requestQueue.getStats(),
+        bun_bridge: bridgeStatus
       };
       res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(body));
@@ -418,6 +422,7 @@ function startHttpServer() {
     console.log(`🌐 Anthropic Messages URL: http://127.0.0.1:${PORT}/v1/messages`);
     console.log(`✨ Discovered Models: ${discovery.models.length} (cached at boot; syncing in background)`);
     console.log(`⚡ OpenCode CLI Fingerprint: v${config.get('client_version')}`);
+    console.log(`🧵 Bun TLS Bridge: ${bunBridge.isRequired() ? 'starting' : bunBridge.isEnabled() ? 'standby (non-official upstream)' : 'disabled'}`);
     console.log(`🛡️  Egress Mode: ${config.get('egress_mode')} (${egress.getCandidates().length} ready route(s))`);
     console.log(`🔎 Auto Proxy Discovery: ${config.get('auto_proxy_discovery') === false ? 'off' : 'on'} (${proxyDiscovery.getStatus().verifiedCount}/${proxyDiscovery.getStatus().target} verified)`);
     console.log(`✅ Readiness probe: http://127.0.0.1:${PORT}/readyz`);
@@ -432,6 +437,20 @@ async function boot() {
 
   // Bind first. The dashboard and /healthz are available immediately.
   startHttpServer();
+
+  // The official inference gate rejects Node's TLS fingerprint. Start the
+  // loopback Bun bridge in parallel with egress/model discovery; free-tier
+  // requests wait briefly for it and fail with a clear 503 if it is missing.
+  // Custom upstreams never use the bridge, so do not spawn Bun for them.
+  if (bunBridge.isRequired()) {
+    bunBridge.start()
+      .then((ready) => {
+        if (ready) return;
+        const status = bunBridge.getStatus();
+        console.warn(`[Boot] Bun TLS bridge unavailable: ${status.last_error || status.state}`);
+      })
+      .catch((err) => console.warn('[Boot] Bun TLS bridge error:', err.message));
+  }
 
   // Explicit proxy pool health checks (5 probes per configured proxy, 5s cap).
   try { egress.startHealthChecks(); } catch (e) {
@@ -465,6 +484,7 @@ function shutdown(signal) {
     try { metrics.flush(); } catch (e) {}
     try { egress.stopHealthChecks(); } catch (e) {}
     try { proxyDiscovery.stop(); } catch (e) {}
+    try { bunBridge.stop(); } catch (e) {}
     clearTimeout(forceTimer);
     process.exit(0);
   });

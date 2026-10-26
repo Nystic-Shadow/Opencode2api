@@ -20,6 +20,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# The official inference gate rejects Node's TLS fingerprint. The gateway
+# reuses the Bun runtime embedded in the OpenCode CLI for that one upstream
+# hop, so the runtime image ships the CLI at a pinned version.
+ARG OPENCODE_CLI_VERSION=2.1.4
+RUN npm install -g --no-audit --no-fund "@opencode/cli@${OPENCODE_CLI_VERSION}" \
+    && npm cache clean --force
+
 COPY package*.json ./
 COPY server/ ./server/
 COPY --from=builder /app/dist ./dist

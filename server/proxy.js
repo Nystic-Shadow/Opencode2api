@@ -11,6 +11,19 @@ const metrics = require('./metrics');
 const egress = require('./egress');
 const requestQueue = require('./requestQueue');
 const upstreamQuota = require('./upstreamQuota');
+const bunBridge = require('./bunBridge');
+const upstreamContext = require('./upstreamContext');
+
+const isDirectOfficialAttempt = bunBridge.isDirectOfficialAttempt;
+
+// Loopback connections to the Bun bridge must never use the egress proxy
+// agents; the bridge chooses the proxy for the upstream hop per request.
+const bridgeAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+  timeout: 30000
+});
 
 function routeLabel(route) {
   if (!route) return 'no egress route';
@@ -43,7 +56,7 @@ function isProxyTransportError(err, route) {
   return PROXY_TRANSPORT_CODES.has(err.code);
 }
 
-const DEFAULT_UPSTREAM_URL = 'https://opencode.ai/inference/v1/chat/completions';
+const DEFAULT_UPSTREAM_URL = 'https://opencode.ai/inference/openai/v1/chat/completions';
 
 // Resolve the upstream endpoint once per attempt. The default is the real
 // OpenCode Zen inference URL; overriding it is intended for local test
@@ -64,6 +77,36 @@ function upstreamTarget() {
     port: parseInt(parsed.port, 10) || (isHttps ? 443 : 80),
     path: `${parsed.pathname || '/'}${parsed.search || ''}`
   };
+}
+
+// Build the loopback request sent to the Bun bridge. The selected egress
+// proxy travels as base64url so Bun can use it for this request only.
+function bridgeRequestOptions(bridge, target, upstreamHeaders, route) {
+  const headers = {
+    ...upstreamHeaders,
+    'x-opencode2api-bridge-token': bridge.token
+  };
+  const proxyHeader = bunBridge.encodeProxyHeader(route);
+  if (proxyHeader) headers['x-opencode2api-bridge-proxy'] = proxyHeader;
+  return {
+    hostname: bridge.host,
+    port: bridge.port,
+    path: target.path,
+    method: 'POST',
+    headers,
+    agent: bridgeAgent
+  };
+}
+
+async function resolveBridgeConnection(officialUpstream, isRequestedFree, waitMs) {
+  if (!officialUpstream || !bunBridge.isEnabled()) {
+    return { bridge: null, required: false };
+  }
+  if (!bunBridge.isReady()) {
+    await bunBridge.ensureReady(waitMs);
+  }
+  const bridge = bunBridge.getConnection();
+  return { bridge, required: !bridge && isRequestedFree };
 }
 
 function sendJsonError(res, statusCode, type, message, headers = {}, extra = {}) {
@@ -329,7 +372,13 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     return;
   }
 
+  const officialUpstream = bunBridge.isOfficialUpstream(upstreamTarget());
   const baseSanitized = sanitizeClientPayload(clientPayload);
+  // The official gate requires a system message containing the CLI's <env>
+  // block. Preserve the caller's prompt and append the context when missing.
+  if (isRequestedFree && officialUpstream) {
+    baseSanitized.messages = upstreamContext.ensureUpstreamEnv(baseSanitized.messages);
+  }
   const toolResult = tools.mergeTools(clientPayload.tools, clientPayload.tool_choice);
   const mergedTools = toolResult.tools;
   const mergedToolChoice = toolResult.toolChoice;
@@ -370,6 +419,23 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     sendJsonError(res, 503, 'no_egress_route',
       'No egress route is available. Configure PROXIES and wait for a healthy proxy, or set ALLOW_DIRECT_FALLBACK=true for local development.',
       { 'Retry-After': '5' });
+    return;
+  }
+
+  const bridgeWaitMs = configInt('bun_bridge_ready_wait_ms', 12000, 0);
+  const bridgeResolved = await resolveBridgeConnection(officialUpstream, isRequestedFree, bridgeWaitMs);
+  const bridgeConnection = bridgeResolved.bridge;
+  if (bridgeResolved.required) {
+    metrics.recordRequest({
+      model: requestedModel,
+      status: 503,
+      tokens: {},
+      latencyMs: Date.now() - startTime,
+      stream: isClientStream,
+      keyId: keyObj.id
+    });
+    sendJsonError(res, 503, 'bun_bridge_unavailable',
+      bunBridge.getUnavailableMessage(), { 'Retry-After': '5' });
     return;
   }
 
@@ -464,17 +530,28 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           return;
         }
         let isTimedOut = false;
-        const upstreamReq = target.transport.request({
-          hostname: target.hostname,
-          port: target.port,
-          path: target.path,
-          method: 'POST',
-          headers: upstreamHeaders,
-          agent: egress.getAgent(activeRoute, target.protocol),
-          timeout: attemptTimeout
-        }, (upstreamRes) => {
+        let requestOptions;
+        if (bridgeConnection) {
+          requestOptions = bridgeRequestOptions(bridgeConnection, target, upstreamHeaders, activeRoute);
+        } else {
+          requestOptions = {
+            hostname: target.hostname,
+            port: target.port,
+            path: target.path,
+            method: 'POST',
+            headers: upstreamHeaders,
+            agent: egress.getAgent(activeRoute, target.protocol)
+          };
+        }
+        requestOptions.timeout = attemptTimeout;
+        const requestTransport = bridgeConnection ? http : target.transport;
+        const upstreamReq = requestTransport.request(requestOptions, (upstreamRes) => {
           const contentType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
           const isValidContentType = contentType.includes('event-stream') || contentType.includes('application/json');
+          const bridgeError = bridgeConnection
+            ? String(upstreamRes.headers['x-opencode2api-bridge-error'] || '').toLowerCase()
+            : '';
+          if (bridgeConnection) bunBridge.markHealthy();
 
           // If upstream error (non-200) or bogus proxy payload (non-API content-type)
           if (upstreamRes.statusCode !== 200 || !isValidContentType) {
@@ -492,7 +569,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
                 success: false,
                 statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
                 headers: upstreamRes.headers,
-                proxyFailure: !isValidContentType && activeRoute.type === 'proxy',
+                proxyFailure: bridgeError === 'proxy' || (!isValidContentType && activeRoute.type === 'proxy'),
+                viaBridge: !!bridgeConnection,
                 body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
               });
             });
@@ -505,7 +583,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
             statusCode: 200,
             upstreamRes,
             upstreamReq,
-            resolvedModel: currentModel
+            resolvedModel: currentModel,
+            viaBridge: !!bridgeConnection
           });
         });
 
@@ -518,7 +597,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
           resolve({
             success: false,
             statusCode: (isTimedOut || deadlineExceeded) ? 504 : 502,
-            proxyFailure: isProxyTransportError(err, activeRoute),
+            proxyFailure: !bridgeConnection && isProxyTransportError(err, activeRoute),
+            bridgeFailure: !!bridgeConnection && !isTimedOut && !deadlineExceeded,
+            viaBridge: !!bridgeConnection,
             body: deadlineExceeded ? 'Request deadline exceeded' : err.message
           });
         });
@@ -532,7 +613,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         success: false,
         statusCode: 502,
         headers: {},
-        proxyFailure: isProxyTransportError(err, activeRoute),
+        proxyFailure: !bridgeConnection && isProxyTransportError(err, activeRoute),
+        bridgeFailure: !!bridgeConnection,
+        viaBridge: !!bridgeConnection,
         body: err.message
       };
     }
@@ -904,10 +987,32 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     lastStatus = statusCode || 502;
     lastBody = bodyStr;
 
+    if (attemptResult.bridgeFailure) {
+      bunBridge.reportTransportFailure();
+      metrics.recordRequest({
+        model: requestedModel,
+        status: 503,
+        tokens: {},
+        latencyMs: Date.now() - startTime,
+        stream: isClientStream,
+        keyId: keyObj.id
+      });
+      sendJsonError(res, 503, 'bun_bridge_unavailable',
+        bunBridge.getUnavailableMessage(), { 'Retry-After': '5' });
+      return;
+    }
+
     if (failureKind === 'quota') {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
-      const globalFreeQuota = isRequestedFree
+      // A 429 from a direct Node request to the official host is a TLS-gate
+      // rejection, not a genuine quota signal. Only record quota when the
+      // request actually traversed the Bun bridge (or a custom upstream).
+      const officialDirect = isDirectOfficialAttempt(officialUpstream, attemptResult);
+      if (officialDirect) {
+        console.warn(`[Proxy] Ignoring direct Node 429 for official upstream (${routeLabel(activeRoute)}); Bun bridge did not carry this request.`);
+      }
+      const globalFreeQuota = isRequestedFree && !officialDirect
         ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
         : null;
       if (globalFreeQuota) {
@@ -1027,7 +1132,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const requestedModel = rawRequestedModel || discovery.getDefaultModelId();
 
   // 1. Translate Anthropic system & messages to OpenAI format
-  const openAiMessages = [];
+  let openAiMessages = [];
   if (clientPayload.system) {
     if (typeof clientPayload.system === 'string') {
       openAiMessages.push({ role: 'system', content: clientPayload.system });
@@ -1163,6 +1268,11 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     return;
   }
 
+  const officialUpstream = bunBridge.isOfficialUpstream(upstreamTarget());
+  if (isRequestedFree && officialUpstream) {
+    openAiMessages = upstreamContext.ensureUpstreamEnv(openAiMessages);
+  }
+
   let currentModel = requestedModel;
   const maxRetries = Math.min(3, configInt('max_retries', 0));
   const requestTimeout = configInt('request_timeout_ms', 30000, 5000);
@@ -1198,6 +1308,23 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     sendAnthropicError(res, 503, 'no_egress_route',
       'No egress route is available. Configure PROXIES and wait for a healthy proxy, or set ALLOW_DIRECT_FALLBACK=true for local development.',
       { 'Retry-After': '5' });
+    return;
+  }
+
+  const bridgeWaitMs = configInt('bun_bridge_ready_wait_ms', 12000, 0);
+  const bridgeResolved = await resolveBridgeConnection(officialUpstream, isRequestedFree, bridgeWaitMs);
+  const bridgeConnection = bridgeResolved.bridge;
+  if (bridgeResolved.required) {
+    metrics.recordRequest({
+      model: requestedModel,
+      status: 503,
+      tokens: {},
+      latencyMs: Date.now() - startTime,
+      stream: isClientStream,
+      keyId: keyObj.id
+    });
+    sendAnthropicError(res, 503, 'bun_bridge_unavailable',
+      bunBridge.getUnavailableMessage(), { 'Retry-After': '5' });
     return;
   }
 
@@ -1292,17 +1419,28 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           return;
         }
         let isTimedOut = false;
-        const upstreamReq = target.transport.request({
-          hostname: target.hostname,
-          port: target.port,
-          path: target.path,
-          method: 'POST',
-          headers: upstreamHeaders,
-          agent: egress.getAgent(activeRoute, target.protocol),
-          timeout: attemptTimeout
-        }, (upstreamRes) => {
+        let requestOptions;
+        if (bridgeConnection) {
+          requestOptions = bridgeRequestOptions(bridgeConnection, target, upstreamHeaders, activeRoute);
+        } else {
+          requestOptions = {
+            hostname: target.hostname,
+            port: target.port,
+            path: target.path,
+            method: 'POST',
+            headers: upstreamHeaders,
+            agent: egress.getAgent(activeRoute, target.protocol)
+          };
+        }
+        requestOptions.timeout = attemptTimeout;
+        const requestTransport = bridgeConnection ? http : target.transport;
+        const upstreamReq = requestTransport.request(requestOptions, (upstreamRes) => {
           const contentType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
           const isValidContentType = contentType.includes('event-stream') || contentType.includes('application/json');
+          const bridgeError = bridgeConnection
+            ? String(upstreamRes.headers['x-opencode2api-bridge-error'] || '').toLowerCase()
+            : '';
+          if (bridgeConnection) bunBridge.markHealthy();
 
           if (upstreamRes.statusCode !== 200 || !isValidContentType) {
             let errBody = '';
@@ -1319,7 +1457,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
                 success: false,
                 statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
                 headers: upstreamRes.headers,
-                proxyFailure: !isValidContentType && activeRoute.type === 'proxy',
+                proxyFailure: bridgeError === 'proxy' || (!isValidContentType && activeRoute.type === 'proxy'),
+                viaBridge: !!bridgeConnection,
                 body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
               });
             });
@@ -1331,7 +1470,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
             statusCode: 200,
             upstreamRes,
             upstreamReq,
-            resolvedModel: currentModel
+            resolvedModel: currentModel,
+            viaBridge: !!bridgeConnection
           });
         });
 
@@ -1344,7 +1484,9 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
           resolve({
             success: false,
             statusCode: (isTimedOut || deadlineExceeded) ? 504 : 502,
-            proxyFailure: isProxyTransportError(err, activeRoute),
+            proxyFailure: !bridgeConnection && isProxyTransportError(err, activeRoute),
+            bridgeFailure: !!bridgeConnection && !isTimedOut && !deadlineExceeded,
+            viaBridge: !!bridgeConnection,
             body: deadlineExceeded ? 'Request deadline exceeded' : err.message
           });
         });
@@ -1357,7 +1499,9 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         success: false,
         statusCode: 502,
         headers: {},
-        proxyFailure: isProxyTransportError(err, activeRoute),
+        proxyFailure: !bridgeConnection && isProxyTransportError(err, activeRoute),
+        bridgeFailure: !!bridgeConnection,
+        viaBridge: !!bridgeConnection,
         body: err.message
       };
     }
@@ -1828,10 +1972,29 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     lastStatus = statusCode || 502;
     lastBody = bodyStr;
 
+    if (attemptResult.bridgeFailure) {
+      bunBridge.reportTransportFailure();
+      metrics.recordRequest({
+        model: requestedModel,
+        status: 503,
+        tokens: {},
+        latencyMs: Date.now() - startTime,
+        stream: isClientStream,
+        keyId: keyObj.id
+      });
+      sendAnthropicError(res, 503, 'bun_bridge_unavailable',
+        bunBridge.getUnavailableMessage(), { 'Retry-After': '5' });
+      return;
+    }
+
     if (failureKind === 'quota') {
       egress.recordFailure(activeRoute, 'quota', retryAfterMs || 60000);
       persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
-      const globalFreeQuota = isRequestedFree
+      const officialDirect = isDirectOfficialAttempt(officialUpstream, attemptResult);
+      if (officialDirect) {
+        console.warn(`[Proxy] Ignoring direct Node 429 for official Anthropic upstream (${routeLabel(activeRoute)}); Bun bridge did not carry this request.`);
+      }
+      const globalFreeQuota = isRequestedFree && !officialDirect
         ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
         : null;
       if (globalFreeQuota) {
@@ -1937,5 +2100,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
 module.exports = {
   handleChatCompletions,
-  handleAnthropicMessages
+  handleAnthropicMessages,
+  _test: {
+    isDirectOfficialAttempt
+  }
 };

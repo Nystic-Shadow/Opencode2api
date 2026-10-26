@@ -52,7 +52,9 @@ It is designed for **maximum best-effort availability** within upstream limits. 
 
 ### Upstream compatibility
 
+- Routes official inference through a loopback Bun bridge so the upstream TLS fingerprint matches the OpenCode CLI
 - Injects the core CLI tool schemas the upstream expects while preserving client-defined tools
+- Adds the CLI `<env>` context block to free-tier requests without replacing the caller's system prompt
 - Mints canonical descending `ses_...` session identifiers
 - Discovers models from OpenCode Zen every 10 minutes and strips `-free` / `_free` suffixes
 - Supports an upstream Zen key for paid models (`OPENCODE_ZEN_KEY`)
@@ -126,6 +128,7 @@ Key properties:
 | Queue | `8` concurrent globally, `4` per key, `100` waiting, `15s` wait |
 | Stream admission | Slot held for the full response, not released when headers arrive |
 | Quota | Route-level `429` cools and rotates; a global `FreeUsageLimitError` fails fast with the exact upstream reset |
+| Official upstream transport | Supervised loopback Bun bridge using the OpenCode CLI runtime; `/readyz` gates on bridge readiness |
 | Route failover | Round-robin for routing; network errors and `5xx` rotate to the next route |
 | Direct egress | Disabled by compose (`ALLOW_DIRECT_FALLBACK=false`) |
 
@@ -134,6 +137,7 @@ Key properties:
 ## Requirements
 
 - **Node.js 20+** for local runs (the Docker image uses `node:20-bookworm-slim`)
+- **OpenCode CLI** for the official free tier: `npm i -g @opencode/cli@2.1.4` (the Docker image installs it automatically). The gateway reuses the CLI's embedded Bun runtime for the upstream TLS handshake; Node's own fingerprint is rejected upstream. Set `BUN_BRIDGE_CLI_PATH` for non-standard installs.
 - **Docker + Docker Compose v2** for the recommended deployment
 - **No proxy configuration required.** The gateway discovers and verifies public HTTP/HTTPS/SOCKS5 routes automatically. Manual `PROXIES` entries are optional overrides.
 - No tunnel sidecar or `NET_ADMIN` capability is required
@@ -191,7 +195,7 @@ The stack contains:
 
 - `gateway` — the Node.js API gateway on port `8080`
 
-The gateway binds HTTP immediately; model discovery, automatic proxy discovery, and proxy health checks run in the background.
+The image includes the pinned OpenCode CLI runtime used for the official upstream transport. The gateway binds HTTP immediately; model discovery, automatic proxy discovery, and proxy health checks run in the background.
 
 ### 4. Verify
 
@@ -200,7 +204,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-`/readyz` returns `503` until at least one verified egress route and one model are available. It returns `200` when the gateway is ready to serve inference. First start normally returns `503` for 2–4 minutes while automatic discovery screens and verifies candidates.
+`/readyz` returns `503` until at least one verified egress route and one model are available. When the configured upstream is the official inference endpoint, it also requires the CLI Bun bridge to be ready; the `bun_bridge` object reports its state, process, and any last error. It returns `200` when the gateway is ready to serve inference. First start normally returns `503` for 2–4 minutes while automatic discovery screens and verifies candidates.
 
 If it stays `503`:
 
@@ -209,6 +213,8 @@ docker compose logs -f gateway
 ```
 
 Look for `ProxyDiscovery` lines showing verified routes and source health. Check that the gateway can reach `https://opencode.ai`. With no verified route, the dashboard shows `Discovering routes` and the latest discovery note. Automatic discovery retries more quickly when the pool is empty.
+
+If `/readyz` reports `bun_bridge.ready=false`, the CLI runtime could not be started. Look for `[BunBridge]` lines in the logs, confirm `opencode --version` works in the container, or point `BUN_BRIDGE_CLI_PATH` at the binary. Set `BUN_BRIDGE_ENABLED=false` only when using a non-official upstream; official free-tier inference needs the bridge.
 
 ### 5. Read the generated credentials
 

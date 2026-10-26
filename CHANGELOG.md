@@ -8,6 +8,15 @@ All notable changes to this project are documented in this file.
 
 > This release supersedes the quota-rotation and WARP-tunnel design described in the entries below. WARP support has been removed entirely. Egress is automatically discovered and verified HTTP/HTTPS/SOCKS5, with optional manual overrides.
 
+### Free-tier transport
+
+- **CLI Bun bridge**: the official inference gate rejects Node's TLS fingerprint with a `429` that the previous build could mistake for exhausted quota. The gateway now discovers the OpenCode CLI, starts `server/bunProxy.js` under the CLI's embedded Bun runtime (`BUN_BE_BUN=1`) on a random loopback port with a per-process random token, and forwards `/inference/*` through it while preserving SSE streaming. The bridge is supervised (health probe, exponential restart, parent-exit watchdog) and performs the per-request egress proxy hop inside Bun so route rotation still applies.
+- **No false quota poisoning**: a direct Node `429` from the official host is treated as a fingerprint rejection and no longer sets the global free-tier quota block. Only a request actually carried by the bridge (or a custom non-official upstream) can trip the fail-fast gate.
+- **Upstream context gate**: free-tier requests to the official endpoint append the CLI's `<env>` block (working directory, workspace root, git-repo flag, platform) to the existing system prompt instead of replacing it.
+- **Canonical inference path**: the default upstream is now `/inference/openai/v1/chat/completions`; the previously persisted `/inference/v1/chat/completions` is migrated in memory and still accepted.
+- **Readiness**: `/healthz` reports the bridge state and `/readyz` returns `503` while the bridge is required but not ready. `BUN_BRIDGE_ENABLED=false` disables the bridge; `BUN_BRIDGE_CLI_PATH` overrides CLI discovery.
+- **Docker**: the runtime image installs `@opencode/cli` at a pinned version (`OPENCODE_CLI_VERSION`, default `2.1.4`) so the documented Compose deployment keeps working free-tier inference.
+
 ### Behavior changes
 
 - **WARP removed**: server modules, admin endpoints, configuration, dashboard controls, install scripts, and container wiring are gone.
@@ -43,7 +52,7 @@ All notable changes to this project are documented in this file.
 
 ### Testing
 
-- `npm test` runs the security suite plus the 47-test reliability suite covering proxy parsing (including IPv6), SOCKS5 frames, retry classification, quota cooldown, round-robin selection, quota failover, direct-fallback preference, 5x health-check gating, failed-sweep persistence, immediate tunnel-failure backoff, interval clamping, manual pruning, automatic-discovery parsing/filtering/cooldowns/five-probe gating/capacity/source failures, mid-run discovery disable, manual/automatic pool merging, automatic-route pruning, the global free-quota gate (exact reset, no shortening, default block, clear on success), and queue limits/timeouts.
+- `npm test` runs the security suite plus the 54-test reliability suite covering proxy parsing (including IPv6), SOCKS5 frames, retry classification, quota cooldown, round-robin selection, quota failover, direct-fallback preference, 5x health-check gating, failed-sweep persistence, immediate tunnel-failure backoff, interval clamping, manual pruning, automatic-discovery parsing/filtering/cooldowns/five-probe gating/capacity/source failures, mid-run discovery disable, manual/automatic pool merging, automatic-route pruning, the global free-quota gate (exact reset, no shortening, default block, clear on success), queue limits/timeouts, and the Bun bridge (CLI discovery, official-URL detection, proxy URL/header round-trip, required/ready status, direct-429 quota guard, and `<env>` gate injection).
 - `npm run check:proxies` runs automatic discovery when enabled and/or the real five-probe, 5-second verification, prints live progress, then exits non-zero when no route is healthy.
 - Live zero-config run: 13/13 sources, 800 candidates screened, 20/20 routes verified in about 280 seconds, `/healthz` and `/readyz` returned `200`, and the recheck/prune endpoints completed without error. A real chat request fanned out across 10 verified routes; every route received the same upstream `FreeUsageLimitError`, confirming that proxies cannot bypass account-wide free-tier quota.
 - Verified round-robin quota failover against a local mock 429 upstream through both an HTTP CONNECT proxy and a SOCKS5 proxy: two upstream attempts, `429` with `Retry-After`, then an immediate `429` with no extra upstream hits while both routes were cooling, then fresh attempts after the cooldown.

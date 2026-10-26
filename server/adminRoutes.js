@@ -413,6 +413,20 @@ async function handleAdminRoute(req, res, pathname) {
     });
   }
 
+  // Clear upstream free quota cooldown and route quota failures
+  if (pathname === '/api/proxies/clear-quota' && req.method === 'POST') {
+    upstreamQuota.clear();
+    egress.clearAllQuotaFailures();
+    notifications.add('Quota Cleared', 'Upstream free quota cooldown and route quota failures have been reset.', 'info');
+    return sendJson(res, 200, {
+      success: true,
+      message: 'Upstream free quota cooldown and route quota failures cleared',
+      ...egress.getProxyStatus(),
+      autoDiscovery: proxyDiscovery.getStatus(),
+      upstreamQuota: upstreamQuota.getStatus()
+    });
+  }
+
   // Re-run 5x health checks and refresh the automatic pool.
   if (pathname === '/api/proxies/recheck' && req.method === 'POST') {
     egress.recheckNow().catch(err => console.warn('[Admin] Proxy recheck failed:', err.message));

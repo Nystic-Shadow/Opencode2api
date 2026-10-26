@@ -492,7 +492,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       break;
     }
 
-    const upstreamModel = discovery.resolveUpstreamModel(currentModel);
+    let upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const routeKey = activeRoute.id;
 
     const session = persistentSessions.getOrCreate(keyObj?.id || 'anonymous', routeKey);
@@ -1421,7 +1421,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       break;
     }
 
-    const upstreamModel = discovery.resolveUpstreamModel(currentModel);
+    let upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const routeKey = activeRoute.id;
 
     const session = persistentSessions.getOrCreate(keyObj?.id || 'anonymous', routeKey);
@@ -2058,6 +2058,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         if (fallback) {
           console.warn(`[Proxy] Anthropic model ${currentModel} returned quota 429 on ${routeLabel(activeRoute)}. Smart failover to ${fallback}...`);
           currentModel = fallback;
+          upstreamModel = discovery.resolveUpstreamModel(currentModel);
           triedModels.add(fallback);
           attemptedRoutes.clear();
           activeRoute = egress.selectRoute() || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') ? { type: 'direct', id: 'direct' } : null);

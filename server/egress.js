@@ -825,6 +825,14 @@ class EgressManager {
     return earliest;
   }
 
+  clearAllQuotaFailures() {
+    for (const [key, health] of this.health) {
+      if (health && health.retryAfterUntil > 0) {
+        health.retryAfterUntil = 0;
+      }
+    }
+  }
+
   _allowDirect() {
     return config.get('allow_direct_fallback') === true;
   }

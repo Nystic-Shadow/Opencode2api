@@ -1016,26 +1016,28 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
     if (attemptResult.bridgeFailure) {
       bunBridge.reportTransportFailure();
-      console.warn(`[Proxy] Bun bridge transport error for ${currentModel} on ${routeLabel(activeRoute)}; attempting recovery and route failover.`);
+      egress.recordFailure(activeRoute, 'proxy_down');
+      console.warn(`[Proxy] Bun bridge connection dropped on route ${routeLabel(activeRoute)}; attempting recovery and failover.`);
       try { await bunBridge.ensureReady(2000); } catch (e) {}
       const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
-      if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
-        quotaFailovers++;
+      if (nextRoute && Date.now() < deadline) {
         activeRoute = nextRoute;
         attemptedRoutes.add(activeRoute.id);
         continue;
       }
-      metrics.recordRequest({
-        model: requestedModel,
-        status: 503,
-        tokens: {},
-        latencyMs: Date.now() - startTime,
-        stream: isClientStream,
-        keyId: keyObj.id
-      });
-      sendJsonError(res, 503, 'bun_bridge_unavailable',
-        bunBridge.getUnavailableMessage(), { 'Retry-After': '5' });
-      return;
+      if (!bunBridge.isReady()) {
+        metrics.recordRequest({
+          model: requestedModel,
+          status: 503,
+          tokens: {},
+          latencyMs: Date.now() - startTime,
+          stream: isClientStream,
+          keyId: keyObj.id
+        });
+        sendJsonError(res, 503, 'bun_bridge_unavailable',
+          bunBridge.getUnavailableMessage(), { 'Retry-After': '5' });
+        return;
+      }
     }
 
     if (failureKind === 'quota') {
@@ -2039,26 +2041,28 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
     if (attemptResult.bridgeFailure) {
       bunBridge.reportTransportFailure();
-      console.warn(`[Proxy] Bun bridge transport error for Anthropic ${currentModel} on ${routeLabel(activeRoute)}; attempting recovery and route failover.`);
+      egress.recordFailure(activeRoute, 'proxy_down');
+      console.warn(`[Proxy] Bun bridge connection dropped on Anthropic route ${routeLabel(activeRoute)}; attempting recovery and failover.`);
       try { await bunBridge.ensureReady(2000); } catch (e) {}
       const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
-      if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
-        quotaFailovers++;
+      if (nextRoute && Date.now() < deadline) {
         activeRoute = nextRoute;
         attemptedRoutes.add(activeRoute.id);
         continue;
       }
-      metrics.recordRequest({
-        model: requestedModel,
-        status: 503,
-        tokens: {},
-        latencyMs: Date.now() - startTime,
-        stream: isClientStream,
-        keyId: keyObj.id
-      });
-      sendAnthropicError(res, 503, 'bun_bridge_unavailable',
-        bunBridge.getUnavailableMessage(), { 'Retry-After': '5' });
-      return;
+      if (!bunBridge.isReady()) {
+        metrics.recordRequest({
+          model: requestedModel,
+          status: 503,
+          tokens: {},
+          latencyMs: Date.now() - startTime,
+          stream: isClientStream,
+          keyId: keyObj.id
+        });
+        sendAnthropicError(res, 503, 'bun_bridge_unavailable',
+          bunBridge.getUnavailableMessage(), { 'Retry-After': '5' });
+        return;
+      }
     }
 
     if (failureKind === 'quota') {

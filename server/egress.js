@@ -356,7 +356,7 @@ class EgressManager {
     const seen = new Set();
     const nextAuto = [];
     const capacity = this.getAutoCapacity();
-    const list = Array.isArray(entries) ? entries : [];
+    const list = Array.isArray(entries) ? [...entries].sort((a, b) => (a.latency || 9999) - (b.latency || 9999)) : [];
 
     for (const entry of list) {
       if (nextAuto.length >= capacity) break;
@@ -893,21 +893,43 @@ class EgressManager {
   selectRoute(routes = null) {
     const pool = Array.isArray(routes) ? routes : this.getRoutableRoutes();
     if (pool.length === 0) return null;
-    const index = this.routeCursor % pool.length;
-    this.routeCursor = (index + 1) % pool.length;
-    return pool[index];
+    const sorted = [...pool].sort((a, b) => {
+      const latA = this.proxyChecks.get(a.id)?.latency ?? a.latency ?? 0;
+      const latB = this.proxyChecks.get(b.id)?.latency ?? b.latency ?? 0;
+      if (latA !== latB) return latA - latB;
+      return 0;
+    });
+    // Round-robin among the fastest pool (up to 12 fastest routes for high throughput and ultra-low latency)
+    const tierSize = Math.min(12, sorted.length);
+    const index = this.routeCursor % tierSize;
+    this.routeCursor = (index + 1) % tierSize;
+    return sorted[index];
   }
 
   getNextRoutableRoute(attempted = null) {
     const excluded = attempted instanceof Set ? attempted : new Set(attempted || []);
-    const verified = this.getRoutableRoutes().find(route => !excluded.has(route.id));
-    if (verified) return verified;
+    const verified = this.getRoutableRoutes().filter(route => !excluded.has(route.id));
+    if (verified.length > 0) {
+      verified.sort((a, b) => {
+        const latA = this.proxyChecks.get(a.id)?.latency ?? a.latency ?? 0;
+        const latB = this.proxyChecks.get(b.id)?.latency ?? b.latency ?? 0;
+        return latA - latB;
+      });
+      return verified[0];
+    }
     // Verified proxies may all have been attempted (for example after a quota
     // cooldown). Fall back to unchecked-but-available proxies rather than
     // returning a 429 while part of the pool has never been tried.
     const unverified = this.getRoutableRoutes({ includeUnverified: true })
-      .find(route => !excluded.has(route.id));
-    if (unverified) return unverified;
+      .filter(route => !excluded.has(route.id));
+    if (unverified.length > 0) {
+      unverified.sort((a, b) => {
+        const latA = this.proxyChecks.get(a.id)?.latency ?? a.latency ?? 0;
+        const latB = this.proxyChecks.get(b.id)?.latency ?? b.latency ?? 0;
+        return latA - latB;
+      });
+      return unverified[0];
+    }
     const candidates = this.getCandidates({ includeQuota: false });
     return candidates.find(route => route.type === 'direct' && !excluded.has(route.id)) || null;
   }

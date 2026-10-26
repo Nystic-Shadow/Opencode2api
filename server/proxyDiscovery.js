@@ -5,13 +5,14 @@ const config = require('./config');
 
 const DISCOVERY_INTERVAL_MS = 10 * 60 * 1000;
 const EMPTY_RETRY_MS = [3 * 60 * 1000, 6 * 60 * 1000, 10 * 60 * 1000];
-const SCREEN_TIMEOUT_MS = 3500;
-const VERIFY_TIMEOUT_MS = 4000;
+const SCREEN_TIMEOUT_MS = 2500;
+const VERIFY_TIMEOUT_MS = 3000;
 const VERIFY_CHECKS = 5;
+const MAX_VERIFIED_LATENCY_MS = 2000;
 const AUTO_TARGET = 100;
 const MAX_SCREEN_CANDIDATES = 4000;
-const SCREEN_CONCURRENCY = 64;
-const VERIFY_CONCURRENCY = 16;
+const SCREEN_CONCURRENCY = 80;
+const VERIFY_CONCURRENCY = 20;
 const SCREEN_FAIL_COOLDOWN_MS = 15 * 60 * 1000;
 const VERIFY_FAIL_COOLDOWN_MS = 30 * 60 * 1000;
 const REMOVED_COOLDOWN_MS = 30 * 60 * 1000;
@@ -639,7 +640,9 @@ class ProxyDiscovery {
       }
       if (!passed) return { ok: false, latency: 0 };
     }
-    return { ok: true, latency: Math.round((Date.now() - started) / VERIFY_CHECKS) };
+    const avgLatency = Math.round((Date.now() - started) / VERIFY_CHECKS);
+    if (avgLatency > MAX_VERIFIED_LATENCY_MS) return { ok: false, latency: avgLatency };
+    return { ok: true, latency: avgLatency };
   }
 
   _syncEgress() {

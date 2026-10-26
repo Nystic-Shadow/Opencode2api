@@ -88,16 +88,25 @@ export default function Sidebar({ activeTab, setActiveTab, cliVersion }) {
 
       {/* Footer Info */}
       <div style={{
-        padding: '1rem',
+        padding: '0.85rem 1rem',
         borderTop: '1px solid var(--sidebar-border)',
-        fontSize: '0.75rem',
+        fontSize: '0.72rem',
         color: 'var(--muted-foreground)'
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.25rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.2rem' }}>
           <FiShield size={12} color="var(--primary)" />
           <span style={{ fontWeight: '600', color: 'var(--sidebar-foreground)' }}>Proxy Egress</span>
         </div>
-        <div>Explicit pool, fail-closed routing</div>
+        <div style={{ marginBottom: '0.5rem' }}>Explicit pool, fail-closed routing</div>
+        <div style={{ 
+          fontSize: '0.62rem', 
+          color: 'var(--muted-foreground)', 
+          opacity: 0.8,
+          borderTop: '1px solid var(--sidebar-border)',
+          paddingTop: '0.4rem'
+        }}>
+          ⚠️ For Educational &amp; Research Use Only
+        </div>
       </div>
     </aside>
   );

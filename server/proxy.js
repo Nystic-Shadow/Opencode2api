@@ -1030,6 +1030,15 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
         : null;
 
+      // Fast Direct Fallback: if a proxy route returned quota, try direct route for this model before trying other proxies or models
+      if (activeRoute && activeRoute.type !== 'direct' && (config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct')) {
+        const failedRoute = activeRoute;
+        activeRoute = { type: 'direct', id: 'direct' };
+        attemptedRoutes.add('direct');
+        console.warn(`[Proxy] Route ${routeLabel(failedRoute)} returned quota for ${currentModel}; attempting direct egress route.`);
+        continue;
+      }
+
       // Smart Fallback: if model hit free usage limit or quota 429, auto-failover to next healthy free model
       if (config.get('smart_fallback') !== false && isRequestedFree) {
         const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
@@ -1052,15 +1061,6 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         activeRoute = nextRoute;
         attemptedRoutes.add(activeRoute.id);
         console.warn(`[Proxy] Upstream quota on ${routeLabel(failedRoute)} for ${currentModel}; trying ${routeLabel(activeRoute)} (${quotaFailovers}/${quotaFailoverLimit}).`);
-        continue;
-      }
-
-      // Try direct egress before giving up
-      if (activeRoute && activeRoute.type !== 'direct' && (config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct')) {
-        const failedRoute = activeRoute;
-        activeRoute = { type: 'direct', id: 'direct' };
-        attemptedRoutes.add('direct');
-        console.warn(`[Proxy] All proxies returned quota for ${currentModel}; falling back to direct egress.`);
         continue;
       }
 
@@ -2052,6 +2052,15 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         ? upstreamQuota.recordFailure({ statusCode, body: bodyStr, retryAfterMs, model: currentModel })
         : null;
 
+      // Fast Direct Fallback: if a proxy route returned quota, try direct route for this model before trying other proxies or models
+      if (activeRoute && activeRoute.type !== 'direct' && (config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct')) {
+        const failedRoute = activeRoute;
+        activeRoute = { type: 'direct', id: 'direct' };
+        attemptedRoutes.add('direct');
+        console.warn(`[Proxy] Route ${routeLabel(failedRoute)} returned quota for Anthropic model ${currentModel}; attempting direct egress route.`);
+        continue;
+      }
+
       // Smart Fallback to another free model on Anthropic 429 quota
       if (config.get('smart_fallback') !== false && isRequestedFree) {
         const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
@@ -2074,15 +2083,6 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         activeRoute = nextRoute;
         attemptedRoutes.add(activeRoute.id);
         console.warn(`[Proxy] Upstream quota on ${routeLabel(failedRoute)} for Anthropic model ${currentModel}; trying ${routeLabel(activeRoute)} (${quotaFailovers}/${quotaFailoverLimit}).`);
-        continue;
-      }
-
-      // Try direct egress before giving up
-      if (activeRoute && activeRoute.type !== 'direct' && (config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct')) {
-        const failedRoute = activeRoute;
-        activeRoute = { type: 'direct', id: 'direct' };
-        attemptedRoutes.add('direct');
-        console.warn(`[Proxy] All proxies returned quota for Anthropic model ${currentModel}; falling back to direct egress.`);
         continue;
       }
 

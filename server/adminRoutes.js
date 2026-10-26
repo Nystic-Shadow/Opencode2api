@@ -7,6 +7,7 @@ const updater = require('./updater');
 const notifications = require('./notifications');
 const proxy = require('./proxy');
 const egress = require('./egress');
+const proxyDiscovery = require('./proxyDiscovery');
 
 // In-memory admin sessions with 24-hour TTL (H4)
 const sessions = new Map(); // token -> { createdAt, lastActive, username }
@@ -350,6 +351,9 @@ async function handleAdminRoute(req, res, pathname) {
     if (body.proxy_auto_prune_dead !== undefined) {
       updates.proxy_auto_prune_dead = body.proxy_auto_prune_dead === true || body.proxy_auto_prune_dead === 'true';
     }
+    if (body.auto_proxy_discovery !== undefined) {
+      updates.auto_proxy_discovery = body.auto_proxy_discovery === true || body.auto_proxy_discovery === 'true';
+    }
     if (body.global_rpm_limit !== undefined) updates.global_rpm_limit = parseInt(body.global_rpm_limit, 10) || 0;
     if (body.global_tpm_limit !== undefined) updates.global_tpm_limit = parseInt(body.global_tpm_limit, 10) || 0;
     if (body.upstream_zen_key !== undefined) {
@@ -363,7 +367,7 @@ async function handleAdminRoute(req, res, pathname) {
     if (Object.keys(body).some(key => key.startsWith('warp_'))) {
       // WARP was removed. Accepting these fields silently would leave an
       // operator believing egress is tunneled when it is not.
-      return sendJson(res, 400, { error: 'WARP support has been removed. Configure PROXIES for egress.' });
+      return sendJson(res, 400, { error: 'WARP support has been removed. Automatic proxy discovery is built in; set PROXIES only to add your own routes.' });
     }
     if (body.proxies !== undefined) {
       const existingProxies = Array.isArray(config.get('proxies')) ? config.get('proxies') : [];
@@ -402,32 +406,47 @@ async function handleAdminRoute(req, res, pathname) {
     return sendJson(res, 200, { success: true });
   }
 
-  // Explicit egress proxy pool: Status
+  // Automatic discovery + explicit egress pool: Status
   if (pathname === '/api/proxies/status' && req.method === 'GET') {
-    return sendJson(res, 200, egress.getProxyStatus());
+    return sendJson(res, 200, {
+      ...egress.getProxyStatus(),
+      autoDiscovery: proxyDiscovery.getStatus()
+    });
   }
 
-  // Explicit egress proxy pool: Re-run 5x health checks
+  // Re-run 5x health checks and refresh the automatic pool.
   if (pathname === '/api/proxies/recheck' && req.method === 'POST') {
     egress.recheckNow().catch(err => console.warn('[Admin] Proxy recheck failed:', err.message));
-    notifications.add('Proxy Health Sweep Started', '5x health checks initiated for the configured egress proxy pool.', 'info');
-    return sendJson(res, 200, { success: true, message: 'Proxy health checks started', ...egress.getProxyStatus() });
+    if (proxyDiscovery.isEnabled()) {
+      proxyDiscovery.refreshNow().catch(err => console.warn('[Admin] Proxy discovery refresh failed:', err.message));
+    }
+    notifications.add('Proxy Health Sweep Started', '5x health checks and automatic proxy discovery refresh initiated for the egress pool.', 'info');
+    return sendJson(res, 200, {
+      success: true,
+      message: 'Proxy health checks and discovery started',
+      ...egress.getProxyStatus(),
+      autoDiscovery: proxyDiscovery.getStatus()
+    });
   }
 
-  // Explicit egress proxy pool: remove proxies whose latest 5x check failed
+  // Remove proxies whose latest 5x check failed, then replenish automatically.
   if (pathname === '/api/proxies/prune' && req.method === 'POST') {
     const result = egress.pruneFailed();
     if (result.removed > 0) {
       notifications.add(
         'Dead Proxies Removed',
-        `${result.removed} failed prox${result.removed === 1 ? 'y was' : 'ies were'} removed from the configured pool.`,
+        `${result.removed} failed route${result.removed === 1 ? ' was' : 's were'} removed from the egress pool. Automatic discovery will replenish the pool.`,
         'warning'
       );
+      if (proxyDiscovery.isEnabled()) {
+        proxyDiscovery.refreshNow().catch(err => console.warn('[Admin] Proxy replenish failed:', err.message));
+      }
     }
     return sendJson(res, 200, {
       success: true,
       ...result,
-      ...egress.getProxyStatus()
+      ...egress.getProxyStatus(),
+      autoDiscovery: proxyDiscovery.getStatus()
     });
   }
 

@@ -3,6 +3,17 @@ import { FiSettings, FiRefreshCw, FiCheck, FiSliders, FiCpu } from '../component
 import CustomToggle from '../components/CustomToggle';
 import CustomSelect from '../components/CustomSelect';
 
+function formatWhen(timestamp) {
+  if (!timestamp) return 'waiting';
+  const diffMs = timestamp - Date.now();
+  const absMs = Math.abs(diffMs);
+  let text;
+  if (absMs < 60000) text = `${Math.max(1, Math.round(absMs / 1000))}s`;
+  else if (absMs < 3600000) text = `${Math.round(absMs / 60000)}m`;
+  else text = `${Math.round(absMs / 3600000)}h`;
+  return diffMs >= 0 ? `in ${text}` : `${text} ago`;
+}
+
 export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate, isCheckingUpdate }) {
   const [username, setUsername] = useState(settings.admin_username || 'admin');
   const [password, setPassword] = useState('');
@@ -13,6 +24,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [proxyQuotaFailovers, setProxyQuotaFailovers] = useState(settings.proxy_quota_failovers ?? 10);
   const [proxyCheckInterval, setProxyCheckInterval] = useState(settings.proxy_check_interval_minutes ?? 30);
   const [proxyAutoPrune, setProxyAutoPrune] = useState(settings.proxy_auto_prune_dead !== false);
+  const [autoProxyDiscovery, setAutoProxyDiscovery] = useState(settings.auto_proxy_discovery !== false);
   const [upstreamZenKey, setUpstreamZenKey] = useState(settings.upstream_zen_key || '');
   const [proxies, setProxies] = useState(Array.isArray(settings.proxies) ? settings.proxies.join('\n') : (settings.proxies || ''));
   const [globalRpm, setGlobalRpm] = useState(settings.global_rpm_limit || 0);
@@ -45,7 +57,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
 
   const handleRescanProxies = async () => {
     setIsRescanningProxies(true);
-    setProxyFeedback('Proxy sweep initiated! Checking candidate endpoints directly against opencode.ai with strict 5x tests...');
+    setProxyFeedback('Refreshing automatic discovery and starting a full 5x health sweep...');
     try {
       const token = localStorage.getItem('o2p_token');
       const res = await fetch('/api/proxies/recheck', {
@@ -55,7 +67,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
       if (res.ok) {
         const data = await res.json();
         setProxyStatus(data);
-        setProxyFeedback('5x health checks running in background. Failed routes leave rotation until a later sweep passes; two failed sweeps remove them when auto-prune is on.');
+        setProxyFeedback('Refresh started. New routes only enter rotation after five consecutive TLS probes pass; failed routes stay out until a later sweep.');
       }
       setTimeout(() => setProxyFeedback(null), 5000);
     } catch (e) {
@@ -77,8 +89,8 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
       if (!res.ok) throw new Error(data.error || 'Failed to remove failed proxies');
       setProxyStatus(data);
       setProxyFeedback(data.removed > 0
-        ? `Removed ${data.removed} failed prox${data.removed === 1 ? 'y' : 'ies'} from the configured pool.`
-        : 'No failed proxies to remove.');
+        ? `Removed ${data.removed} failed route${data.removed === 1 ? '' : 's'}. Automatic discovery will refill the pool.`
+        : 'No failed routes to remove.');
       setTimeout(() => setProxyFeedback(null), 5000);
     } catch (e) {
       setProxyFeedback('Prune error: ' + e.message);
@@ -102,6 +114,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         proxy_quota_failovers: Math.min(20, Math.max(0, parseInt(proxyQuotaFailovers, 10) || 0)),
         proxy_check_interval_minutes: Math.min(1440, Math.max(1, parseInt(proxyCheckInterval, 10) || 30)),
         proxy_auto_prune_dead: proxyAutoPrune,
+        auto_proxy_discovery: autoProxyDiscovery,
         upstream_zen_key: upstreamZenKey.trim(),
         proxies: proxies.split('\n').map(p => p.trim()).filter(Boolean),
         global_rpm_limit: parseInt(globalRpm, 10),
@@ -191,15 +204,23 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                 Egress Proxy Pool
               </h3>
               <span className={`badge ${proxyStatus?.verifiedCount > 0 ? 'badge-active' : 'badge-idle'}`}>
-                {proxyStatus?.isScanning
-                  ? '5x health check...'
-                  : (proxyStatus?.configuredCount === 0
-                    ? 'Not configured'
-                    : (proxyStatus?.verifiedCount > 0 ? `${proxyStatus.verifiedCount} healthy` : 'No usable proxies'))}
+                {proxyStatus?.isScanning || proxyStatus?.autoDiscovery?.running
+                  ? 'Refreshing routes...'
+                  : (proxyStatus?.verifiedCount > 0
+                    ? `${proxyStatus.verifiedCount} healthy`
+                    : ((proxyStatus?.autoDiscovery?.enabled ?? autoProxyDiscovery) ? 'Discovering routes' : 'No routes'))}
               </span>
             </div>
             <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', margin: 0 }}>
-              Explicit <code>PROXIES</code> only, maximum 100, and no public-proxy scraping. Every proxy is swept in the background every {proxyStatus?.checkIntervalMinutes || 30} minutes with five consecutive 5-second probes. A failed route leaves rotation until a later sweep passes; two failed sweeps remove it when auto-prune is on (the last entry is kept). Requests use healthy proxies round-robin and fail over immediately if a tunnel dies. An upstream 429 cools that route and tries the next routable proxy (bounded by <code>PROXY_QUOTA_FAILOVERS</code>). Proxies mitigate per-IP limits; they cannot remove account-wide quota.
+              <strong>Zero-config by default.</strong> The gateway discovers public HTTP/HTTPS/SOCKS5 candidates, probes each one
+              directly against the configured upstream with TLS verification, and only adds endpoints that pass
+              five consecutive 5-second checks. It keeps up to {proxyStatus?.autoDiscovery?.target || 20} automatic
+              routes, refreshed every {proxyStatus?.autoDiscovery?.intervalMinutes || 10} minutes, and rechecks the
+              full pool every {proxyStatus?.checkIntervalMinutes || 30} minutes. Failed routes leave rotation until a
+              later sweep passes; two failed sweeps remove them when auto-prune is on. Requests use healthy routes
+              round-robin and fail over immediately when a tunnel dies. An upstream 429 cools that route and tries the
+              next routable one (bounded by <code>PROXY_QUOTA_FAILOVERS</code>). Manual proxies below are optional and
+              take precedence. Proxies mitigate per-IP limits; they cannot remove account-wide quota.
             </p>
           </div>
 
@@ -223,7 +244,24 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             fontSize: '0.8rem',
             lineHeight: 1.5
           }}>
-            <strong>No proxies configured.</strong> Add one or more explicit HTTP, HTTPS, or SOCKS5 proxy URLs in the field below and click <em>Save Settings</em>. Nothing is scraped automatically.
+            {(proxyStatus?.autoDiscovery?.enabled ?? autoProxyDiscovery) ? (
+              <>
+                <strong>Discovering verified egress routes.</strong> The pool is empty while public candidates are screened and
+                verified. Only routes that pass five consecutive TLS probes enter rotation, so the first start normally
+                takes 2–4 minutes. Automatic refresh runs every {proxyStatus?.autoDiscovery?.intervalMinutes || 10} minutes.
+                {proxyStatus?.autoDiscovery?.lastError && (
+                  <div style={{ marginTop: '0.35rem', color: 'var(--muted-foreground)' }}>
+                    Last discovery note: {proxyStatus.autoDiscovery.lastError}
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <strong>Automatic discovery is off and no manual proxies are configured.</strong> Enable automatic proxy
+                discovery below or add explicit routes. Until a route is verified, inference returns
+                <code> 503 no_egress_route</code>.
+              </>
+            )}
             {proxyStatus?.configuredViaEnv && (
               <div style={{ marginTop: '0.35rem', color: 'var(--muted-foreground)' }}>
                 <code>PROXIES</code> is present in the environment, but no valid entries were loaded. Check the URL format and restart the gateway.
@@ -254,7 +292,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
           border: '1px solid var(--border)'
         }}>
           <div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Healthy / Configured</div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Healthy / Pool</div>
             <div style={{ fontSize: '1.1rem', fontWeight: '800', color: '#2fbc5b' }}>
               {proxyStatus?.verifiedCount || 0} / {proxyStatus?.configuredCount || 0}
             </div>
@@ -266,33 +304,57 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
             </div>
           </div>
           <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Automatic / Manual</div>
+            <div style={{ fontSize: '1.1rem', fontWeight: '800', color: 'var(--foreground)' }}>
+              {proxyStatus?.autoCount || 0} / {proxyStatus?.manualCount || 0}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Discovery Verified</div>
+            <div style={{ fontSize: '1.1rem', fontWeight: '800', color: 'var(--foreground)' }}>
+              {proxyStatus?.autoDiscovery?.verifiedCount || 0} / {proxyStatus?.autoDiscovery?.target || 20}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Proxy Sources</div>
+            <div style={{ fontSize: '1.1rem', fontWeight: '800', color: 'var(--foreground)' }}>
+              {proxyStatus?.autoDiscovery?.sourcesOk || 0} / {proxyStatus?.autoDiscovery?.sourcesTotal || 0}
+            </div>
+          </div>
+          <div>
             <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Failed / Disabled</div>
             <div style={{ fontSize: '1.1rem', fontWeight: '800', color: (proxyStatus?.failedCount || 0) > 0 ? '#e05555' : 'var(--foreground)' }}>
               {proxyStatus?.failedCount || 0}
             </div>
           </div>
           <div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Auto Recheck</div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Discovery Refresh</div>
+            <div style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--foreground)' }}>
+              {formatWhen(proxyStatus?.autoDiscovery?.lastRefreshAt)} → {formatWhen(proxyStatus?.autoDiscovery?.nextRefreshAt)}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Background Sweep</div>
             <div style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--foreground)' }}>
               Every {proxyStatus?.checkIntervalMinutes || 30} min
             </div>
           </div>
           <div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Fastest Proxy Latency</div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Fastest Route</div>
             <div style={{ fontSize: '1.1rem', fontWeight: '800', color: 'var(--foreground)' }}>
               {proxyStatus?.fastestProxy ? `${proxyStatus.fastestProxy.latency}ms` : 'None'}
             </div>
           </div>
           <div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Validation Strictness</div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Validation</div>
             <div style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--foreground)' }}>
-              5x Passes, 5s Timeout
+              5x TLS, 5s Timeout
             </div>
           </div>
           <div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Pool Limit</div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted-foreground)' }}>Capacity</div>
             <div style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--foreground)' }}>
-              {proxyStatus?.maxPool || 100} explicit proxies
+              {proxyStatus?.maxPool || 100} total / {proxyStatus?.autoDiscovery?.configuredTarget || 20} auto
             </div>
           </div>
         </div>
@@ -320,7 +382,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                 >
                   <span style={{ color: '#2fbc5b', fontWeight: '700' }}>{p.latency}ms</span>
                   <span style={{ color: 'var(--foreground)' }}>{p.endpoint}</span>
-                  <span style={{ color: 'var(--muted-foreground)', fontSize: '0.65rem' }}>({p.passes}/5 ✓)</span>
+                  <span style={{ color: 'var(--muted-foreground)', fontSize: '0.65rem' }}>({p.passes}/5 ✓ · {p.source})</span>
                 </div>
               ))}
             </div>
@@ -501,18 +563,30 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         {/* Upstream Proxies (Optional) */}
         <div>
           <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
-            Upstream Proxies / Rotating Pool (Optional)
+            Manual Proxies (Optional)
           </label>
           <textarea
             className="input-field"
             style={{ width: '100%', height: '70px', fontFamily: 'monospace', resize: 'vertical' }}
-            placeholder="http://user:pass@host:port (one per line, supports rotating proxy pools)"
+            placeholder="http://user:pass@host:port (one per line)"
             value={proxies}
             onChange={e => setProxies(e.target.value)}
           />
           <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
-            Explicit HTTP, HTTPS, or SOCKS5 proxies (maximum 100). Entries may share host:port when their credentials select different egress IPs. The pool is swept automatically; failed routes leave rotation until a later sweep passes. Requests use healthy proxies round-robin and fail over immediately when a tunnel dies. An upstream 429 cools that route and tries the next within the quota budget. No public proxies are scraped.
+            Explicit HTTP, HTTPS, or SOCKS5 routes (maximum 100). Automatic discovery is on by default; manual entries take precedence over a discovered route with the same endpoint and are never removed by discovery. Every route must pass five consecutive 5-second probes.
           </span>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border)' }}>
+            <div>
+              <div style={{ fontSize: '0.75rem', fontWeight: '600' }}>Automatic Proxy Discovery</div>
+              <div style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)', lineHeight: 1.4 }}>
+                Discover, verify, rotate, and prune public egress routes without any manual proxy setup. Recommended.
+              </div>
+            </div>
+            <CustomToggle
+              checked={autoProxyDiscovery}
+              onChange={setAutoProxyDiscovery}
+            />
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.75rem' }}>
             <div>
               <label style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', display: 'block', marginBottom: '0.25rem' }}>
@@ -529,14 +603,14 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                 required
               />
               <span style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)' }}>
-                Default 30. Every configured proxy is checked in the background at this interval, even with no traffic.
+                Default 30. Every routed proxy is checked in the background at this interval, even with no traffic.
               </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
               <div>
                 <div style={{ fontSize: '0.75rem', fontWeight: '600' }}>Auto-Remove Dead Proxies</div>
                 <div style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)', lineHeight: 1.4 }}>
-                  After two consecutive failed 5x sweeps. The last remaining entry is kept so the pool can recover.
+                  After two consecutive failed 5x sweeps. Discovery replenishes automatic routes; the last manual entry is kept.
                 </div>
               </div>
               <CustomToggle

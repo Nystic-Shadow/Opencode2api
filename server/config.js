@@ -99,6 +99,7 @@ const DEFAULT_CONFIG = {
   proxy_quota_failovers: parseInt(process.env.PROXY_QUOTA_FAILOVERS, 10) || 10,
   proxy_check_interval_minutes: parseInt(process.env.PROXY_CHECK_INTERVAL_MINUTES, 10) || 30,
   proxy_auto_prune_dead: process.env.PROXY_AUTO_PRUNE_DEAD !== 'false',
+  auto_proxy_discovery: process.env.AUTO_PROXY_DISCOVERY !== 'false',
   request_timeout_ms: parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 30000,
   request_deadline_ms: parseInt(process.env.REQUEST_DEADLINE_MS, 10) || 90000,
   queue_max_concurrent: parseInt(process.env.QUEUE_MAX_CONCURRENT, 10) || 8,
@@ -167,6 +168,11 @@ class ConfigManager {
       for (const key of Object.keys(this.config)) {
         if (key.startsWith('warp_')) delete this.config[key];
       }
+      // The old scraper controls were never wired to the request path. They are
+      // superseded by the verified automatic discovery lifecycle.
+      for (const key of Object.keys(this.config)) {
+        if (key.startsWith('proxy_scraper_')) delete this.config[key];
+      }
 
       // Explicit environment / .env variables ALWAYS take strict precedence over cached disk values:
       if (process.env.DASHBOARD_USER && process.env.DASHBOARD_USER.trim()) {
@@ -222,6 +228,9 @@ class ConfigManager {
       this.config.proxy_auto_prune_dead = process.env.PROXY_AUTO_PRUNE_DEAD !== undefined
         ? process.env.PROXY_AUTO_PRUNE_DEAD !== 'false'
         : this.config.proxy_auto_prune_dead !== false;
+      this.config.auto_proxy_discovery = process.env.AUTO_PROXY_DISCOVERY !== undefined
+        ? !/^(false|0|no|off)$/i.test(String(process.env.AUTO_PROXY_DISCOVERY).trim())
+        : this.config.auto_proxy_discovery !== false;
 
       this.config.request_timeout_ms = Math.max(
         5000,

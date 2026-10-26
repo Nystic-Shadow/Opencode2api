@@ -5,34 +5,24 @@ services:
     container_name: opencode2api
     restart: unless-stopped
     ports:
-      - "${PORT:-8080}:8080"
+      - "${PORT:-8080}:${PORT:-8080}"
     environment:
-      - PORT=8080
+      # .env only needs PORT, DASHBOARD_USER, and DASHBOARD_PASS.
+      - PORT=${PORT:-8080}
       - DASHBOARD_USER=${DASHBOARD_USER:-admin}
       # Required: set DASHBOARD_PASS in .env or your shell before starting.
       - DASHBOARD_PASS=${DASHBOARD_PASS:?Set DASHBOARD_PASS to a strong password}
-      # Proxy-only deployment: no tunnel sidecar, no direct fallback.
+      # Safe, zero-config defaults: no direct fallback; proxies are discovered
+      # and verified automatically. Set PROXIES to add your own routes.
       - EGRESS_MODE=proxy_only
       - ALLOW_DIRECT_FALLBACK=false
-      # Required: one or more explicit HTTP/HTTPS/SOCKS5 proxies.
-      - PROXIES=${PROXIES:?Set PROXIES to a comma-separated proxy list}
-      # Extra proxies tried after an upstream quota response (0-20).
-      - PROXY_QUOTA_FAILOVERS=${PROXY_QUOTA_FAILOVERS:-10}
-      # Full-pool 5x health sweep interval (minutes) and dead-entry pruning.
-      - PROXY_CHECK_INTERVAL_MINUTES=${PROXY_CHECK_INTERVAL_MINUTES:-30}
-      - PROXY_AUTO_PRUNE_DEAD=${PROXY_AUTO_PRUNE_DEAD:-true}
-      - MAX_RETRIES=${MAX_RETRIES:-2}
-      - REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS:-30000}
-      - REQUEST_DEADLINE_MS=${REQUEST_DEADLINE_MS:-90000}
-      - QUEUE_MAX_CONCURRENT=${QUEUE_MAX_CONCURRENT:-8}
-      - QUEUE_MAX_PER_KEY=${QUEUE_MAX_PER_KEY:-4}
-      - QUEUE_MAX_SIZE=${QUEUE_MAX_SIZE:-100}
-      - QUEUE_WAIT_MS=${QUEUE_WAIT_MS:-15000}
+      # Optional manual overrides; empty means discovery-only.
+      - PROXIES=${PROXIES:-}
     volumes:
       - ./data:/app/data
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/readyz"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${PORT}/readyz"]
       interval: 15s
       timeout: 5s
-      retries: 10
-      start_period: 60s
+      retries: 20
+      start_period: 300s

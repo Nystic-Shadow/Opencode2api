@@ -120,6 +120,8 @@ console.log('\n[Test 4] Hardened Reliability Defaults (H3)');
 
   assert.strictEqual(config.get('warp_mode'), undefined, 'WARP settings must not be exposed');
   assert.strictEqual(config.get('warp_engine'), undefined, 'WARP settings must not be exposed');
+  assert.strictEqual(config.get('proxy_scraper_enabled'), undefined, 'Legacy scraper settings must not be exposed');
+  assert.notStrictEqual(config.get('auto_proxy_discovery'), undefined, 'Automatic proxy discovery must have a default');
   assert.ok(['auto', 'proxy_only', 'direct'].includes(config.get('egress_mode')),
     `unexpected egress mode: ${config.get('egress_mode')}`);
   assert.ok(config.get('queue_max_concurrent') >= 1);
@@ -129,7 +131,7 @@ console.log('\n[Test 4] Hardened Reliability Defaults (H3)');
 
   console.log('  ✅ Retry, deadline, queue, and egress defaults are bounded');
   console.log('  ✅ WARP configuration has been removed');
-  console.log('  ✅ Public proxy scraping is not part of the gateway');
+  console.log('  ✅ Automatic proxy discovery defaults on; legacy scraper settings are removed');
 }
 
 console.log('\n🎉 ALL SECURITY AUDIT REMEDIATION TESTS PASSED SUCCESSFULLY!\n');

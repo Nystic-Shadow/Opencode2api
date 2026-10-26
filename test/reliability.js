@@ -4,7 +4,11 @@ console.log('🧪 Starting OpenCode2API Reliability Verification Suite...\n');
 
 const config = require('../server/config');
 const egress = require('../server/egress');
+const proxyDiscoveryModule = require('../server/proxyDiscovery');
 const requestQueue = require('../server/requestQueue');
+
+const { ProxyDiscovery } = proxyDiscoveryModule;
+const discoveryHelpers = proxyDiscoveryModule._test;
 
 let passed = 0;
 let failed = 0;
@@ -42,6 +46,31 @@ async function withConfig(patch, fn) {
       else config.config[key] = value;
     }
   }
+}
+
+function createFakeEgress(capacity = 40) {
+  const state = { auto: new Map(), capacity };
+  return {
+    state,
+    onAutoProxyRemoved() {},
+    getFailedAutoProxyIds: () => [],
+    removeAutoProxies: () => 0,
+    getAutoProxyIds: () => [...state.auto.keys()],
+    isManualProxy: () => false,
+    isKnownProxy: id => state.auto.has(id),
+    getAutoCapacity: () => state.capacity,
+    setAutoProxies(entries) {
+      const next = new Map();
+      for (const entry of Array.isArray(entries) ? entries : []) {
+        if (next.size >= state.capacity) break;
+        if (entry && entry.id) next.set(entry.id, entry);
+      }
+      const added = [...next.keys()].filter(id => !state.auto.has(id)).length;
+      const removed = [...state.auto.keys()].filter(id => !next.has(id)).length;
+      state.auto = next;
+      return { added, removed };
+    }
+  };
 }
 
 async function main() {
@@ -550,7 +579,261 @@ async function main() {
     egress.reload();
   });
 
-  console.log('\n[Test 9] Bounded admission queue');
+  console.log('\n[Test 9] Automatic proxy discovery');
+  await test('parses list formats and rejects private or reserved targets', () => {
+    const parse = discoveryHelpers.parseCandidateLine;
+
+    const http = parse('8.8.8.8:3128#US', 'http');
+    assert.strictEqual(http.proxy.id, 'http://8.8.8.8:3128');
+    assert.strictEqual(parse('2.2.2.2:3128,US', 'http').proxy.id, 'http://2.2.2.2:3128');
+    const socks = parse('socks5://1.1.1.1:1080', 'socks5');
+    assert.strictEqual(socks.proxy.id, 'socks5://1.1.1.1:1080');
+    const ipv6 = parse('[2001:4860:4860::8888]:443', 'http');
+    assert.strictEqual(ipv6.proxy.host, '2001:4860:4860::8888');
+
+    for (const value of ['10.0.0.1:80', '127.0.0.1:80', '100.64.0.1:80', '169.254.1.1:80', '192.168.1.1:80', '172.16.0.1:80']) {
+      assert.strictEqual(parse(value, 'http').reason, 'private', `${value} must be rejected`);
+    }
+    assert.strictEqual(parse('http://:8080', 'http').reason, 'invalid');
+    assert.strictEqual(parse('[fd00::1]:80', 'http').reason, 'private');
+    assert.strictEqual(parse('[::1]:80', 'http').reason, 'private');
+
+    assert.strictEqual(discoveryHelpers.isPublicIp('8.8.8.8'), true);
+    assert.strictEqual(discoveryHelpers.isPublicIp('100.64.0.1'), false);
+    assert.strictEqual(discoveryHelpers.isPublicIp('2001:4860:4860::8888'), true);
+    assert.strictEqual(discoveryHelpers.isPublicIp('fd00::1'), false);
+
+    const parsed = discoveryHelpers.parseSourceText(
+      '# comment\n1.1.1.1:80\n1.1.1.1:80\n10.0.0.1:80\nhttp://:8080\n2.2.2.2:3128,US\n',
+      'http',
+      10
+    );
+    assert.deepStrictEqual(parsed.proxies.map(proxy => proxy.id), [
+      'http://1.1.1.1:80',
+      'http://2.2.2.2:3128'
+    ]);
+    assert.strictEqual(parsed.rejectedPrivate, 1);
+    assert.strictEqual(parsed.rejectedInvalid, 2);
+  });
+
+  await test('adds only routes that pass screening plus five verification probes', async () => {
+    const fake = createFakeEgress(40);
+    let probeCalls = 0;
+    const discovery = new ProxyDiscovery({
+      egressManager: fake,
+      cfg: { get: key => key === 'auto_proxy_discovery' ? true : undefined },
+      fetchText: async () => '1.1.1.1:80\n8.8.8.8:8080\n9.9.9.9:3128\n',
+      probe: async () => { probeCalls++; return true; },
+      sources: [{ name: 'mock', protocol: 'http', url: 'mock://list', maxLines: 10 }],
+      target: 1,
+      intervalMs: 60000,
+      verbose: false
+    });
+
+    await discovery.refreshNow();
+    const status = discovery.getStatus();
+    assert.strictEqual(status.verifiedCount, 1);
+    assert.strictEqual(fake.state.auto.size, 1);
+    assert.ok(probeCalls >= 6, `expected a screen probe plus five verification probes, got ${probeCalls}`);
+  });
+
+  await test('cools a candidate that fails any verification probe and skips it', async () => {
+    const fake = createFakeEgress(40);
+    const verdicts = [true, true, true, true, true, false];
+    let probeCalls = 0;
+    const discovery = new ProxyDiscovery({
+      egressManager: fake,
+      cfg: { get: key => key === 'auto_proxy_discovery' ? true : undefined },
+      fetchText: async () => '1.1.1.1:80\n',
+      probe: async () => verdicts[probeCalls++] === true,
+      sources: [{ name: 'mock', protocol: 'http', url: 'mock://list', maxLines: 10 }],
+      target: 1,
+      intervalMs: 60000,
+      verbose: false
+    });
+
+    await discovery.refreshNow();
+    assert.strictEqual(discovery.getStatus().verifiedCount, 0);
+    assert.strictEqual(fake.state.auto.size, 0);
+    assert.strictEqual(discovery.getStatus().cooldownCount, 1);
+
+    await discovery.refreshNow();
+    assert.strictEqual(discovery.getStatus().lastRun.candidatesSeen, 0);
+  });
+
+  await test('respects automatic capacity and records source failures', async () => {
+    const fake = createFakeEgress(1);
+    const discovery = new ProxyDiscovery({
+      egressManager: fake,
+      cfg: { get: key => key === 'auto_proxy_discovery' ? true : undefined },
+      fetchText: async () => '1.1.1.1:80\n8.8.8.8:8080\n9.9.9.9:3128\n',
+      probe: async () => true,
+      sources: [{ name: 'mock', protocol: 'http', url: 'mock://list', maxLines: 10 }],
+      target: 20,
+      intervalMs: 60000,
+      verbose: false
+    });
+    await discovery.refreshNow();
+    assert.strictEqual(discovery.getStatus().target, 1);
+    assert.strictEqual(discovery.getStatus().verifiedCount, 1);
+    assert.strictEqual(fake.state.auto.size, 1);
+
+    const failing = new ProxyDiscovery({
+      egressManager: createFakeEgress(40),
+      cfg: { get: key => key === 'auto_proxy_discovery' ? true : undefined },
+      fetchText: async () => { throw new Error('source offline'); },
+      probe: async () => true,
+      sources: [{ name: 'mock', protocol: 'http', url: 'mock://list', maxLines: 10 }],
+      target: 1,
+      intervalMs: 60000,
+      verbose: false
+    });
+    await failing.refreshNow();
+    assert.strictEqual(failing.getStatus().sourcesOk, 0);
+    assert.match(failing.getStatus().lastError, /source offline/);
+  });
+
+  await test('stops refilling the pool when discovery is disabled mid-run', async () => {
+    let enabled = true;
+    const listeners = [];
+    const fake = createFakeEgress(40);
+    const discovery = new ProxyDiscovery({
+      egressManager: fake,
+      cfg: {
+        get: key => key === 'auto_proxy_discovery' ? enabled : undefined,
+        onChange: fn => listeners.push(fn)
+      },
+      fetchText: async () => '1.1.1.1:80\n8.8.8.8:8080\n9.9.9.9:3128\n',
+      probe: async () => {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        return true;
+      },
+      sources: [{ name: 'mock', protocol: 'http', url: 'mock://list', maxLines: 10 }],
+      target: 3,
+      intervalMs: 60000,
+      verbose: false
+    });
+
+    discovery.start();
+    const run = discovery.promise;
+    await new Promise(resolve => setTimeout(resolve, 10));
+    enabled = false;
+    for (const listener of listeners) listener();
+    await run;
+
+    assert.strictEqual(discovery.getStatus().verifiedCount, 0);
+    assert.strictEqual(fake.state.auto.size, 0);
+    assert.strictEqual(discovery.getStatus().enabled, false);
+  });
+
+  console.log('\n[Test 10] Manual and automatic pool merging');
+  await test('merges automatic routes, keeps manual precedence, and seeds 5/5 health', async () => {
+    await withConfig({
+      proxies: ['http://manual-a.example:8080'],
+      egress_mode: 'proxy_only',
+      allow_direct_fallback: false
+    }, () => {
+      egress.setAutoProxies([]);
+      egress.reload();
+      const result = egress.setAutoProxies([
+        { id: 'http://auto-a.example:8080', url: 'http://auto-a.example:8080', latency: 123 },
+        { id: 'http://manual-a.example:8080', url: 'http://manual-a.example:8080' },
+        { id: 'http://auto-b.example:8080', url: 'http://auto-b.example:8080', latency: 200 }
+      ]);
+
+      const status = egress.getProxyStatus();
+      assert.strictEqual(result.added, 2);
+      assert.strictEqual(status.manualCount, 1);
+      assert.strictEqual(status.autoCount, 2);
+      assert.deepStrictEqual(status.proxies.map(entry => entry.endpoint), [
+        'http://manual-a.example:8080',
+        'http://auto-a.example:8080',
+        'http://auto-b.example:8080'
+      ]);
+      assert.deepStrictEqual(status.proxies.map(entry => entry.source), ['manual', 'auto', 'auto']);
+      const auto = status.proxies.find(entry => entry.endpoint === 'http://auto-a.example:8080');
+      assert.strictEqual(auto.passes, 5);
+      assert.strictEqual(auto.checks, 5);
+      assert.strictEqual(auto.healthy, true);
+      assert.strictEqual(egress.getCandidates().length, 3);
+
+      egress.setAutoProxies([]);
+      assert.strictEqual(egress.getProxyStatus().manualCount, 1);
+      assert.strictEqual(egress.getProxyStatus().autoCount, 0);
+    });
+    egress.reload();
+  });
+
+  await test('caps automatic routes below the total pool limit', async () => {
+    await withConfig({
+      proxies: ['http://manual-a.example:8080', 'http://manual-b.example:8080'],
+      egress_mode: 'proxy_only'
+    }, () => {
+      egress.reload();
+      const original = egress.maxAutoPool;
+      egress.maxAutoPool = 2;
+      try {
+        assert.strictEqual(egress.getAutoCapacity(), 2);
+        egress.setAutoProxies([
+          { id: 'http://auto-a.example:8080', url: 'http://auto-a.example:8080' },
+          { id: 'http://auto-b.example:8080', url: 'http://auto-b.example:8080' },
+          { id: 'http://auto-c.example:8080', url: 'http://auto-c.example:8080' }
+        ]);
+        const status = egress.getProxyStatus();
+        assert.strictEqual(status.manualCount, 2);
+        assert.strictEqual(status.autoCount, 2);
+        assert.strictEqual(status.configuredCount, 4);
+      } finally {
+        egress.maxAutoPool = original;
+        egress.setAutoProxies([]);
+      }
+    });
+    egress.reload();
+  });
+
+  await test('prunes automatic routes after two failed sweeps without touching manual routes', async () => {
+    await withConfig({
+      proxies: ['http://manual-a.example:8080', 'http://manual-b.example:8080'],
+      proxy_auto_prune_dead: true
+    }, async () => {
+      egress.reload();
+      egress.setAutoProxies([
+        { id: 'http://auto-a.example:8080', url: 'http://auto-a.example:8080' },
+        { id: 'http://auto-b.example:8080', url: 'http://auto-b.example:8080' }
+      ]);
+      const route = { type: 'proxy', proxyType: 'http', id: 'http://auto-a.example:8080' };
+      egress.proxyChecks.set(route.id, {
+        healthy: false, passes: 0, checks: 5, latency: 0, lastCheck: Date.now(), error: 'dead'
+      });
+      const health = egress._health(route);
+      health.checkFailures = 1;
+      health.checkFailed = true;
+      assert.deepStrictEqual(egress.getFailedAutoProxyIds(), [], 'one failed sweep must not be pruned');
+      health.checkFailures = 2;
+      assert.deepStrictEqual(egress.getFailedAutoProxyIds(), [route.id]);
+
+      const originalUpdate = config.update;
+      let updates = 0;
+      config.update = (values) => {
+        updates++;
+        config.config = { ...config.config, ...values };
+      };
+      try {
+        const removed = await egress._pruneDeadProxies();
+        assert.strictEqual(removed, 1);
+        assert.strictEqual(updates, 0, 'pruning an automatic route must not rewrite manual config');
+        const status = egress.getProxyStatus();
+        assert.strictEqual(status.manualCount, 2);
+        assert.strictEqual(status.autoCount, 1);
+      } finally {
+        config.update = originalUpdate;
+        egress.setAutoProxies([]);
+      }
+    });
+    egress.reload();
+  });
+
+  console.log('\n[Test 11] Bounded admission queue');
   await test('enforces global concurrency and makes release idempotent', async () => {
     await withConfig({ queue_max_concurrent: 1, queue_max_per_key: 1, queue_max_size: 1, queue_wait_ms: 30 }, async () => {
       const queue = new requestQueue.RequestQueue();

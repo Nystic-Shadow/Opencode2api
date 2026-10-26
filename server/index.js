@@ -8,6 +8,7 @@ const keys = require('./keys');
 const discovery = require('./discovery');
 const proxy = require('./proxy');
 const egress = require('./egress');
+const proxyDiscovery = require('./proxyDiscovery');
 const requestQueue = require('./requestQueue');
 const adminRoutes = require('./adminRoutes');
 const metrics = require('./metrics');
@@ -242,6 +243,8 @@ const server = http.createServer(async (req, res) => {
       const routes = egress.getCandidates();
       const modelsCount = discovery.models.length;
       const ready = routes.length > 0 && modelsCount > 0;
+      const autoProxies = egress.getAutoProxyIds().length;
+      const manualProxies = egress.getManualProxyIds().length;
       const body = {
         status: ready ? 'ready' : 'not_ready',
         service: 'OpenCode2API',
@@ -250,7 +253,9 @@ const server = http.createServer(async (req, res) => {
         egress: {
           mode: config.get('egress_mode'),
           ready_routes: routes.map(r => ({ id: r.id, type: r.type })),
-          proxies_configured: (config.get('proxies') || []).length,
+          proxies_configured: autoProxies + manualProxies,
+          automatic_proxies: autoProxies,
+          manual_proxies: manualProxies,
           allow_direct: egress.getStatus().allowDirect
         },
         queue: requestQueue.getStats()
@@ -412,6 +417,7 @@ function startHttpServer() {
     console.log(`✨ Discovered Models: ${discovery.models.length} (cached at boot; syncing in background)`);
     console.log(`⚡ OpenCode CLI Fingerprint: v${config.get('client_version')}`);
     console.log(`🛡️  Egress Mode: ${config.get('egress_mode')} (${egress.getCandidates().length} ready route(s))`);
+    console.log(`🔎 Auto Proxy Discovery: ${config.get('auto_proxy_discovery') === false ? 'off' : 'on'} (${proxyDiscovery.getStatus().verifiedCount}/${proxyDiscovery.getStatus().target} verified)`);
     console.log(`✅ Readiness probe: http://127.0.0.1:${PORT}/readyz`);
     console.log(`=============================================================\n`);
   });
@@ -428,6 +434,12 @@ async function boot() {
   // Explicit proxy pool health checks (5 probes per configured proxy, 5s cap).
   try { egress.startHealthChecks(); } catch (e) {
     console.warn('[Boot] Proxy health checks could not start:', e.message);
+  }
+
+  // Automatic zero-config egress: discover public candidates, probe each one
+  // directly, and only add routes that pass five consecutive TLS checks.
+  try { proxyDiscovery.start(); } catch (e) {
+    console.warn('[Boot] Automatic proxy discovery could not start:', e.message);
   }
 
   // Model discovery runs in the background; cached models are served now.
@@ -450,6 +462,7 @@ function shutdown(signal) {
     try { keys.flush(); } catch (e) {}
     try { metrics.flush(); } catch (e) {}
     try { egress.stopHealthChecks(); } catch (e) {}
+    try { proxyDiscovery.stop(); } catch (e) {}
     clearTimeout(forceTimer);
     process.exit(0);
   });

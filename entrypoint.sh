@@ -2,10 +2,11 @@
 set -e
 
 # ==============================================================================
-# OpenCode2API Docker Entrypoint (proxy-only)
+# OpenCode2API Docker Entrypoint
 #
-# The gateway owns no tunnel in the default deployment. Egress is provided by
-# the explicit HTTP/HTTPS/SOCKS5 proxies configured in PROXIES.
+# Egress is zero-config. The gateway discovers public HTTP/HTTPS/SOCKS5
+# candidates, verifies each with five TLS probes, and keeps only healthy routes.
+# Manual PROXIES entries are optional and take precedence.
 # ==============================================================================
 
 mkdir -p /app/data

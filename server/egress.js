@@ -173,10 +173,17 @@ class EgressManager {
     });
     this.proxyAgents = new Map();
     this.health = new Map();
-    this.proxies = parseProxyList();
+    this.manualProxies = parseProxyList();
+    this.autoProxies = [];
+    this.autoProxyIds = new Set();
+    this.maxProxyPool = 100;
+    this.maxAutoPool = 40;
+    this.proxies = this._mergeProxyLists();
     this.proxyIds = new Set(this.proxies.map(p => p.id));
+    this.manualFingerprint = JSON.stringify(this.manualProxies);
     this.proxyFingerprint = JSON.stringify(this.proxies);
     this.routeResetListeners = [];
+    this.autoRemovalListeners = [];
     this.proxyChecks = new Map();
     this.probeErrors = new Map();
     this.proxyChecksRunning = false;
@@ -185,7 +192,6 @@ class EgressManager {
     this.proxyCheckTimer = null;
     this.nextCheckAt = 0;
     this.lastCheckAt = 0;
-    this.maxProxyPool = 100;
     this.routeCursor = 0;
     this.lastReload = Date.now();
     this.checkIntervalMs = this._checkIntervalMs();
@@ -204,6 +210,10 @@ class EgressManager {
     if (typeof fn === 'function') this.routeResetListeners.push(fn);
   }
 
+  onAutoProxyRemoved(fn) {
+    if (typeof fn === 'function') this.autoRemovalListeners.push(fn);
+  }
+
   resetRoute(route, reason = 'route_reset') {
     if (!route || !route.id) return;
     this.health.delete(this._healthKey(route));
@@ -212,27 +222,20 @@ class EgressManager {
     }
   }
 
-  reload() {
-    const nextProxies = parseProxyList();
-    const nextFingerprint = JSON.stringify(nextProxies);
-    if (nextFingerprint === this.proxyFingerprint) {
-      this.lastReload = Date.now();
-      return;
+  _mergeProxyLists(manual = this.manualProxies, auto = this.autoProxies) {
+    const seen = new Set();
+    const merged = [];
+    for (const proxy of [...manual, ...auto]) {
+      if (!proxy || !proxy.id || seen.has(proxy.id)) continue;
+      seen.add(proxy.id);
+      merged.push(proxy);
+      if (merged.length >= this.maxProxyPool) break;
     }
+    return merged;
+  }
 
-    const oldIds = new Set(this.proxyIds);
-    const nextIds = new Set(nextProxies.map(p => p.id));
-    const removed = [...oldIds].filter(id => !nextIds.has(id));
-    const added = [...nextIds].filter(id => !oldIds.has(id));
-
-    this.proxies = nextProxies;
-    this.proxyIds = nextIds;
-    this.proxyFingerprint = nextFingerprint;
-
-    // Keep health, check results, and keep-alive agents for routes that did
-    // not change. A settings save that only adds one proxy must not reset the
-    // verification state of the whole pool.
-    for (const id of new Set([...removed, ...added])) {
+  _clearProxyState(ids) {
+    for (const id of ids) {
       this.health.delete(id);
       this.proxyChecks.delete(id);
       this.probeErrors.delete(id);
@@ -242,11 +245,27 @@ class EgressManager {
         this.proxyAgents.delete(id);
       }
     }
+  }
+
+  _applyMergedProxies(reason = 'proxy_reload') {
+    const nextProxies = this._mergeProxyLists();
+    const oldIds = new Set(this.proxyIds);
+    const nextIds = new Set(nextProxies.map(proxy => proxy.id));
+    const removed = [...oldIds].filter(id => !nextIds.has(id));
+    const added = [...nextIds].filter(id => !oldIds.has(id));
+
+    this.proxies = nextProxies;
+    this.proxyIds = nextIds;
+    this.proxyFingerprint = JSON.stringify(nextProxies);
+    this._clearProxyState(new Set([...removed, ...added]));
     for (const id of [...this.health.keys()]) {
       if (!nextIds.has(id)) this.health.delete(id);
     }
     for (const id of [...this.proxyChecks.keys()]) {
       if (!nextIds.has(id)) this.proxyChecks.delete(id);
+    }
+    for (const id of [...this.probeErrors.keys()]) {
+      if (!nextIds.has(id)) this.probeErrors.delete(id);
     }
 
     this.routeCursor = 0;
@@ -254,12 +273,148 @@ class EgressManager {
 
     for (const id of [...removed, ...added]) {
       for (const fn of this.routeResetListeners) {
-        try { fn(id, 'proxy_reload'); } catch (e) {}
+        try { fn(id, reason); } catch (e) {}
       }
     }
+    return { added, removed };
+  }
 
+  reload() {
+    const nextManual = parseProxyList();
+    const nextFingerprint = JSON.stringify(nextManual);
+    if (nextFingerprint === this.manualFingerprint) {
+      this.lastReload = Date.now();
+      return;
+    }
+
+    this.manualProxies = nextManual;
+    this.manualFingerprint = nextFingerprint;
+    // Manual configuration always wins over a discovered route with the same
+    // endpoint. Dropping the duplicate here avoids two health records for one
+    // proxy while keeping the operator-supplied credentials intact.
+    const manualIds = new Set(nextManual.map(proxy => proxy.id));
+    this.autoProxies = this.autoProxies.filter(proxy => !manualIds.has(proxy.id));
+    this.autoProxyIds = new Set(this.autoProxies.map(proxy => proxy.id));
+
+    this._applyMergedProxies('proxy_reload');
     if (this.proxyChecksEnabled) {
       this._runAndSchedule();
+    }
+  }
+
+  getAutoCapacity() {
+    return Math.max(0, Math.min(this.maxAutoPool, this.maxProxyPool - this.manualProxies.length));
+  }
+
+  getManualProxyIds() {
+    return this.manualProxies.map(proxy => proxy.id);
+  }
+
+  getAutoProxyIds() {
+    return [...this.autoProxyIds];
+  }
+
+  isManualProxy(id) {
+    return this.manualProxies.some(proxy => proxy.id === id);
+  }
+
+  isKnownProxy(id) {
+    return this.proxyIds.has(id);
+  }
+
+  /**
+   * Automatic routes that have failed two consecutive full sweeps. A single
+   * failed sweep only keeps the route out of rotation; discovery must not
+   * replace it before the normal two-sweep pruning threshold.
+   */
+  getFailedAutoProxyIds() {
+    return this.autoProxies
+      .filter(proxy => {
+        const check = this.proxyChecks.get(proxy.id);
+        const health = this.health.get(proxy.id);
+        return check && check.healthy === false && (health?.checkFailures || 0) >= 2;
+      })
+      .map(proxy => proxy.id);
+  }
+
+  /**
+   * Replace the automatically discovered pool. Entries here have already
+   * passed the discovery module's five consecutive TLS probes, so they are
+   * seeded as verified instead of waiting for the next background sweep.
+   */
+  setAutoProxies(entries) {
+    const manualIds = new Set(this.manualProxies.map(proxy => proxy.id));
+    const previous = new Set(this.autoProxyIds);
+    const seen = new Set();
+    const nextAuto = [];
+    const capacity = this.getAutoCapacity();
+    const list = Array.isArray(entries) ? entries : [];
+
+    for (const entry of list) {
+      if (nextAuto.length >= capacity) break;
+      // Prefer the full URL so credentials discovered on a source are kept;
+      // the id is the credential-free display key.
+      const proxy = entry ? parseProxyUrl(entry.url || entry.id) : null;
+      if (!proxy || manualIds.has(proxy.id) || seen.has(proxy.id)) continue;
+      // Public list entries can include credentials. Keep them for the tunnel
+      // even though the display URL and route id stay credential-free.
+      if (entry.username) proxy.username = entry.username;
+      if (entry.password) proxy.password = entry.password;
+      if (Number.isFinite(entry.latency)) proxy.latency = Math.max(0, Math.round(entry.latency));
+      seen.add(proxy.id);
+      nextAuto.push(proxy);
+    }
+
+    this.autoProxies = nextAuto;
+    this.autoProxyIds = new Set(nextAuto.map(proxy => proxy.id));
+    const { added, removed } = this._applyMergedProxies('auto_proxy_sync');
+
+    for (const proxy of nextAuto) {
+      if (!this.proxyIds.has(proxy.id) || previous.has(proxy.id)) continue;
+      this.proxyChecks.set(proxy.id, {
+        healthy: true,
+        passes: 5,
+        checks: 5,
+        latency: proxy.latency || 0,
+        lastCheck: Date.now(),
+        failures: 0,
+        error: ''
+      });
+      const health = this._health({ ...proxy, type: 'proxy', proxyType: proxy.type, id: proxy.id });
+      health.failures = 0;
+      health.openUntil = 0;
+      health.retryAfterUntil = 0;
+      health.checkFailed = false;
+      health.checkFailures = 0;
+      health.proxyFailures = 0;
+      health.lastError = '';
+      health.lastSuccess = Date.now();
+    }
+
+    const removedIds = removed.filter(id => previous.has(id) && !manualIds.has(id));
+    if (removedIds.length) this._notifyAutoProxyRemoved(removedIds, 'auto_proxy_removed');
+    return { added: added.length, removed: removed.length };
+  }
+
+  removeAutoProxies(ids, reason = 'auto_proxy_removed') {
+    const target = ids instanceof Set ? ids : new Set(ids || []);
+    const removed = this.autoProxies.filter(proxy => target.has(proxy.id));
+    if (removed.length === 0) return 0;
+
+    this.autoProxies = this.autoProxies.filter(proxy => !target.has(proxy.id));
+    this.autoProxyIds = new Set(this.autoProxies.map(proxy => proxy.id));
+    this._applyMergedProxies(reason);
+
+    const removedIds = removed
+      .map(proxy => proxy.id)
+      .filter(id => !this.isManualProxy(id));
+    if (removedIds.length) this._notifyAutoProxyRemoved(removedIds, reason);
+    return removed.length;
+  }
+
+  _notifyAutoProxyRemoved(ids, reason) {
+    for (const fn of this.autoRemovalListeners) {
+      try { fn(ids, reason); } catch (e) {}
     }
   }
 
@@ -344,32 +499,41 @@ class EgressManager {
   /**
    * Remove proxies that failed two consecutive full 5x sweeps. A proxy that
    * fails a sweep is already excluded from routing by checkFailed; pruning
-   * only cleans the configured list. The pool is never emptied automatically:
-   * when every entry is dead, the last configured entry is kept so a later
-   * sweep can recover it without operator action.
+   * only cleans the pool. Manual entries are never all removed automatically:
+   * when every manual entry is dead, the last one is kept so a later sweep can
+   * recover it. Automatic entries can all be removed because discovery will
+   * replenish the pool with freshly verified routes.
    */
   async _pruneDeadProxies() {
     if (process.env.O2P_CONFIG_READONLY === '1') return 0;
     if (config.get('proxy_auto_prune_dead') === false) return 0;
 
-    const dead = this.proxies.filter(proxy => {
+    const isDead = (proxy) => {
       const check = this.proxyChecks.get(proxy.id);
       const health = this.health.get(proxy.id);
       return check && check.healthy === false && (health?.checkFailures || 0) >= 2;
-    });
-    if (dead.length === 0) return 0;
-    // Leave at least one configured entry for recovery when the whole pool is
-    // dead. Otherwise remove every dead entry and keep the healthy remainder.
-    const removable = dead.length >= this.proxies.length ? dead.slice(0, -1) : dead;
-    if (removable.length === 0) return 0;
+    };
 
-    const removed = this.removeProxies(new Set(removable.map(proxy => proxy.id)));
+    const deadManual = this.manualProxies.filter(isDead);
+    const deadAuto = this.autoProxies.filter(isDead);
+    const removable = new Set();
+
+    if (deadManual.length > 0) {
+      const manualRemovable = deadManual.length >= this.manualProxies.length
+        ? deadManual.slice(0, -1)
+        : deadManual;
+      for (const proxy of manualRemovable) removable.add(proxy.id);
+    }
+    for (const proxy of deadAuto) removable.add(proxy.id);
+    if (removable.size === 0) return 0;
+
+    const removed = this.removeProxies(removable);
     if (removed > 0) {
-      console.warn(`[Egress] Auto-removed ${removed} dead prox${removed === 1 ? 'y' : 'ies'} after two failed 5x checks.`);
+      console.warn(`[Egress] Auto-removed ${removed} dead route${removed === 1 ? '' : 's'} after two failed 5x checks.`);
       try {
         require('./notifications').add(
           'Dead Proxies Removed',
-          `${removed} prox${removed === 1 ? 'y' : 'ies'} failed two consecutive 5x checks and ${removed === 1 ? 'was' : 'were'} removed from the configured pool.`,
+          `${removed} route${removed === 1 ? '' : 's'} failed two consecutive 5x checks and ${removed === 1 ? 'was' : 'were'} removed. Automatic discovery will replace failed routes.`,
           'warning'
         );
       } catch (e) {}
@@ -378,6 +542,7 @@ class EgressManager {
   }
 
   removeProxies(ids) {
+    const target = ids instanceof Set ? ids : new Set(ids || []);
     const configured = config.get('proxies');
     let raw = [];
     if (Array.isArray(configured)) {
@@ -387,11 +552,12 @@ class EgressManager {
     }
     const remaining = raw.filter(entry => {
       const parsed = parseProxyUrl(entry);
-      return !parsed || !ids.has(parsed.id);
+      return !parsed || !target.has(parsed.id);
     });
-    const removed = raw.length - remaining.length;
-    if (removed > 0) config.update({ proxies: remaining });
-    return removed;
+    const removedManual = raw.length - remaining.length;
+    if (removedManual > 0) config.update({ proxies: remaining });
+    const removedAuto = this.removeAutoProxies(target, 'proxy_pruned');
+    return removedManual + removedAuto;
   }
 
   pruneFailed() {
@@ -426,6 +592,9 @@ class EgressManager {
     const passes = results.filter(Boolean).length;
     const healthy = passes === checks;
     const latency = Math.round((Date.now() - started) / checks);
+    // A reload can remove the proxy while its probes are in flight. Never
+    // resurrect health or check state for a route that is no longer pooled.
+    if (!this.proxyIds.has(proxy.id)) return;
     const health = this._health(route);
     const probeError = this.probeErrors.get(route.id) || '';
 
@@ -476,6 +645,19 @@ class EgressManager {
   }
 
   probeProxy(route, timeoutMs = 5000) {
+    return this._probeRoute(route, timeoutMs, true);
+  }
+
+  /**
+   * Probe an untrusted discovery candidate without recording its failure in
+   * the per-route error map. Screening hundreds of public candidates must not
+   * pollute diagnostics for routes that actually made it into rotation.
+   */
+  probeCandidate(route, timeoutMs = 5000) {
+    return this._probeRoute(route, timeoutMs, false);
+  }
+
+  _probeRoute(route, timeoutMs = 5000, recordErrors = true) {
     return new Promise((resolve) => {
       let settled = false;
       let socket = null;
@@ -485,7 +667,7 @@ class EgressManager {
         if (socket) {
           try { socket.destroy(); } catch (e) {}
         }
-        this.probeErrors.set(route.id, 'probe timeout');
+        if (recordErrors) this.probeErrors.set(route.id, 'probe timeout');
         resolve(false);
       }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
@@ -504,7 +686,7 @@ class EgressManager {
           if (stream) {
             try { stream.destroy(); } catch (e) {}
           }
-          this.probeErrors.set(route.id, (err && err.message) || 'probe failed');
+          if (recordErrors) this.probeErrors.set(route.id, (err && err.message) || 'probe failed');
           resolve(false);
           return;
         }
@@ -533,6 +715,8 @@ class EgressManager {
       return {
         id: proxy.id,
         endpoint: proxy.url,
+        source: this.autoProxyIds.has(proxy.id) ? 'auto' : 'manual',
+        auto: this.autoProxyIds.has(proxy.id),
         available,
         routable: available && quotaRetryAfterMs === 0,
         quotaRetryAfterMs,
@@ -556,6 +740,8 @@ class EgressManager {
     const fastest = [...routable].sort((a, b) => (a.latency || Infinity) - (b.latency || Infinity))[0] || null;
     return {
       configuredCount: this.proxies.length,
+      manualCount: this.manualProxies.length,
+      autoCount: this.autoProxyIds.size,
       maxPool: this.maxProxyPool,
       verifiedCount: verified.length,
       routableCount: routable.length,
@@ -570,6 +756,7 @@ class EgressManager {
       fastestProxy: fastest,
       topProxies: routable.slice(0, 10).map(entry => ({
         endpoint: entry.endpoint,
+        source: entry.source,
         latency: entry.latency,
         passes: entry.passes,
         checks: entry.checks
@@ -971,7 +1158,11 @@ class EgressManager {
     }));
     return {
       mode: config.get('egress_mode') || 'proxy_only',
-      proxies: this.proxies.map(proxy => ({ id: proxy.id, type: proxy.type })),
+      proxies: this.proxies.map(proxy => ({
+        id: proxy.id,
+        type: proxy.type,
+        source: this.autoProxyIds.has(proxy.id) ? 'auto' : 'manual'
+      })),
       allowDirect: this._allowDirect(),
       routes,
       health: Object.fromEntries(this.health)

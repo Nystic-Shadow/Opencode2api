@@ -400,7 +400,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const mergedToolChoice = toolResult.toolChoice;
   const clientToolNames = toolResult.clientToolNames;
 
-  const maxRetries = Math.min(3, configInt('max_retries', 0));
+  const maxRetries = Math.min(3, configInt('max_retries', 2));
   const requestTimeout = configInt('request_timeout_ms', 30000, 5000);
   const deadline = startTime + Math.max(requestTimeout, configInt('request_deadline_ms', 90000, requestTimeout));
   const queueWaitMs = configInt('queue_wait_ms', 15000, 0);
@@ -460,9 +460,11 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   const attemptedRoutes = new Set([activeRoute.id]);
   const triedModels = new Set([requestedModel, currentModel]);
   const quotaFailoverLimit = Math.min(20, configInt('proxy_quota_failovers', 10));
+  const proxyFailoverLimit = Math.min(10, configInt('proxy_transport_failovers', 8));
   let quotaFailovers = 0;
   let networkFailures = 0;
-  const maxAttempts = maxRetries + 1 + quotaFailoverLimit;
+  let proxyTransportFailures = 0;
+  const maxAttempts = maxRetries + 1 + quotaFailoverLimit + proxyFailoverLimit;
 
   let lastStatus = 0;
   let lastBody = '';
@@ -1143,13 +1145,18 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       return;
     }
 
-    // Network / 5xx failure: degrade the route and try the next configured one.
-    const degradeKind = attemptResult.proxyFailure ? 'proxy_down' : 'retry';
-    egress.recordFailure(activeRoute, degradeKind);
-    networkFailures++;
-    console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for ${currentModel}: ${bodyStr.slice(0, 200)}`);
-
-    if (networkFailures >= maxRetries + 1) break;
+    // Network / 5xx or proxy transport failure: degrade the route and try the next configured one.
+    if (attemptResult.proxyFailure) {
+      egress.recordFailure(activeRoute, 'proxy_down');
+      proxyTransportFailures++;
+      console.warn(`[Proxy] Proxy transport failure on ${routeLabel(activeRoute)} for ${currentModel}: ${bodyStr.slice(0, 200)} (${proxyTransportFailures}/${proxyFailoverLimit})`);
+      if (proxyTransportFailures >= proxyFailoverLimit) break;
+    } else {
+      egress.recordFailure(activeRoute, 'retry');
+      networkFailures++;
+      console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for ${currentModel}: ${bodyStr.slice(0, 200)} (${networkFailures}/${maxRetries + 1})`);
+      if (networkFailures >= maxRetries + 1) break;
+    }
 
     const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
     if (nextRoute) {
@@ -1346,7 +1353,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     openAiMessages = upstreamContext.ensureUpstreamEnv(openAiMessages);
   }
 
-  const maxRetries = Math.min(3, configInt('max_retries', 0));
+  const maxRetries = Math.min(3, configInt('max_retries', 2));
   const requestTimeout = configInt('request_timeout_ms', 30000, 5000);
   const deadline = startTime + Math.max(requestTimeout, configInt('request_deadline_ms', 90000, requestTimeout));
   const queueWaitMs = configInt('queue_wait_ms', 15000, 0);
@@ -1406,9 +1413,11 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   const attemptedRoutes = new Set([activeRoute.id]);
   const triedModels = new Set([requestedModel, currentModel]);
   const quotaFailoverLimit = Math.min(20, configInt('proxy_quota_failovers', 10));
+  const proxyFailoverLimit = Math.min(10, configInt('proxy_transport_failovers', 8));
   let quotaFailovers = 0;
   let networkFailures = 0;
-  const maxAttempts = maxRetries + 1 + quotaFailoverLimit;
+  let proxyTransportFailures = 0;
+  const maxAttempts = maxRetries + 1 + quotaFailoverLimit + proxyFailoverLimit;
 
   let lastStatus = 0;
   let lastBody = '';
@@ -2182,13 +2191,18 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       return;
     }
 
-    // Network / 5xx failure: degrade the route and try the next configured one.
-    const degradeKind = attemptResult.proxyFailure ? 'proxy_down' : 'retry';
-    egress.recordFailure(activeRoute, degradeKind);
-    networkFailures++;
-    console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for Anthropic model ${currentModel}: ${bodyStr.slice(0, 200)}`);
-
-    if (networkFailures >= maxRetries + 1) break;
+    // Network / 5xx or proxy transport failure: degrade the route and try the next configured one.
+    if (attemptResult.proxyFailure) {
+      egress.recordFailure(activeRoute, 'proxy_down');
+      proxyTransportFailures++;
+      console.warn(`[Proxy] Proxy transport failure on ${routeLabel(activeRoute)} for Anthropic ${currentModel}: ${bodyStr.slice(0, 200)} (${proxyTransportFailures}/${proxyFailoverLimit})`);
+      if (proxyTransportFailures >= proxyFailoverLimit) break;
+    } else {
+      egress.recordFailure(activeRoute, 'retry');
+      networkFailures++;
+      console.warn(`[Proxy] Upstream ${statusCode || 'network failure'} on ${routeLabel(activeRoute)} for Anthropic model ${currentModel}: ${bodyStr.slice(0, 200)} (${networkFailures}/${maxRetries + 1})`);
+      if (networkFailures >= maxRetries + 1) break;
+    }
 
     const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
     if (nextRoute) {

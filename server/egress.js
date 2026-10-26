@@ -26,6 +26,11 @@ function credentialTag(username, password) {
     .slice(0, 10);
 }
 
+function tlsServername(name) {
+  if (!name || net.isIP(name)) return undefined;
+  return name;
+}
+
 function parseProxyUrl(raw) {
   if (!raw || typeof raw !== 'string') return null;
   let value = raw.trim();
@@ -179,8 +184,8 @@ class EgressManager {
     this.manualProxies = parseProxyList();
     this.autoProxies = [];
     this.autoProxyIds = new Set();
-    this.maxProxyPool = 100;
-    this.maxAutoPool = 40;
+    this.maxProxyPool = Math.max(150, parseInt(config.get('max_proxy_pool'), 10) || 150);
+    this.maxAutoPool = Math.max(100, parseInt(config.get('max_auto_pool'), 10) || 100);
     this.proxies = this._mergeProxyLists();
     this.proxyIds = new Set(this.proxies.map(p => p.id));
     this.manualFingerprint = JSON.stringify(this.manualProxies);
@@ -640,7 +645,7 @@ class EgressManager {
       return {
         host,
         port: parseInt(url.port, 10) || 443,
-        servername: host
+        servername: tlsServername(host)
       };
     } catch (e) {
       return { host: 'opencode.ai', port: 443, servername: 'opencode.ai' };
@@ -900,8 +905,11 @@ class EgressManager {
     // Verified proxies may all have been attempted (for example after a quota
     // cooldown). Fall back to unchecked-but-available proxies rather than
     // returning a 429 while part of the pool has never been tried.
-    return this.getRoutableRoutes({ includeUnverified: true })
-      .find(route => !excluded.has(route.id)) || null;
+    const unverified = this.getRoutableRoutes({ includeUnverified: true })
+      .find(route => !excluded.has(route.id));
+    if (unverified) return unverified;
+    const candidates = this.getCandidates({ includeQuota: false });
+    return candidates.find(route => route.type === 'direct' && !excluded.has(route.id)) || null;
   }
 
   nextRoute(current, candidates = null) {
@@ -984,7 +992,7 @@ class EgressManager {
         path: authority,
         headers,
         timeout: 10000,
-        ...(secureProxy ? { servername: route.host, rejectUnauthorized: true } : {})
+        ...(secureProxy ? { servername: tlsServername(route.host), rejectUnauthorized: true } : {})
       });
     } catch (err) {
       done(err);
@@ -999,7 +1007,7 @@ class EgressManager {
       }
       const tlsSocket = tls.connect({
         socket,
-        servername: options.servername || destHost,
+        servername: tlsServername(options.servername || destHost),
         rejectUnauthorized: true
       }, () => done(null, tlsSocket));
       tlsSocket.on('error', err => done(err));
@@ -1037,7 +1045,7 @@ class EgressManager {
       socket.setTimeout(0);
       const tlsSocket = tls.connect({
         socket: stream || socket,
-        servername: destHost,
+        servername: tlsServername(destHost),
         rejectUnauthorized: true
       }, () => done(null, tlsSocket));
       tlsSocket.on('error', err2 => done(err2));

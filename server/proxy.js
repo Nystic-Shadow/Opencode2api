@@ -1014,6 +1014,15 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
     if (attemptResult.bridgeFailure) {
       bunBridge.reportTransportFailure();
+      console.warn(`[Proxy] Bun bridge transport error for ${currentModel} on ${routeLabel(activeRoute)}; attempting recovery and route failover.`);
+      try { await bunBridge.ensureReady(2000); } catch (e) {}
+      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
+      if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
+        quotaFailovers++;
+        activeRoute = nextRoute;
+        attemptedRoutes.add(activeRoute.id);
+        continue;
+      }
       metrics.recordRequest({
         model: requestedModel,
         status: 503,
@@ -1067,7 +1076,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         }
       }
 
-      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes);
+      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
       if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
         quotaFailovers++;
         const failedRoute = activeRoute;
@@ -1142,7 +1151,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
 
     if (networkFailures >= maxRetries + 1) break;
 
-    const nextRoute = egress.getNextRoutableRoute(attemptedRoutes);
+    const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
     if (nextRoute) {
       activeRoute = nextRoute;
       attemptedRoutes.add(activeRoute.id);
@@ -2047,6 +2056,15 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
     if (attemptResult.bridgeFailure) {
       bunBridge.reportTransportFailure();
+      console.warn(`[Proxy] Bun bridge transport error for Anthropic ${currentModel} on ${routeLabel(activeRoute)}; attempting recovery and route failover.`);
+      try { await bunBridge.ensureReady(2000); } catch (e) {}
+      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
+      if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
+        quotaFailovers++;
+        activeRoute = nextRoute;
+        attemptedRoutes.add(activeRoute.id);
+        continue;
+      }
       metrics.recordRequest({
         model: requestedModel,
         status: 503,
@@ -2097,7 +2115,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         }
       }
 
-      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes);
+      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
       if (nextRoute && quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
         quotaFailovers++;
         const failedRoute = activeRoute;
@@ -2172,7 +2190,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
 
     if (networkFailures >= maxRetries + 1) break;
 
-    const nextRoute = egress.getNextRoutableRoute(attemptedRoutes);
+    const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
     if (nextRoute) {
       activeRoute = nextRoute;
       attemptedRoutes.add(activeRoute.id);

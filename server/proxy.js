@@ -81,15 +81,16 @@ function upstreamTarget() {
 
 // Build the loopback request sent to the Bun bridge. The selected egress
 // proxy travels as base64url so Bun can use it for this request only.
-function bridgeRequestOptions(bridge, target, upstreamHeaders, route, timeoutMs = 60000) {
+function bridgeRequestOptions(bridge, target, upstreamHeaders, route, timeoutMs = 60000, forceRotate = false) {
   const headers = {
     ...upstreamHeaders,
     'x-opencode2api-bridge-token': bridge.token,
     'x-opencode2api-timeout-ms': String(timeoutMs)
   };
-  const proxyHeader = bunBridge.encodeProxyHeader(route);
+  const shouldForceRotate = forceRotate || (route && (route.isRotating || config.get('rotating_proxy_enabled')));
+  const proxyHeader = bunBridge.encodeProxyHeader(route, shouldForceRotate);
   if (proxyHeader) headers['x-opencode2api-bridge-proxy'] = proxyHeader;
-  if (route && (route.isRotating || config.get('rotating_proxy_enabled'))) {
+  if (shouldForceRotate) {
     headers['x-opencode2api-force-rotate'] = '1';
   }
   return {
@@ -100,6 +101,26 @@ function bridgeRequestOptions(bridge, target, upstreamHeaders, route, timeoutMs 
     headers,
     agent: bridgeAgent
   };
+}
+
+function canUseDirectFallback(attemptedRoutes = null) {
+  if (config.get('allow_direct_fallback') === false && config.get('egress_mode') !== 'auto') {
+    return false;
+  }
+  if (config.get('egress_mode') === 'proxy_only') {
+    return false;
+  }
+  if (attemptedRoutes && attemptedRoutes.has('direct')) {
+    return false;
+  }
+  const directRoute = { type: 'direct', id: 'direct' };
+  if (!egress.isAvailable(directRoute)) {
+    return false;
+  }
+  if (egress.getQuotaRetryAfter(directRoute) > 0) {
+    return false;
+  }
+  return true;
 }
 
 // Watchdog to disarm connection timeout once streaming begins, while guarding
@@ -400,7 +421,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   // Dedicated rotating proxies change exit IP on every request, so global free-quota gate does not block them.
   const hasRotating = config.get('rotating_proxy_enabled') === true || (egress.rotatingProxy && egress.isRotatingProxyHealthy());
   let freeQuotaBlock = (!hasRotating && isRequestedFree) ? upstreamQuota.isBlocked(currentModel) : null;
-  if (freeQuotaBlock && config.get('smart_fallback') !== false) {
+  if (freeQuotaBlock && config.get('smart_fallback') === true) {
     const fallback = discovery.getNextFallbackModel(currentModel, new Set([currentModel]));
     if (fallback && !upstreamQuota.isBlocked(fallback)) {
       console.warn(`[Proxy] Model "${currentModel}" is in free quota cooldown until ${freeQuotaBlock.resetAt}. Smart fallback to "${fallback}"...`);
@@ -595,7 +616,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         let isTimedOut = false;
         let requestOptions;
         if (bridgeConnection) {
-          requestOptions = bridgeRequestOptions(bridgeConnection, target, upstreamHeaders, activeRoute, streamDeadlineMs);
+          requestOptions = bridgeRequestOptions(bridgeConnection, target, upstreamHeaders, activeRoute, streamDeadlineMs, quotaFailovers > 0);
         } else {
           requestOptions = {
             hostname: target.hostname,
@@ -1067,7 +1088,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       egress.recordFailure(activeRoute, 'proxy_down');
       console.warn(`[Proxy] Bun bridge connection dropped on route ${routeLabel(activeRoute)}; attempting recovery and failover.`);
       try { await bunBridge.ensureReady(2000); } catch (e) {}
-      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
+      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || (canUseDirectFallback(attemptedRoutes) ? { type: 'direct', id: 'direct' } : null);
       if (nextRoute && Date.now() < deadline) {
         activeRoute = nextRoute;
         attemptedRoutes.add(activeRoute.id);
@@ -1112,8 +1133,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         continue;
       }
 
-      // 2. If all proxies in pool have been tried, try direct route as a fallback if permitted
-      if ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') && Date.now() < deadline) {
+      // 2. If all proxies in pool have been tried, try direct route as a fallback ONLY if permitted and not in quota lockout
+      if (canUseDirectFallback(attemptedRoutes) && Date.now() < deadline) {
         const failedRoute = activeRoute;
         activeRoute = { type: 'direct', id: 'direct' };
         attemptedRoutes.add('direct');
@@ -1121,18 +1142,21 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         continue;
       }
 
-      // 3. Only if all proxies AND direct failed for currentModel, attempt Smart Fallback to another free model
-      if (config.get('smart_fallback') !== false && isRequestedFree && Date.now() < deadline) {
-        const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
-        if (fallback) {
-          console.warn(`[Proxy] Model ${currentModel} exhausted all routes. Smart failover to ${fallback}...`);
-          currentModel = fallback;
-          upstreamModel = discovery.resolveUpstreamModel(currentModel);
-          triedModels.add(fallback);
-          attemptedRoutes.clear();
-          activeRoute = egress.selectRoute() || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') ? { type: 'direct', id: 'direct' } : null);
-          if (activeRoute) attemptedRoutes.add(activeRoute.id);
-          continue;
+      // 3. Only attempt Smart Fallback to another free model if explicitly enabled AND if routable routes remain
+      if (config.get('smart_fallback') === true && isRequestedFree && Date.now() < deadline) {
+        const nextFallbackRoute = egress.selectRoute() || (canUseDirectFallback() ? { type: 'direct', id: 'direct' } : null);
+        if (nextFallbackRoute) {
+          const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
+          if (fallback) {
+            console.warn(`[Proxy] Model ${currentModel} exhausted all routes. Smart failover to ${fallback}...`);
+            currentModel = fallback;
+            upstreamModel = discovery.resolveUpstreamModel(currentModel);
+            triedModels.add(fallback);
+            attemptedRoutes.clear();
+            activeRoute = nextFallbackRoute;
+            attemptedRoutes.add(activeRoute.id);
+            continue;
+          }
         }
       }
 
@@ -1360,7 +1384,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   // Dedicated rotating proxies change exit IP on every request, so global free-quota gate does not block them.
   const hasRotating = config.get('rotating_proxy_enabled') === true || (egress.rotatingProxy && egress.isRotatingProxyHealthy());
   let freeQuotaBlock = (!hasRotating && isRequestedFree) ? upstreamQuota.isBlocked(currentModel) : null;
-  if (freeQuotaBlock && config.get('smart_fallback') !== false) {
+  if (freeQuotaBlock && config.get('smart_fallback') === true) {
     const fallback = discovery.getNextFallbackModel(currentModel, new Set([currentModel]));
     if (fallback && !upstreamQuota.isBlocked(fallback)) {
       console.warn(`[Proxy] Anthropic model "${currentModel}" is in free quota cooldown until ${freeQuotaBlock.resetAt}. Smart fallback to "${fallback}"...`);
@@ -1547,7 +1571,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         let isTimedOut = false;
         let requestOptions;
         if (bridgeConnection) {
-          requestOptions = bridgeRequestOptions(bridgeConnection, target, upstreamHeaders, activeRoute, streamDeadlineMs);
+          requestOptions = bridgeRequestOptions(bridgeConnection, target, upstreamHeaders, activeRoute, streamDeadlineMs, quotaFailovers > 0);
         } else {
           requestOptions = {
             hostname: target.hostname,
@@ -2115,7 +2139,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       egress.recordFailure(activeRoute, 'proxy_down');
       console.warn(`[Proxy] Bun bridge connection dropped on Anthropic route ${routeLabel(activeRoute)}; attempting recovery and failover.`);
       try { await bunBridge.ensureReady(2000); } catch (e) {}
-      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') ? { type: 'direct', id: 'direct' } : null);
+      const nextRoute = egress.getNextRoutableRoute(attemptedRoutes) || (canUseDirectFallback(attemptedRoutes) ? { type: 'direct', id: 'direct' } : null);
       if (nextRoute && Date.now() < deadline) {
         activeRoute = nextRoute;
         attemptedRoutes.add(activeRoute.id);
@@ -2160,8 +2184,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         continue;
       }
 
-      // 2. If all proxies in pool have been tried, try direct route as a fallback if permitted
-      if ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') && !attemptedRoutes.has('direct') && Date.now() < deadline) {
+      // 2. If all proxies in pool have been tried, try direct route as a fallback ONLY if permitted and not in quota lockout
+      if (canUseDirectFallback(attemptedRoutes) && Date.now() < deadline) {
         const failedRoute = activeRoute;
         activeRoute = { type: 'direct', id: 'direct' };
         attemptedRoutes.add('direct');
@@ -2169,18 +2193,21 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         continue;
       }
 
-      // 3. Only if all proxies AND direct failed for currentModel, attempt Smart Fallback to another free model
-      if (config.get('smart_fallback') !== false && isRequestedFree && Date.now() < deadline) {
-        const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
-        if (fallback) {
-          console.warn(`[Proxy] Anthropic model ${currentModel} exhausted all routes. Smart failover to ${fallback}...`);
-          currentModel = fallback;
-          upstreamModel = discovery.resolveUpstreamModel(currentModel);
-          triedModels.add(fallback);
-          attemptedRoutes.clear();
-          activeRoute = egress.selectRoute() || ((config.get('allow_direct_fallback') !== false || config.get('egress_mode') === 'auto') ? { type: 'direct', id: 'direct' } : null);
-          if (activeRoute) attemptedRoutes.add(activeRoute.id);
-          continue;
+      // 3. Only attempt Smart Fallback to another free model if explicitly enabled AND if routable routes remain
+      if (config.get('smart_fallback') === true && isRequestedFree && Date.now() < deadline) {
+        const nextFallbackRoute = egress.selectRoute() || (canUseDirectFallback() ? { type: 'direct', id: 'direct' } : null);
+        if (nextFallbackRoute) {
+          const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
+          if (fallback) {
+            console.warn(`[Proxy] Anthropic model ${currentModel} exhausted all routes. Smart failover to ${fallback}...`);
+            currentModel = fallback;
+            upstreamModel = discovery.resolveUpstreamModel(currentModel);
+            triedModels.add(fallback);
+            attemptedRoutes.clear();
+            activeRoute = nextFallbackRoute;
+            attemptedRoutes.add(activeRoute.id);
+            continue;
+          }
         }
       }
 

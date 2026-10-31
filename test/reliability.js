@@ -91,6 +91,24 @@ async function main() {
     assert.strictEqual(helpers.parseProxyUrl('proxy.example:3128').type, 'http');
   });
 
+  await test('parses host:port:username:password format', () => {
+    const proxy = helpers.parseProxyUrl('gate.smartproxy.com:7000:myuser:mypass');
+    assert.strictEqual(proxy.type, 'http');
+    assert.strictEqual(proxy.host, 'gate.smartproxy.com');
+    assert.strictEqual(proxy.port, 7000);
+    assert.strictEqual(proxy.username, 'myuser');
+    assert.strictEqual(proxy.password, 'mypass');
+    assert.strictEqual(proxy.url, 'http://gate.smartproxy.com:7000');
+    assert.match(proxy.id, /^http:\/\/gate\.smartproxy\.com:7000#[0-9a-f]{10}$/);
+
+    const socks = helpers.parseProxyUrl('socks5://proxy.example:1080:suser:spass');
+    assert.strictEqual(socks.type, 'socks5');
+    assert.strictEqual(socks.host, 'proxy.example');
+    assert.strictEqual(socks.port, 1080);
+    assert.strictEqual(socks.username, 'suser');
+    assert.strictEqual(socks.password, 'spass');
+  });
+
   await test('keeps credential-only variants as distinct routes', () => {
     const first = helpers.parseProxyUrl('http://session-a:secret@gateway.example:7000');
     const second = helpers.parseProxyUrl('http://session-b:secret@gateway.example:7000');
@@ -1192,6 +1210,8 @@ async function main() {
 
       // Crucial: Smart session rotation
       assert.strictEqual(egress.applyRotatingSession('rotate-user', 'auto'), 'rotate-user', 'auto mode preserves credentials for port-based proxies');
+      const forced = egress.applyRotatingSession('rotate-user', 'auto', true);
+      assert.ok(/^rotate-user-session-[0-9a-f]{8}$/.test(forced), 'must force session suffix on 429 rotation in auto mode');
       const s1 = egress.applyRotatingSession('rotate-user', 'session_suffix');
       assert.ok(/^rotate-user-session-[0-9a-f]{8}$/.test(s1), 'must append session suffix');
       const s2 = egress.applyRotatingSession(s1, 'auto');

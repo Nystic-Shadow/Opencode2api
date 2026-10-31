@@ -65,10 +65,10 @@ function isDirectOfficialAttempt(officialUpstream, attemptResult) {
   return Boolean(officialUpstream && attemptResult && !attemptResult.viaBridge);
 }
 
-function encodeProxyHeader(valueOrRoute) {
+function encodeProxyHeader(valueOrRoute, forceRotate = false) {
   const url = typeof valueOrRoute === 'string'
     ? valueOrRoute
-    : buildProxyUrl(valueOrRoute);
+    : buildProxyUrl(valueOrRoute, forceRotate);
   if (!url) return '';
   return Buffer.from(url, 'utf8').toString('base64url');
 }
@@ -82,16 +82,20 @@ function decodeProxyHeader(value) {
   }
 }
 
-function buildProxyUrl(route) {
+function buildProxyUrl(route, forceRotate = false) {
   if (!route || route.type !== 'proxy') return '';
   const scheme = ['http', 'https', 'socks5', 'socks5h'].includes(route.proxyType)
     ? route.proxyType
     : 'http';
   let username = route.username || '';
-  const password = route.password || '';
+  let password = route.password || '';
 
   if (route.isRotating || config.get('rotating_proxy_enabled')) {
-    username = egress.applyRotatingSession(username, config.get('rotating_proxy_session_mode'));
+    username = egress.applyRotatingSession(username, config.get('rotating_proxy_session_mode'), forceRotate);
+    if (password.includes('{session}') || password.includes('{rand}')) {
+      const randId = crypto.randomBytes(4).toString('hex');
+      password = password.replaceAll('{session}', randId).replaceAll('{rand}', randId);
+    }
   }
 
   const auth = username

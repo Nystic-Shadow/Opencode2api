@@ -31,7 +31,7 @@ function tlsServername(name) {
   return name;
 }
 
-function applyRotatingSession(username, sessionMode = 'auto') {
+function applyRotatingSession(username, sessionMode = 'auto', forceRotate = false) {
   if (!username) return '';
   if (sessionMode === 'disabled' || sessionMode === 'raw') return username;
   const randId = crypto.randomBytes(4).toString('hex');
@@ -43,17 +43,55 @@ function applyRotatingSession(username, sessionMode = 'auto') {
   if (/([-:_]session[-:_])[a-zA-Z0-9]+/i.test(user)) {
     return user.replace(/([-_:]session[-:_])[a-zA-Z0-9]+/i, `$1${randId}`);
   }
+  if (/([-:_]sessid[-:_])[a-zA-Z0-9]+/i.test(user)) {
+    return user.replace(/([-_:]sessid[-:_])[a-zA-Z0-9]+/i, `$1${randId}`);
+  }
+  if (/(__sessid__)[a-zA-Z0-9]+/i.test(user)) {
+    return user.replace(/(__sessid__)[a-zA-Z0-9]+/i, `$1${randId}`);
+  }
   if (sessionMode === 'session_suffix') {
     return `${user}-session-${randId}`;
+  }
+  if (sessionMode === 'auto') {
+    if (forceRotate) {
+      return `${user}-session-${randId}`;
+    }
   }
   return user;
 }
 
+function normalizeProxyString(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let value = raw.trim();
+  if (!value) return '';
+
+  let scheme = 'http';
+  const schemeMatch = value.match(/^([a-z][a-z0-9+.-]*):\/\/(.*)$/i);
+  if (schemeMatch) {
+    scheme = schemeMatch[1].toLowerCase();
+    value = schemeMatch[2];
+  }
+
+  // Handle format host:port:username:password
+  // e.g. gate.smartproxy.com:7000:user123:pass456 or 1.2.3.4:8080:user:pass
+  if (!value.includes('@')) {
+    const parts = value.split(':');
+    if (parts.length === 4) {
+      const [host, port, user, pass] = parts;
+      const portNum = parseInt(port, 10);
+      if (Number.isInteger(portNum) && portNum >= 1 && portNum <= 65535) {
+        return `${scheme}://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
+      }
+    }
+  }
+
+  return `${scheme}://${value}`;
+}
+
 function parseProxyUrl(raw) {
   if (!raw || typeof raw !== 'string') return null;
-  let value = raw.trim();
+  const value = normalizeProxyString(raw);
   if (!value) return null;
-  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) value = `http://${value}`;
 
   let url;
   try {
@@ -960,10 +998,13 @@ class EgressManager {
         proxyFailures: 0,
         lastError: '',
         lastSuccess: 0,
-        lastFailure: 0
+        lastFailure: 0,
+        host: route?.host || ''
       });
     }
-    return this.health.get(key);
+    const h = this.health.get(key);
+    if (!h.host && route?.host) h.host = route.host;
+    return h;
   }
 
   isAvailable(route) {
@@ -1401,8 +1442,19 @@ class EgressManager {
     }
 
     if (kind === 'quota') {
-      health.retryAfterUntil = Math.max(health.retryAfterUntil, now + Math.max(1000, retryAfterMs || 0));
+      const until = Math.max(health.retryAfterUntil, now + Math.max(1000, retryAfterMs || 0));
+      health.retryAfterUntil = until;
       health.lastError = 'upstream quota';
+      // If this proxy shares an IP host with other proxies in the pool,
+      // OpenCode rate-limits the IP address! Mark all sibling routes on the same host.
+      if (route.type === 'proxy' && route.host) {
+        for (const otherHealth of this.health.values()) {
+          if (otherHealth && otherHealth.host === route.host) {
+            otherHealth.retryAfterUntil = Math.max(otherHealth.retryAfterUntil || 0, until);
+            otherHealth.lastError = 'upstream quota (shared IP)';
+          }
+        }
+      }
       return;
     }
 
@@ -1463,6 +1515,7 @@ class EgressManager {
 
 const manager = new EgressManager();
 manager.parseProxyUrl = parseProxyUrl;
+manager.normalizeProxyString = normalizeProxyString;
 manager.parseProxyList = parseProxyList;
 manager.parseRetryAfter = parseRetryAfter;
 manager.classifyUpstreamFailure = classifyUpstreamFailure;
@@ -1470,6 +1523,7 @@ manager.parseSocks5ConnectResponse = parseSocks5ConnectResponse;
 manager.applyRotatingSession = applyRotatingSession;
 manager._test = {
   parseProxyUrl,
+  normalizeProxyString,
   parseProxyList,
   parseRetryAfter,
   classifyUpstreamFailure,

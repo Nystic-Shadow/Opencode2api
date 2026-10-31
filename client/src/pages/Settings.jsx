@@ -20,6 +20,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [discoveryInterval, setDiscoveryInterval] = useState(settings.discovery_interval_seconds || 600);
   const [autoUpdateCli, setAutoUpdateCli] = useState(settings.auto_update_cli !== false);
   const [freeOnly, setFreeOnly] = useState(settings.free_only !== false);
+  const [smartFallback, setSmartFallback] = useState(settings.smart_fallback === true);
   const [maxRetries, setMaxRetries] = useState(settings.max_retries ?? 2);
   const [proxyQuotaFailovers, setProxyQuotaFailovers] = useState(settings.proxy_quota_failovers ?? 10);
   const [proxyCheckInterval, setProxyCheckInterval] = useState(settings.proxy_check_interval_minutes ?? 30);
@@ -52,6 +53,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
       if (settings.rotating_proxy_enabled !== undefined) setRotatingProxyEnabled(!!settings.rotating_proxy_enabled);
       if (settings.rotating_proxy_url !== undefined) setRotatingProxyUrl(settings.rotating_proxy_url || '');
       if (settings.rotating_proxy_session_mode !== undefined) setRotatingProxySessionMode(settings.rotating_proxy_session_mode || 'auto');
+      if (settings.smart_fallback !== undefined) setSmartFallback(settings.smart_fallback === true);
     }
   }, [settings]);
 
@@ -182,6 +184,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         discovery_interval_seconds: parseInt(discoveryInterval, 10),
         auto_update_cli: autoUpdateCli,
         free_only: freeOnly,
+        smart_fallback: smartFallback,
         max_retries: parseInt(maxRetries, 10) || 0,
         proxy_quota_failovers: Math.min(20, Math.max(0, parseInt(proxyQuotaFailovers, 10) || 0)),
         proxy_check_interval_minutes: Math.min(1440, Math.max(1, parseInt(proxyCheckInterval, 10) || 30)),
@@ -608,6 +611,20 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
           />
         </div>
 
+        {/* Smart Fallback (Model Switching on Quota) */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.5rem', borderTop: '1px solid var(--border)' }}>
+          <div>
+            <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>Smart Fallback (Model Switching on Quota)</div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)' }}>
+              When disabled (recommended), the gateway strictly serves the exact model requested. Enable only to allow trying other free models if the requested model is exhausted.
+            </div>
+          </div>
+          <CustomToggle
+            checked={smartFallback}
+            onChange={setSmartFallback}
+          />
+        </div>
+
         {/* Retry and quota-failover budgets */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
           <div>
@@ -710,7 +727,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                     type="text"
                     className="input-field"
                     style={{ flex: 1, fontFamily: 'monospace', fontSize: '0.82rem' }}
-                    placeholder="http://username:password@gate.smartproxy.com:7000"
+                    placeholder="http://username:password@gate.smartproxy.com:7000 or host:port:username:password"
                     value={rotatingProxyUrl}
                     onChange={e => {
                       setRotatingProxyUrl(e.target.value);
@@ -728,7 +745,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                   </button>
                 </div>
                 <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)', marginTop: '0.25rem', display: 'block' }}>
-                  Supported formats: <code>http://user:pass@host:port</code>, <code>https://...</code>, or <code>socks5://...</code>. Password is automatically masked and encrypted.
+                  Supported formats: <code>http://user:pass@host:port</code>, <code>host:port:user:pass</code>, <code>socks5://...</code>, or <code>https://...</code>. Credentials are automatically masked and encrypted.
                 </span>
               </div>
 
@@ -753,14 +770,14 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                   value={rotatingProxySessionMode}
                   onChange={setRotatingProxySessionMode}
                   options={[
-                    { value: 'auto', label: 'Auto (Exact credentials - Best for Webshare, port-based & IP-whitelisted proxies)' },
-                    { value: 'session_suffix', label: 'Append Session Suffix (-session-<rand> - Best for Smartproxy, Bright Data, Oxylabs)' },
-                    { value: 'custom', label: 'Custom (Replaces {session} or {rand} token in username)' },
-                    { value: 'disabled', label: 'Disabled (Raw credentials)' }
+                    { value: 'auto', label: 'Auto (Smart session rotation & fresh IP on 429)' },
+                    { value: 'session_suffix', label: 'Append Session Suffix (-session-<rand> on every request)' },
+                    { value: 'custom', label: 'Custom (Replaces {session} or {rand} token in username/password)' },
+                    { value: 'disabled', label: 'Disabled (Raw credentials - For port-based rotating gateways)' }
                   ]}
                 />
                 <span style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)', marginTop: '0.2rem', display: 'block' }}>
-                  Use "Auto" for standard backconnect ports (Webshare) or "Session Suffix" for residential providers (Smartproxy, Bright Data) that rotate via username suffix.
+                  Use "Auto" for smart IP rotation that auto-rotates exit IPs on quota limits, "Session Suffix" to guarantee a fresh IP per request, or "Disabled" for raw backconnect gateways.
                 </span>
               </div>
             </div>

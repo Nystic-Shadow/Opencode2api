@@ -661,6 +661,9 @@ class ProxyDiscovery {
           if (position >= passers.length) return;
           const proxy = passers[position];
           if (this.verified.has(proxy.id)) continue;
+          // Ensure diversity of IP hosts in the pool: skip duplicate IP hosts
+          const hasHost = [...this.verified.values()].some(e => e.proxy && e.proxy.host === proxy.host);
+          if (hasHost) continue;
           // Reserve a target slot before the slow probe sequence. Without this
           // reservation, parallel workers all see verified.size below target
           // and can overshoot the configured pool size.

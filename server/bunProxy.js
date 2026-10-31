@@ -138,6 +138,7 @@ const server = Bun.serve({
       headers.set('accept-encoding', 'identity');
       if (forceRotate) {
         headers.set('connection', 'close');
+        headers.set('proxy-connection', 'close');
       }
       if (!headers.has('authorization')) headers.set('authorization', 'Bearer public');
 

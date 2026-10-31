@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [3.2.3] - 2026-10-31 — Model Fallback Lockdown, Direct Egress Quota Lockout Protection, Universal Proxy Parser & Shared IP Pool Optimization
+
+### 🎯 Model Fallback Lockdown ("Fallback Not On Model")
+- **Strict Deterministic Model Routing by Default**: Disabled automatic model switching (`smart_fallback: false` by default across config and migration). When a user requests `deepseek-v4.1-flash`, the gateway strictly serves `deepseek-v4.1-flash` and never secretly swaps to `big-pickle`, `mimo`, `nemotron`, `beam`, `flint`, or `glm`.
+- **Configurable Smart Fallback Toggle**: Added an explicit toggle in the Settings UI so operators who want cross-model failovers can opt-in, while preserving exact model requested for normal inference workflows.
+- **Eliminated 40s+ Cascading Failover Stalls**: Prevented the gateway from cycling through 8 consecutive models when all proxies are exhausted.
+
+### 🛡️ Direct Egress Quota Lockout Protection
+- **No Direct Fallback During Quota Cooldown**: Fixed a critical bug where `server/proxy.js` fell back to direct host egress even when the host IP was actively in an 11.5-hour rate-limit cooldown (`Retry-After: 41350s`). All direct fallback paths now check `egress.getQuotaRetryAfter(directRoute) === 0` before attempting direct egress, failing fast rather than hanging on burned host IPs.
+
+### 🔄 Universal Proxy Parser & Rotating IP Switching
+- **Standard `host:port:user:pass` Format Support**: Enhanced `parseProxyUrl` and admin routes to natively parse `host:port:username:password` and `ip:port:username:password` (used by 90% of residential proxy providers including Webshare, Smartproxy, IPRoyal, Bright Data) alongside standard URLs.
+- **Forced Session Mutation on 429 Quota Retry**: When a rotating proxy hits an upstream 429 in `auto` mode, the retry immediately injects a fresh `-session-<randId>` token, forcing the proxy provider to assign a brand-new exit IP instead of retrying the exact same rate-limited IP.
+- **Connection Close Headers**: Bun proxy sets `proxy-connection: close` alongside `connection: close` on forced rotations to guarantee zero socket reuse at the proxy gateway level.
+
+### 🌐 Shared IP Quota Cooldown & Unique-Host Scraper Optimization
+- **Shared IP Host Quota Propagation**: When one proxy port (e.g. `102.244.78.61:8087`) hits an upstream IP rate limit, the quota cooldown is automatically shared with all sibling routes on the same host IP (`:8081`, `:8086`, `:8082`), preventing wasted attempts on the same rate-limited IP.
+- **Unique IP Host Enforcement in Auto Discovery**: Automatic proxy scraper now enforces IP address uniqueness (maximum 1 proxy per IP host), preventing the pool from being diluted by multiple ports on the same host and maximizing genuine egress IP diversity.
+
+---
+
 ## [3.2.2] - 2026-10-31 — Bun Stream Abortion Bug Elimination, Isolated FetchSession Connection Pool, and High-Throughput Egress Routing
 
 ### 🚀 Long Stream Cutoff Fix ("Beech Beech Mai Stream Cut Ho Jana")

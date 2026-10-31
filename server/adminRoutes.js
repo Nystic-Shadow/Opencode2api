@@ -80,7 +80,7 @@ function constantTimeCompare(a, b) {
 
 function proxyIdentity(raw) {
   try {
-    const value = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
+    const value = egress.normalizeProxyString ? egress.normalizeProxyString(raw) : (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`);
     const url = new URL(value);
     let protocol = url.protocol.replace(':', '').toLowerCase();
     if (protocol === 'socks5h' || protocol === 'socks') protocol = 'socks5';
@@ -95,7 +95,7 @@ function proxyIdentity(raw) {
 
 function maskProxy(raw) {
   try {
-    const value = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
+    const value = egress.normalizeProxyString ? egress.normalizeProxyString(raw) : (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`);
     const url = new URL(value);
     if (!url.username && !url.password) return raw;
     url.username = '***';

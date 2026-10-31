@@ -98,7 +98,7 @@ const DEFAULT_CONFIG = {
   free_only: true,
   global_rpm_limit: 0, // 0 = unlimited
   global_tpm_limit: 0, // 0 = unlimited
-  smart_fallback: process.env.SMART_FALLBACK !== 'false',
+  smart_fallback: process.env.SMART_FALLBACK === 'true',
   max_retries: parseInt(process.env.MAX_RETRIES, 10) || 2, // hard-capped at 3 below
   proxy_quota_failovers: parseInt(process.env.PROXY_QUOTA_FAILOVERS, 10) || 20,
   proxy_check_interval_minutes: parseInt(process.env.PROXY_CHECK_INTERVAL_MINUTES, 10) || 30,
@@ -304,12 +304,13 @@ class ConfigManager {
         this.config.client_version = '2.1.4';
       }
 
-      if (fileConfig._smart_fallback_migrated !== true) {
-        this.config.smart_fallback = process.env.SMART_FALLBACK !== 'false';
-        this.config._smart_fallback_migrated = true;
+      if (fileConfig.smart_fallback !== undefined) {
+        this.config.smart_fallback = fileConfig.smart_fallback === true;
+      } else {
+        this.config.smart_fallback = process.env.SMART_FALLBACK === 'true';
       }
       if (process.env.SMART_FALLBACK !== undefined) {
-        this.config.smart_fallback = process.env.SMART_FALLBACK !== 'false';
+        this.config.smart_fallback = process.env.SMART_FALLBACK === 'true';
       }
 
       this.ensureAdminPassword();
@@ -357,6 +358,10 @@ class ConfigManager {
     if (newVals.admin_password) {
       process.env.DASHBOARD_PASS = newVals.admin_password;
       EXPLICIT_ENV_KEYS.add('DASHBOARD_PASS');
+    }
+    if (newVals.smart_fallback !== undefined) {
+      process.env.SMART_FALLBACK = String(newVals.smart_fallback);
+      EXPLICIT_ENV_KEYS.add('SMART_FALLBACK');
     }
     if (newVals.rotating_proxy_enabled !== undefined) {
       process.env.ROTATING_PROXY_ENABLED = String(newVals.rotating_proxy_enabled);

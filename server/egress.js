@@ -788,10 +788,9 @@ class EgressManager {
           }
           return;
         }
-        settled = true;
-        clearTimeout(timer);
-        socket = stream || null;
         if (err || !stream) {
+          settled = true;
+          clearTimeout(timer);
           if (stream) {
             try { stream.destroy(); } catch (e) {}
           }
@@ -799,8 +798,58 @@ class EgressManager {
           resolve(false);
           return;
         }
-        try { stream.destroy(); } catch (e) {}
-        resolve(true);
+        socket = stream;
+
+        // Active HTTP probe to verify the proxy IP is clean and not blocked (403/429) upstream
+        const targetHost = (this._probeTarget && this._probeTarget().host) || 'opencode.ai';
+        const probePath = targetHost === 'opencode.ai' ? '/zen/v1/models' : '/';
+        let responseHeader = '';
+
+        const onData = (chunk) => {
+          responseHeader += chunk.toString('utf8');
+          if (responseHeader.includes('\r\n') || responseHeader.length >= 12) {
+            cleanup();
+            const firstLine = responseHeader.split('\r\n')[0] || '';
+            // For opencode.ai, verify HTTP 200 OK (rejects 403 Cloudflare challenges and 429 rate limits)
+            const isOk = targetHost === 'opencode.ai' ? firstLine.includes(' 200') : /^[A-Z\/0-9.]+ [23]\d\d/.test(firstLine);
+            if (!isOk && recordErrors) {
+              this.probeErrors.set(route.id, `Upstream rejected: ${firstLine.slice(0, 40)}`);
+            }
+            settled = true;
+            clearTimeout(timer);
+            resolve(isOk);
+          }
+        };
+
+        const onError = (e) => {
+          cleanup();
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (recordErrors) this.probeErrors.set(route.id, e.message || 'socket error');
+          resolve(false);
+        };
+
+        const cleanup = () => {
+          try {
+            stream.removeListener('data', onData);
+            stream.removeListener('error', onError);
+            stream.destroy();
+          } catch (e) {}
+        };
+
+        stream.on('data', onData);
+        stream.on('error', onError);
+        try {
+          stream.write(`GET ${probePath} HTTP/1.1\r\nHost: ${targetHost}\r\nUser-Agent: OpenCode2API/3\r\nAuthorization: Bearer public\r\nConnection: close\r\n\r\n`);
+        } catch (e) {
+          cleanup();
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(false);
+          }
+        }
       };
 
       this._connectViaProxy(route, this._probeTarget(), done);

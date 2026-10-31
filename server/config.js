@@ -358,6 +358,18 @@ class ConfigManager {
       process.env.DASHBOARD_PASS = newVals.admin_password;
       EXPLICIT_ENV_KEYS.add('DASHBOARD_PASS');
     }
+    if (newVals.rotating_proxy_enabled !== undefined) {
+      process.env.ROTATING_PROXY_ENABLED = String(newVals.rotating_proxy_enabled);
+      EXPLICIT_ENV_KEYS.add('ROTATING_PROXY_ENABLED');
+    }
+    if (newVals.rotating_proxy_url !== undefined) {
+      process.env.ROTATING_PROXY_URL = newVals.rotating_proxy_url;
+      EXPLICIT_ENV_KEYS.add('ROTATING_PROXY_URL');
+    }
+    if (newVals.rotating_proxy_session_mode !== undefined) {
+      process.env.ROTATING_PROXY_SESSION_MODE = newVals.rotating_proxy_session_mode;
+      EXPLICIT_ENV_KEYS.add('ROTATING_PROXY_SESSION_MODE');
+    }
     this.config = { ...this.config, ...newVals };
     this.save();
     for (const listener of this.listeners) {

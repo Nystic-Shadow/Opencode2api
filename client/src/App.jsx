@@ -147,9 +147,11 @@ export default function App() {
       const modelsRes = await fetch('/api/models', { headers: authHeaders });
       if (modelsRes.ok) setModelsData(await modelsRes.json());
 
-      // Settings
-      const settingsRes = await fetch('/api/settings', { headers: authHeaders });
-      if (settingsRes.ok) setSettings(await settingsRes.json());
+      // Settings (refresh periodically unless user is actively on the settings tab)
+      if (activeTab !== 'settings') {
+        const settingsRes = await fetch('/api/settings', { headers: authHeaders });
+        if (settingsRes.ok) setSettings(await settingsRes.json());
+      }
 
       // Notifications
       const notifRes = await fetch('/api/notifications', { headers: authHeaders });
@@ -245,8 +247,12 @@ export default function App() {
       headers: authHeaders,
       body: JSON.stringify(updates)
     });
-    if (!res.ok) throw new Error('Failed to save settings');
-    fetchAllData();
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      throw new Error(errJson.error || 'Failed to save settings');
+    }
+    const settingsRes = await fetch('/api/settings', { headers: authHeaders });
+    if (settingsRes.ok) setSettings(await settingsRes.json());
   };
 
   const handleMarkNotificationsRead = async () => {

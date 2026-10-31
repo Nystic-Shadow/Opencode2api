@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [3.1.1] - 2026-10-31 — UHQ Active Probe Proxy Screening and Dashboard State Synchronization
+
+### 🛠️ Settings Form & State Auto-Reset Fix
+- **Eliminated Background Polling Collision**: Previously, `fetchAllData()` executed every 5 seconds, triggering an unconditional `useEffect` in `Settings.jsx` that clobbered the user's active form edits (flipping the Rotating Proxy toggle back to OFF and wiping newly entered proxy URLs before they could be saved).
+- **One-Time Form Initialization**: Guarded form fields with `initializedRef` so settings only initialize once when loaded from the server, preventing background polling from overwriting user changes.
+- **Active Tab Polling Suppression**: In `App.jsx`, polling `/api/settings` is paused whenever the user is actively navigating the Settings tab, with immediate state synchronization occurring upon explicit save.
+- **Runtime Environment Synchronization**: Synced `ROTATING_PROXY_ENABLED`, `ROTATING_PROXY_URL`, and `ROTATING_PROXY_SESSION_MODE` directly into `process.env` and added them to `EXPLICIT_ENV_KEYS` to ensure persistence across config saves.
+
+### 💎 Ultra-High-Quality (UHQ) Proxy Active Probe & Screening
+- **Active HTTP 200 Verification Probe**: Previously, `_probeRoute` only checked TLS handshakes to `opencode.ai:443`. Burned datacenter proxies passed TLS but failed on inference with `FreeUsageLimitError` (429) or Cloudflare CAPTCHAs (403), causing long 30s+ retry hops. Probes now execute an active HTTP/1.1 request (`GET /zen/v1/models`) and strictly verify `HTTP/1.1 200 OK` before admitting any proxy into the routing pool.
+- **Elimination of Port 443/8443 TLS EPROTO Errors**: Scraped candidates listening on ports 443 and 8443 are automatically recognized as `https://` schemes, preventing `EPROTO: The TLS handshake failed` transport errors.
+- **Curated Elite & Residential Sources**: Prioritized verified high-yield lists (`proxifly-us`, `proxyscrape-elite-v4`, `hideip-https`, `hideip-http`, `proxifly-ca`, `proxifly-gb`, `spys-me-us-http`, `proxyscrape-v2-elite`) to ensure higher uptime and clean IPs.
+
+---
+
 ## [3.1.0] - 2026-10-31 — Dedicated Rotating Proxy Support, Ultra-Strict 3s High-Concurrency Scraper, and Instant Rate Limit Switching
 
 ### 🔄 Dedicated Rotating Proxy Support

@@ -31,28 +31,34 @@ const DEFAULT_SOURCES = [
     url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/US/data.txt'
   },
   {
-    name: 'proxifly-all',
-    protocol: 'http',
-    maxLines: 1500,
-    url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt'
-  },
-  {
-    name: 'proxyscrape-us-http',
+    name: 'proxyscrape-elite-v4',
     protocol: 'http',
     maxLines: 800,
-    url: 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&country=us&proxy_format=ipport&format=text'
+    url: 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&anonymity=elite&proxy_format=ipport&format=text'
   },
   {
-    name: 'proxyscrape-v2-elite',
-    protocol: 'http',
+    name: 'hideip-https',
+    protocol: 'https',
     maxLines: 800,
-    url: 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=elite,anonymous'
+    url: 'https://raw.githubusercontent.com/zloi-user/hideip.me/master/https.txt'
   },
   {
-    name: 'geonode-us-http',
+    name: 'hideip-http',
     protocol: 'http',
     maxLines: 500,
-    url: 'https://proxylist.geonode.com/api/proxy-list?country=US&protocols=http%2Chttps&limit=500&page=1&sort_by=lastChecked&sort_type=desc'
+    url: 'https://raw.githubusercontent.com/zloi-user/hideip.me/master/http.txt'
+  },
+  {
+    name: 'proxifly-ca',
+    protocol: 'http',
+    maxLines: 300,
+    url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/CA/data.txt'
+  },
+  {
+    name: 'proxifly-gb',
+    protocol: 'http',
+    maxLines: 400,
+    url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/GB/data.txt'
   },
   {
     name: 'spys-me-us-http',
@@ -62,28 +68,22 @@ const DEFAULT_SOURCES = [
     url: 'https://spys.me/proxy.txt'
   },
   {
-    name: 'proxyscrape-v2-us-http',
-    protocol: 'http',
-    maxLines: 500,
-    url: 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=US&ssl=all&anonymity=all'
-  },
-  {
-    name: 'thespeedx-http',
+    name: 'proxyscrape-v2-elite',
     protocol: 'http',
     maxLines: 800,
-    url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'
+    url: 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=elite'
   },
   {
-    name: 'monosans-http',
-    protocol: 'http',
-    maxLines: 500,
-    url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'
+    name: 'ercindedeoglu-https',
+    protocol: 'https',
+    maxLines: 800,
+    url: 'https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt'
   },
   {
-    name: 'monosans-all',
-    protocol: 'http',
-    maxLines: 500,
-    url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt'
+    name: 'roosterkid-https',
+    protocol: 'https',
+    maxLines: 300,
+    url: 'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt'
   },
   {
     name: 'clarketm-http',
@@ -92,45 +92,45 @@ const DEFAULT_SOURCES = [
     url: 'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt'
   },
   {
-    name: 'vakhov-http',
-    protocol: 'http',
-    maxLines: 400,
-    url: 'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt'
-  },
-  {
     name: 'vakhov-https',
-    protocol: 'http',
+    protocol: 'https',
     maxLines: 400,
     url: 'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt'
   },
   {
-    name: 'ercindedeoglu-https',
-    protocol: 'http',
-    maxLines: 500,
-    url: 'https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt'
-  },
-  {
-    name: 'zevtyardt-http',
-    protocol: 'http',
-    maxLines: 500,
-    url: 'https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt'
-  },
-  {
-    name: 'roosterkid-https',
-    protocol: 'http',
-    maxLines: 500,
-    url: 'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt'
-  },
-  {
     name: 'sunny-http',
     protocol: 'http',
-    maxLines: 400,
+    maxLines: 500,
     url: 'https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt'
+  },
+  {
+    name: 'proxifly-all',
+    protocol: 'http',
+    maxLines: 800,
+    url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt'
+  },
+  {
+    name: 'thespeedx-http',
+    protocol: 'http',
+    maxLines: 600,
+    url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'
+  },
+  {
+    name: 'monosans-http',
+    protocol: 'http',
+    maxLines: 400,
+    url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'
+  },
+  {
+    name: 'monosans-all',
+    protocol: 'http',
+    maxLines: 400,
+    url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt'
   },
   {
     name: 'murongpig-http',
     protocol: 'http',
-    maxLines: 600,
+    maxLines: 500,
     url: 'https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt'
   }
 ];
@@ -203,9 +203,16 @@ function parseCandidateLine(raw, protocol) {
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
     const v4 = candidate.match(/^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})(?::.*)?$/);
     const v6 = candidate.match(/^(\[[0-9a-fA-F:]+\]):(\d{1,5})(?::.*)?$/);
-    if (v4) candidate = `${v4[1]}:${v4[2]}`;
-    else if (v6) candidate = `${v6[1]}:${v6[2]}`;
-    candidate = `${protocol}://${candidate}`;
+    let port = 0;
+    if (v4) {
+      candidate = `${v4[1]}:${v4[2]}`;
+      port = parseInt(v4[2], 10);
+    } else if (v6) {
+      candidate = `${v6[1]}:${v6[2]}`;
+      port = parseInt(v6[2], 10);
+    }
+    const scheme = (port === 443 || port === 8443) ? 'https' : (protocol || 'http');
+    candidate = `${scheme}://${candidate}`;
   }
 
   const proxy = egress.parseProxyUrl(candidate);

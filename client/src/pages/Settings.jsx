@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { FiSettings, FiRefreshCw, FiCheck, FiSliders, FiCpu, FiZap } from '../components/Icons';
 import CustomToggle from '../components/CustomToggle';
 import CustomSelect from '../components/CustomSelect';
@@ -43,10 +43,16 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [isPruningProxies, setIsPruningProxies] = useState(false);
   const [proxyFeedback, setProxyFeedback] = useState(null);
 
+  const initializedRef = useRef(false);
+
   useEffect(() => {
-    if (settings.rotating_proxy_enabled !== undefined) setRotatingProxyEnabled(!!settings.rotating_proxy_enabled);
-    if (settings.rotating_proxy_url !== undefined) setRotatingProxyUrl(settings.rotating_proxy_url || '');
-    if (settings.rotating_proxy_session_mode !== undefined) setRotatingProxySessionMode(settings.rotating_proxy_session_mode || 'auto');
+    // Only initialize form fields once from settings when settings first loads
+    if (!initializedRef.current && settings && Object.keys(settings).length > 0) {
+      initializedRef.current = true;
+      if (settings.rotating_proxy_enabled !== undefined) setRotatingProxyEnabled(!!settings.rotating_proxy_enabled);
+      if (settings.rotating_proxy_url !== undefined) setRotatingProxyUrl(settings.rotating_proxy_url || '');
+      if (settings.rotating_proxy_session_mode !== undefined) setRotatingProxySessionMode(settings.rotating_proxy_session_mode || 'auto');
+    }
   }, [settings]);
 
   useEffect(() => {

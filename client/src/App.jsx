@@ -380,6 +380,8 @@ export default function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         cliVersion={settings.client_version}
+        egressMode={settings.egress_mode}
+        rotatingEnabled={settings.rotating_proxy_enabled}
       />
 
       {/* Main Content Area */}

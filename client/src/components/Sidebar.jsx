@@ -1,7 +1,7 @@
 import React from 'react';
 import { FiActivity, FiKey, FiBox, FiSettings, FiServer, FiShield, FiPlay } from './Icons';
 
-export default function Sidebar({ activeTab, setActiveTab, cliVersion }) {
+export default function Sidebar({ activeTab, setActiveTab, cliVersion, egressMode, rotatingEnabled }) {
   const tabs = [
     { id: 'overview', label: 'Overview', icon: FiActivity },
     { id: 'playground', label: 'Playground', icon: FiPlay },
@@ -97,7 +97,15 @@ export default function Sidebar({ activeTab, setActiveTab, cliVersion }) {
           <FiShield size={12} color="var(--primary)" />
           <span style={{ fontWeight: '600', color: 'var(--sidebar-foreground)' }}>Proxy Egress</span>
         </div>
-        <div style={{ marginBottom: '0.5rem' }}>Explicit pool, fail-closed routing</div>
+        <div style={{ marginBottom: '0.5rem', fontWeight: '500' }}>
+          {rotatingEnabled
+            ? 'Residential rotating egress'
+            : egressMode === 'auto'
+              ? 'Auto discovery + pool'
+              : egressMode === 'direct'
+                ? 'Direct egress'
+                : 'Explicit pool, verified routing'}
+        </div>
         <div style={{ 
           fontSize: '0.62rem', 
           color: 'var(--muted-foreground)', 

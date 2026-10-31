@@ -81,7 +81,7 @@ function upstreamTarget() {
 
 // Build the loopback request sent to the Bun bridge. The selected egress
 // proxy travels as base64url so Bun can use it for this request only.
-function bridgeRequestOptions(bridge, target, upstreamHeaders, route, timeoutMs = 15000) {
+function bridgeRequestOptions(bridge, target, upstreamHeaders, route, timeoutMs = 60000) {
   const headers = {
     ...upstreamHeaders,
     'x-opencode2api-bridge-token': bridge.token,
@@ -100,6 +100,36 @@ function bridgeRequestOptions(bridge, target, upstreamHeaders, route, timeoutMs 
     headers,
     agent: bridgeAgent
   };
+}
+
+// Watchdog to disarm connection timeout once streaming begins, while guarding
+// against silent mid-stream stalls without killing active token generation.
+function attachStreamWatchdog(upstreamRes, failFn, idleTimeoutMs = 60000) {
+  let timer = null;
+  const reset = () => {
+    if (timer) clearTimeout(timer);
+    if (!upstreamRes.destroyed && !upstreamRes.readableEnded) {
+      timer = setTimeout(() => {
+        failFn(new Error(`Upstream stream idle timeout (no chunks for ${Math.round(idleTimeoutMs / 1000)}s)`));
+      }, idleTimeoutMs);
+      if (typeof timer.unref === 'function') timer.unref();
+    }
+  };
+  const disarm = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (upstreamRes.socket?.setTimeout) {
+      try { upstreamRes.socket.setTimeout(0); } catch (e) {}
+    }
+  };
+  reset();
+  upstreamRes.on('data', reset);
+  upstreamRes.once('end', disarm);
+  upstreamRes.once('close', disarm);
+  upstreamRes.once('error', disarm);
+  return disarm;
 }
 
 async function resolveBridgeConnection(officialUpstream, isRequestedFree, waitMs) {
@@ -543,10 +573,11 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     const upstreamHeaders = identity.buildUpstreamHeaders(sessionId, projectId, Buffer.byteLength(payloadString));
     const isProxyRoute = activeRoute.type === 'proxy';
     const proxyAttemptTimeout = activeRoute.isRotating
-      ? configInt('rotating_proxy_timeout_ms', 8000, 3000)
-      : configInt('proxy_attempt_timeout_ms', 8000, 3000);
+      ? configInt('rotating_proxy_timeout_ms', 5000, 2000)
+      : configInt('proxy_attempt_timeout_ms', 5000, 2000);
     const maxAttemptDuration = isProxyRoute ? Math.min(proxyAttemptTimeout, requestTimeout) : requestTimeout;
     const attemptTimeout = Math.max(1000, Math.min(maxAttemptDuration, remainingMs));
+    const streamDeadlineMs = Math.max(remainingMs, requestTimeout, 60000);
 
     const target = upstreamTarget();
     let attemptResult;
@@ -564,7 +595,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         let isTimedOut = false;
         let requestOptions;
         if (bridgeConnection) {
-          requestOptions = bridgeRequestOptions(bridgeConnection, target, upstreamHeaders, activeRoute, attemptTimeout);
+          requestOptions = bridgeRequestOptions(bridgeConnection, target, upstreamHeaders, activeRoute, streamDeadlineMs);
         } else {
           requestOptions = {
             hostname: target.hostname,
@@ -578,6 +609,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         requestOptions.timeout = attemptTimeout;
         const requestTransport = bridgeConnection ? http : target.transport;
         const upstreamReq = requestTransport.request(requestOptions, (upstreamRes) => {
+          // Headers received from upstream; disarm initial connect/attempt timeout
+          try { upstreamReq.setTimeout(0); } catch (e) {}
           const contentType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
           const isValidContentType = contentType.includes('event-stream') || contentType.includes('application/json');
           const bridgeError = bridgeConnection
@@ -683,6 +716,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         if (res.flushHeaders) res.flushHeaders();
         if (res.socket?.setNoDelay) res.socket.setNoDelay(true);
 
+        const disarmWatchdog = attachStreamWatchdog(upstreamRes, failStream, 60000);
+
         let promptTokens = 0;
         let completionTokens = 0;
         let totalTokens = 0;
@@ -700,6 +735,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         const failStream = (err) => {
           if (streamFailed) return;
           streamFailed = true;
+          if (typeof disarmWatchdog === 'function') disarmWatchdog();
           releaseSlot();
           // The client already has a partial response, so this request cannot
           // be replayed. Quarantine the proxy briefly so the next request does
@@ -1489,10 +1525,11 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     const upstreamHeaders = identity.buildUpstreamHeaders(sessionId, projectId, Buffer.byteLength(payloadString));
     const isProxyRoute = activeRoute.type === 'proxy';
     const proxyAttemptTimeout = activeRoute.isRotating
-      ? configInt('rotating_proxy_timeout_ms', 8000, 3000)
-      : configInt('proxy_attempt_timeout_ms', 8000, 3000);
+      ? configInt('rotating_proxy_timeout_ms', 5000, 2000)
+      : configInt('proxy_attempt_timeout_ms', 5000, 2000);
     const maxAttemptDuration = isProxyRoute ? Math.min(proxyAttemptTimeout, requestTimeout) : requestTimeout;
     const attemptTimeout = Math.max(1000, Math.min(maxAttemptDuration, remainingMs));
+    const streamDeadlineMs = Math.max(remainingMs, requestTimeout, 60000);
 
     const target = upstreamTarget();
     let attemptResult;
@@ -1510,7 +1547,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         let isTimedOut = false;
         let requestOptions;
         if (bridgeConnection) {
-          requestOptions = bridgeRequestOptions(bridgeConnection, target, upstreamHeaders, activeRoute, attemptTimeout);
+          requestOptions = bridgeRequestOptions(bridgeConnection, target, upstreamHeaders, activeRoute, streamDeadlineMs);
         } else {
           requestOptions = {
             hostname: target.hostname,
@@ -1524,6 +1561,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         requestOptions.timeout = attemptTimeout;
         const requestTransport = bridgeConnection ? http : target.transport;
         const upstreamReq = requestTransport.request(requestOptions, (upstreamRes) => {
+          // Headers received from upstream; disarm initial connect/attempt timeout
+          try { upstreamReq.setTimeout(0); } catch (e) {}
           const contentType = String(upstreamRes.headers['content-type'] || '').toLowerCase();
           const isValidContentType = contentType.includes('event-stream') || contentType.includes('application/json');
           const bridgeError = bridgeConnection
@@ -1631,6 +1670,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         if (res.flushHeaders) res.flushHeaders();
         if (res.socket?.setNoDelay) res.socket.setNoDelay(true);
 
+        const disarmWatchdog = attachStreamWatchdog(upstreamRes, failStream, 60000);
+
         // Send initial message_start
         writeSse(`event: message_start\ndata: ${JSON.stringify({
           type: 'message_start',
@@ -1665,6 +1706,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         const failStream = (err) => {
           if (streamFailed) return;
           streamFailed = true;
+          if (typeof disarmWatchdog === 'function') disarmWatchdog();
           releaseSlot();
           // The client already has a partial response, so this request cannot
           // be replayed. Quarantine the proxy briefly so the next request does

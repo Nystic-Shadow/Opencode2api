@@ -112,10 +112,24 @@ const server = Bun.serve({
     const proxy = decodeProxy(req.headers.get(PROXY_HEADER));
     const forceRotate = req.headers.get('x-opencode2api-force-rotate') === '1';
     const timeoutHeader = Number(req.headers.get('x-opencode2api-timeout-ms'));
-    const timeoutMs = (Number.isFinite(timeoutHeader) && timeoutHeader > 0) ? timeoutHeader : 15000;
-    const signal = (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
-      ? AbortSignal.timeout(timeoutMs)
-      : undefined;
+    // Generous default stream deadline (90s); Node enforces connect timeout via attemptTimeout
+    const timeoutMs = (Number.isFinite(timeoutHeader) && timeoutHeader > 0) ? timeoutHeader : 90000;
+
+    let signal;
+    if (typeof AbortSignal !== 'undefined') {
+      const timerSignal = typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined;
+      if (req.signal && timerSignal && typeof AbortSignal.any === 'function') {
+        signal = AbortSignal.any([req.signal, timerSignal]);
+      } else {
+        signal = req.signal || timerSignal;
+      }
+    }
+
+    // Isolated FetchSession for proxy & rotating requests guarantees zero TCP connection pooling
+    // across route failovers, ensuring rotating proxies always connect fresh and exit via new IPs.
+    const useSession = Boolean(proxy || forceRotate) && typeof Bun.FetchSession === 'function';
+    const session = useSession ? new Bun.FetchSession() : null;
+    const fetchFn = session ? session.fetch.bind(session) : fetch;
 
     try {
       const headers = plainHeaders(req.headers);
@@ -130,7 +144,7 @@ const server = Bun.serve({
       const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
       const body = hasBody ? Buffer.from(await req.arrayBuffer()) : undefined;
 
-      const upstream = await fetch(`${UPSTREAM_ORIGIN}${url.pathname}${url.search}`, {
+      const upstream = await fetchFn(`${UPSTREAM_ORIGIN}${url.pathname}${url.search}`, {
         method: req.method,
         headers,
         body,
@@ -142,12 +156,39 @@ const server = Bun.serve({
       const responseHeaders = plainHeaders(upstream.headers);
       responseHeaders.set(BRIDGE_HEADER, '1');
 
-      return new Response(upstream.body, {
+      if (upstream.status !== 200) {
+        if (session) {
+          try { session.close(); } catch (e) {}
+        }
+        return new Response(upstream.body, {
+          status: upstream.status,
+          statusText: upstream.statusText,
+          headers: responseHeaders
+        });
+      }
+
+      let responseBody = upstream.body;
+      if (session && responseBody && typeof TransformStream !== 'undefined') {
+        const ts = new TransformStream({
+          flush() {
+            try { session.close(); } catch (e) {}
+          },
+          cancel() {
+            try { session.close(); } catch (e) {}
+          }
+        });
+        responseBody = responseBody.pipeThrough(ts);
+      }
+
+      return new Response(responseBody, {
         status: upstream.status,
         statusText: upstream.statusText,
         headers: responseHeaders
       });
     } catch (err) {
+      if (session) {
+        try { session.close(); } catch (e) {}
+      }
       // A proxy failure should rotate the egress route; a direct transport
       // failure is a bridge problem and must not prune the proxy pool.
       const kind = proxy ? 'proxy' : 'transport';

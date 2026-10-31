@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [3.2.2] - 2026-10-31 — Bun Stream Abortion Bug Elimination, Isolated FetchSession Connection Pool, and High-Throughput Egress Routing
+
+### 🚀 Long Stream Cutoff Fix ("Beech Beech Mai Stream Cut Ho Jana")
+- **Eliminated 8s Stream Abort Bomb**: Fixed a critical bug where `proxyAttemptTimeout` (8000ms) was passed to the Bun bridge as `x-opencode2api-timeout-ms`, causing Bun's `AbortSignal.timeout(8000)` to force-abort the upstream SSE connection at exactly 8.0 seconds mid-generation. Long-running completions streaming thousands of tokens (2,000+ tokens) were severed with HTTP 502.
+- **Full Request Deadline Passed to Bridge**: The Bun bridge now receives the full stream deadline (`streamDeadlineMs`, minimum 60s–90s) via `x-opencode2api-timeout-ms`, while Node's 5s connect timeout is strictly disarmed with `upstreamReq.setTimeout(0)` the moment initial response headers arrive.
+- **Stream Chunk Watchdog**: Implemented an active JavaScript chunk-to-chunk watchdog in both OpenAI and Anthropic streaming pipelines that refreshes on every incoming SSE chunk (60s idle timeout), ensuring active completions never get severed while frozen or hung sockets are cleaned up safely.
+
+### 🔄 Zero-Reuse Isolated `FetchSession` for Rotating Proxies
+- **Eliminated Bun Global TCP Socket Pooling**: Discovered that Bun stripped `Connection: close` (WHATWG Fetch specification prohibits setting forbidden `Connection` header in client requests), keeping TCP CONNECT tunnels open in the global pool. Consequently, retries and subsequent requests reused the same socket and hit the exact same rate-limited exit IP.
+- **Isolated `Bun.FetchSession` Per Egress Hop**: When using proxies or rotating proxies, the bridge now spawns an isolated `Bun.FetchSession` that automatically disposes all sockets via `TransformStream` on `flush` or `cancel`. Rotating proxies (Webshare, Smartproxy, Bright Data, Oxylabs, etc.) are guaranteed a brand-new TCP handshake and fresh exit IP on every single request and retry.
+- **Instant Quota Failover**: Quota failovers immediately continue to the next routable proxy or fresh rotating exit IP without artificial waiting or socket hang timeouts.
+
+### 🎨 Dashboard UI Egress State Alignment
+- **Dynamic Egress Mode Display**: Replaced hardcoded "Explicit pool, fail-closed routing" text in `Sidebar.jsx` with dynamic mode status reflecting active configuration: Residential Rotating Egress, Auto Discovery + Verified Pool, Explicit Pool, or Direct Egress.
+
+---
+
 ## [3.2.1] - 2026-10-31 — Model Fidelity Guarantee, Clean Upstream Session Minting, and Port-Based Rotating Proxy Auth Parity
 
 ### 🎯 Model Fidelity Guarantee (No Unwanted Model Fallback)

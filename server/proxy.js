@@ -471,6 +471,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
   let networkFailures = 0;
   let proxyTransportFailures = 0;
   const maxAttempts = maxRetries + 1 + quotaFailoverLimit + proxyFailoverLimit;
+  const rotatingQuotaHits = {};
 
   let lastStatus = 0;
   let lastBody = '';
@@ -543,7 +544,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     const upstreamHeaders = identity.buildUpstreamHeaders(sessionId, projectId, Buffer.byteLength(payloadString));
     const isProxyRoute = activeRoute.type === 'proxy';
     const proxyAttemptTimeout = activeRoute.isRotating
-      ? configInt('rotating_proxy_timeout_ms', 15000, 5000)
+      ? configInt('rotating_proxy_timeout_ms', 8000, 3000)
       : configInt('proxy_attempt_timeout_ms', 8000, 3000);
     const maxAttemptDuration = isProxyRoute ? Math.min(proxyAttemptTimeout, requestTimeout) : requestTimeout;
     const attemptTimeout = Math.max(1000, Math.min(maxAttemptDuration, remainingMs));
@@ -601,7 +602,7 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
                 success: false,
                 statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
                 headers: upstreamRes.headers,
-                proxyFailure: bridgeError === 'proxy' || (!isValidContentType && activeRoute.type === 'proxy'),
+                proxyFailure: bridgeError === 'proxy' || bridgeError === 'proxy_failure' || bridgeError.includes('proxy') || (!isValidContentType && activeRoute.type === 'proxy'),
                 viaBridge: !!bridgeConnection,
                 body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
               });
@@ -626,12 +627,12 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
         });
 
         upstreamReq.on('error', (err) => {
-          const isProxyErr = (activeRoute.type === 'proxy') && (isTimedOut || (!bridgeConnection && isProxyTransportError(err, activeRoute)));
+          const isProxyErr = (activeRoute.type === 'proxy') && (isTimedOut || isProxyTransportError(err, activeRoute) || (err && (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED')));
           resolve({
             success: false,
             statusCode: (isTimedOut || deadlineExceeded) ? 504 : 502,
             proxyFailure: isProxyErr,
-            bridgeFailure: !!bridgeConnection && !isTimedOut && !deadlineExceeded && !isProxyErr,
+            bridgeFailure: !!bridgeConnection && !isTimedOut && !deadlineExceeded && !isProxyErr && !bunBridge.isReady(),
             viaBridge: !!bridgeConnection,
             body: deadlineExceeded ? 'Request deadline exceeded' : (isTimedOut ? 'Proxy attempt timed out' : err.message)
           });
@@ -1056,6 +1057,19 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
       const isRotating = (activeRoute && activeRoute.isRotating) || config.get('rotating_proxy_enabled') === true;
       if (isRotating) {
         persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
+        rotatingQuotaHits[currentModel] = (rotatingQuotaHits[currentModel] || 0) + 1;
+
+        if (config.get('smart_fallback') !== false && isRequestedFree && rotatingQuotaHits[currentModel] >= 3 && Date.now() < deadline) {
+          const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
+          if (fallback) {
+            console.warn(`[Proxy] Model ${currentModel} returned 3 consecutive quota limits on rotating proxy; smart fallback to ${fallback}...`);
+            currentModel = fallback;
+            upstreamModel = discovery.resolveUpstreamModel(currentModel);
+            triedModels.add(fallback);
+            continue;
+          }
+        }
+
         if (quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
           quotaFailovers++;
           console.warn(`[Proxy] Upstream 429 rate limit on rotating proxy exit IP for ${currentModel}; immediately rotating exit IP & session, retrying (${quotaFailovers}/${quotaFailoverLimit})...`);
@@ -1418,6 +1432,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
   let networkFailures = 0;
   let proxyTransportFailures = 0;
   const maxAttempts = maxRetries + 1 + quotaFailoverLimit + proxyFailoverLimit;
+  const rotatingQuotaHits = {};
 
   let lastStatus = 0;
   let lastBody = '';
@@ -1490,7 +1505,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     const upstreamHeaders = identity.buildUpstreamHeaders(sessionId, projectId, Buffer.byteLength(payloadString));
     const isProxyRoute = activeRoute.type === 'proxy';
     const proxyAttemptTimeout = activeRoute.isRotating
-      ? configInt('rotating_proxy_timeout_ms', 15000, 5000)
+      ? configInt('rotating_proxy_timeout_ms', 8000, 3000)
       : configInt('proxy_attempt_timeout_ms', 8000, 3000);
     const maxAttemptDuration = isProxyRoute ? Math.min(proxyAttemptTimeout, requestTimeout) : requestTimeout;
     const attemptTimeout = Math.max(1000, Math.min(maxAttemptDuration, remainingMs));
@@ -1547,7 +1562,7 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
                 success: false,
                 statusCode: (!isValidContentType && upstreamRes.statusCode === 200) ? 502 : upstreamRes.statusCode,
                 headers: upstreamRes.headers,
-                proxyFailure: bridgeError === 'proxy' || (!isValidContentType && activeRoute.type === 'proxy'),
+                proxyFailure: bridgeError === 'proxy' || bridgeError === 'proxy_failure' || bridgeError.includes('proxy') || (!isValidContentType && activeRoute.type === 'proxy'),
                 viaBridge: !!bridgeConnection,
                 body: (!isValidContentType && upstreamRes.statusCode === 200) ? 'Proxy returned non-API payload (invalid content-type)' : errBody
               });
@@ -1571,12 +1586,12 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
         });
 
         upstreamReq.on('error', (err) => {
-          const isProxyErr = (activeRoute.type === 'proxy') && (isTimedOut || (!bridgeConnection && isProxyTransportError(err, activeRoute)));
+          const isProxyErr = (activeRoute.type === 'proxy') && (isTimedOut || isProxyTransportError(err, activeRoute) || (err && (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED')));
           resolve({
             success: false,
             statusCode: (isTimedOut || deadlineExceeded) ? 504 : 502,
             proxyFailure: isProxyErr,
-            bridgeFailure: !!bridgeConnection && !isTimedOut && !deadlineExceeded && !isProxyErr,
+            bridgeFailure: !!bridgeConnection && !isTimedOut && !deadlineExceeded && !isProxyErr && !bunBridge.isReady(),
             viaBridge: !!bridgeConnection,
             body: deadlineExceeded ? 'Request deadline exceeded' : (isTimedOut ? 'Proxy attempt timed out' : err.message)
           });
@@ -2099,6 +2114,19 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
       const isRotating = (activeRoute && activeRoute.isRotating) || config.get('rotating_proxy_enabled') === true;
       if (isRotating) {
         persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
+        rotatingQuotaHits[currentModel] = (rotatingQuotaHits[currentModel] || 0) + 1;
+
+        if (config.get('smart_fallback') !== false && isRequestedFree && rotatingQuotaHits[currentModel] >= 3 && Date.now() < deadline) {
+          const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
+          if (fallback) {
+            console.warn(`[Proxy] Model ${currentModel} returned 3 consecutive quota limits on rotating proxy; smart fallback to ${fallback}...`);
+            currentModel = fallback;
+            upstreamModel = discovery.resolveUpstreamModel(currentModel);
+            triedModels.add(fallback);
+            continue;
+          }
+        }
+
         if (quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
           quotaFailovers++;
           console.warn(`[Proxy] Upstream 429 rate limit on rotating proxy exit IP for ${currentModel}; immediately rotating exit IP & session, retrying (${quotaFailovers}/${quotaFailoverLimit})...`);

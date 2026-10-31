@@ -753,9 +753,9 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                   value={rotatingProxySessionMode}
                   onChange={setRotatingProxySessionMode}
                   options={[
-                    { value: 'auto', label: 'Auto (Connection Close per request - Recommended for all providers)' },
-                    { value: 'session_suffix', label: 'Append Session Suffix (-session-<rand> for Smartproxy, Bright Data, Oxylabs)' },
-                    { value: 'custom', label: 'Custom ({session} or {rand} placeholder in proxy username)' }
+                    { value: 'auto', label: 'Auto (Smart Session Injection - Appends & rotates session per request - Recommended)' },
+                    { value: 'custom', label: 'Custom ({session} or {rand} placeholder in proxy username)' },
+                    { value: 'disabled', label: 'Disabled (Raw credentials - for static or IP-locked proxies)' }
                   ]}
                 />
                 <span style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)', marginTop: '0.2rem', display: 'block' }}>

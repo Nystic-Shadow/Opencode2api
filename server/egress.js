@@ -31,6 +31,20 @@ function tlsServername(name) {
   return name;
 }
 
+function applyRotatingSession(username, sessionMode = 'auto') {
+  if (sessionMode === 'disabled' || sessionMode === 'raw') return username || '';
+  const randId = crypto.randomBytes(4).toString('hex');
+  let user = String(username || '');
+  if (user.includes('{session}') || user.includes('{rand}')) {
+    return user.replaceAll('{session}', randId).replaceAll('{rand}', randId);
+  }
+  if (sessionMode === 'custom') return user;
+  if (/([-:_]session[-:_])[a-zA-Z0-9]+/i.test(user)) {
+    return user.replace(/([-_:]session[-:_])[a-zA-Z0-9]+/i, `$1${randId}`);
+  }
+  return user ? `${user}-session-${randId}` : `session-${randId}`;
+}
+
 function parseProxyUrl(raw) {
   if (!raw || typeof raw !== 'string') return null;
   let value = raw.trim();
@@ -950,11 +964,12 @@ class EgressManager {
 
   isAvailable(route) {
     if (!route) return false;
-    const health = this._health(route);
     if (route.isRotating) {
-      // Rotating proxy is available unless its circuit breaker is temporarily open
-      return health.openUntil <= Date.now();
+      // Rotating proxy is a gateway endpoint to an entire pool of exit IPs.
+      // It is always available as long as it has a valid host and port.
+      return !!(route.host && route.port);
     }
+    const health = this._health(route);
     if (health.checkFailed) return false;
     return health.openUntil <= Date.now();
   }
@@ -1205,12 +1220,17 @@ class EgressManager {
     // CONNECT authority form requires brackets around IPv6 literals.
     const connectHost = destHost.includes(':') ? `[${destHost}]` : destHost;
     const authority = `${connectHost}:${destPort}`;
+    const isRotating = route.isRotating || (config.get('rotating_proxy_enabled') === true && route.id === 'rotating_proxy');
+    const effectiveUsername = isRotating
+      ? applyRotatingSession(route.username, config.get('rotating_proxy_session_mode'))
+      : route.username;
+
     const headers = {
       Host: authority,
       'User-Agent': 'OpenCode2API/3'
     };
-    if (route.username) {
-      headers['Proxy-Authorization'] = 'Basic ' + Buffer.from(`${route.username}:${route.password}`).toString('base64');
+    if (effectiveUsername) {
+      headers['Proxy-Authorization'] = 'Basic ' + Buffer.from(`${effectiveUsername}:${route.password}`).toString('base64');
     }
 
     let req;
@@ -1367,9 +1387,9 @@ class EgressManager {
       }
       if (kind === 'proxy_down') {
         health.proxyFailures = (health.proxyFailures || 0) + 1;
-        const backoff = Math.min(10000, 2000 * Math.pow(2, Math.min(health.proxyFailures - 1, 3)));
-        health.openUntil = now + backoff;
-        health.lastError = 'rotating proxy gateway connection failed';
+        health.lastError = 'rotating proxy exit IP connection failed';
+        // Note: Do NOT set health.openUntil for rotating proxy:
+        // One failing exit node must never disable the entire gateway or cause /readyz to fail.
         return;
       }
       health.lastError = String(kind || 'error');
@@ -1443,12 +1463,14 @@ manager.parseProxyList = parseProxyList;
 manager.parseRetryAfter = parseRetryAfter;
 manager.classifyUpstreamFailure = classifyUpstreamFailure;
 manager.parseSocks5ConnectResponse = parseSocks5ConnectResponse;
+manager.applyRotatingSession = applyRotatingSession;
 manager._test = {
   parseProxyUrl,
   parseProxyList,
   parseRetryAfter,
   classifyUpstreamFailure,
-  parseSocks5ConnectResponse
+  parseSocks5ConnectResponse,
+  applyRotatingSession
 };
 
 module.exports = manager;

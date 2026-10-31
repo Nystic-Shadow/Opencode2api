@@ -1186,6 +1186,17 @@ async function main() {
       assert.strictEqual(egress.getQuotaRetryAfter(selected), 0, 'rotating proxy must have 0 quota retry after');
       assert.strictEqual(egress.isAvailable(selected), true, 'rotating proxy must remain available after quota');
 
+      // Crucial: transport failure must NOT disable the rotating gateway (prevents Docker SIGTERM)
+      egress.recordFailure(selected, 'proxy_down');
+      assert.strictEqual(egress.isAvailable(selected), true, 'rotating proxy must remain available after transport failure');
+
+      // Crucial: Smart session rotation
+      const s1 = egress.applyRotatingSession('rotate-user', 'auto');
+      assert.ok(/^rotate-user-session-[0-9a-f]{8}$/.test(s1), 'must append session suffix');
+      const s2 = egress.applyRotatingSession(s1, 'auto');
+      assert.ok(/^rotate-user-session-[0-9a-f]{8}$/.test(s2) && s2 !== s1, 'must rotate session ID on subsequent calls');
+      assert.strictEqual(egress.applyRotatingSession('rotate-user', 'disabled'), 'rotate-user', 'disabled mode leaves username intact');
+
       // Crucial: Rotating proxy must never be pruned
       const pruned = egress.removeProxies(new Set(['rotating_proxy']));
       assert.strictEqual(pruned, 0, 'rotating proxy must never be pruned');

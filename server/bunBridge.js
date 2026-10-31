@@ -19,6 +19,7 @@ const net = require('net');
 const path = require('path');
 
 const config = require('./config');
+const egress = require('./egress');
 
 const BRIDGE_SCRIPT = path.join(__dirname, 'bunProxy.js');
 const OFFICIAL_HOST = 'opencode.ai';
@@ -90,12 +91,7 @@ function buildProxyUrl(route) {
   const password = route.password || '';
 
   if (route.isRotating || config.get('rotating_proxy_enabled')) {
-    const randId = crypto.randomBytes(4).toString('hex');
-    if (username.includes('{session}') || username.includes('{rand}')) {
-      username = username.replaceAll('{session}', randId).replaceAll('{rand}', randId);
-    } else if (config.get('rotating_proxy_session_mode') === 'session_suffix') {
-      username = username ? `${username}-session-${randId}` : `session-${randId}`;
-    }
+    username = egress.applyRotatingSession(username, config.get('rotating_proxy_session_mode'));
   }
 
   const auth = username

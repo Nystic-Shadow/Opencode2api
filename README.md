@@ -2,13 +2,13 @@
 
 ![OpenCode2API Banner](docs/banner.svg)
 
-# ⚡ OpenCode2API v3.1.1
+# ⚡ OpenCode2API v3.2.0
 
 ### High-Performance OpenAI & Anthropic Compatible Gateway for OpenCode Models
 
 > **Zero-config intelligent egress: discovers, verifies, latency-ranks, rotates, and prunes public HTTP/HTTPS routes with Bun TLS fingerprint synchronization, resilient proxy failover, and real-time SSE streaming.**
 
-[![Version](https://img.shields.io/badge/Version-v3.1.1-00E5FF.svg?style=for-the-badge&logo=semver&logoColor=white)](package.json)
+[![Version](https://img.shields.io/badge/Version-v3.2.0-00E5FF.svg?style=for-the-badge&logo=semver&logoColor=white)](package.json)
 [![Node.js](https://img.shields.io/badge/Node.js-20+-339933.svg?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Docker Compose](https://img.shields.io/badge/Docker_Compose-Ready-2496ED.svg?style=for-the-badge&logo=docker&logoColor=white)](docker-compose.yml)
 [![Egress](https://img.shields.io/badge/Egress-Latency--Ranked_US_Pool-FF6D00.svg?style=for-the-badge)](https://github.com/Nystic-Shadow/Opencode2api)

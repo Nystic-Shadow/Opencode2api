@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [3.2.0] - 2026-10-31 — Universal Rotating Proxy Session Injection, Instant Smart Fallback, and Resilient Gateway Availability
+
+### 🔄 Universal Rotating Proxy Smart Session Injection
+- **Automatic IP Rotation on Every Request (`auto` mode)**: Fixed a critical issue where default `auto` mode did not mutate proxy credentials, causing Bun and proxy providers to reuse identical sticky exit IPs that remained rate-limited (`FreeUsageLimitError` 429 loops). In v3.2.0, `applyRotatingSession` dynamically injects and rotates isolated session hex IDs (`-session-<rand>`) across both Bun bridge and Node.js egress for all major providers (Webshare, Smartproxy, Bright Data, Oxylabs, IPRoyal, Rayobyte).
+- **Sticky Session Renewal**: Automatically detects existing `-session-`, `_session_`, and `{session}` placeholders and mints fresh random tokens per request/retry.
+- **Node.js Direct Egress & Probe Parity**: Synchronized rotating proxy session headers inside `server/egress.js` `_connectViaProxy` so connection tests and direct socket probes test the exact same rotating credentials used during production inference.
+
+### 🛡️ Non-Disruptive Gateway Availability & Docker Healthcheck Protection
+- **Permanent Rotating Gateway Readiness**: Removed destructive circuit-breaker trip (`openUntil = now + backoff`) from rotating proxies. Because rotating proxies represent millions of exit IPs, a single slow or timed-out exit node no longer shuts down the entire proxy endpoint or causes `/readyz` to return 503.
+- **Eliminated Container SIGTERM Kills**: With `/readyz` protected from false 503 outages, Docker and container orchestrators (Dokploy, Coolify) no longer fail health checks or terminate the gateway with `npm error signal SIGTERM`.
+
+### ⚡ Bounded Fast Timeouts & Instant Smart Fallback
+- **Fast 8s Proxy Timeout**: Reduced default `rotating_proxy_timeout_ms` from 15s to 8s, eliminating long 30s+ request stalls when a peer hangs.
+- **Instant Model Fallback on Repeated 429**: When a free model (e.g. `big-pickle`) encounters 3 consecutive upstream 429 quota responses on a rotating proxy, the gateway automatically triggers Smart Fallback to an available free model (`deepseek-v4.1-flash`, `glm-5.3-flash`, `mimo-v2.6-flash`), completing client requests in 2–3s rather than burning 20 retries on an exhausted model.
+- **Corrected Bridge Error Header Matching**: Fixed proxy failure classification in `server/proxy.js` so `x-opencode2api-bridge-error: proxy_failure` is properly detected and never falsely attributed to bridge crashes.
+
+---
+
 ## [3.1.1] - 2026-10-31 — UHQ Active Probe Proxy Screening and Dashboard State Synchronization
 
 ### 🛠️ Settings Form & State Auto-Reset Fix

@@ -1157,6 +1157,47 @@ async function main() {
     assert.strictEqual(bridgeHelpers.isDirectOfficialAttempt(true, null), false);
   });
 
+  console.log('\n[Test 14] Dedicated Rotating Proxy Gateway Support');
+  await test('routes via single rotating proxy without multi-line list and never locks on quota', async () => {
+    await withConfig({
+      rotating_proxy_enabled: true,
+      rotating_proxy_url: 'http://rotate-user:rotate-pass@gate.smartproxy.com:7000',
+      allow_direct_fallback: false
+    }, () => {
+      egress._loadRotatingProxy();
+      assert.ok(egress.rotatingProxy, 'rotating proxy must be loaded');
+      assert.strictEqual(egress.rotatingProxy.isRotating, true);
+      assert.strictEqual(egress.rotatingProxy.id, 'rotating_proxy');
+      assert.strictEqual(egress.rotatingProxy.port, 7000);
+
+      const candidates = egress.getCandidates();
+      assert.strictEqual(candidates.length, 1);
+      assert.strictEqual(candidates[0].id, 'rotating_proxy');
+
+      const routable = egress.getRoutableRoutes();
+      assert.strictEqual(routable.length, 1);
+      assert.strictEqual(routable[0].id, 'rotating_proxy');
+
+      const selected = egress.selectRoute();
+      assert.strictEqual(selected.id, 'rotating_proxy');
+
+      // Crucial: 429 quota must NOT lock out the rotating proxy route
+      egress.recordFailure(selected, 'quota', 60000);
+      assert.strictEqual(egress.getQuotaRetryAfter(selected), 0, 'rotating proxy must have 0 quota retry after');
+      assert.strictEqual(egress.isAvailable(selected), true, 'rotating proxy must remain available after quota');
+
+      // Crucial: Rotating proxy must never be pruned
+      const pruned = egress.removeProxies(new Set(['rotating_proxy']));
+      assert.strictEqual(pruned, 0, 'rotating proxy must never be pruned');
+
+      // Check agent uses keepAlive: false for per-request IP rotation
+      const agent = egress.getAgent(selected, 'https:');
+      assert.strictEqual(agent.keepAlive, false, 'rotating proxy agent must disable keepAlive for IP switching');
+    });
+    egress._loadRotatingProxy();
+    egress.reload();
+  });
+
   console.log(`\n${failed === 0 ? '🎉' : '❌'} Reliability suite finished: ${passed} passed, ${failed} failed.\n`);
   clearTimeout(watchdog);
   process.exit(failed === 0 ? 0 : 1);

@@ -5,7 +5,7 @@ param(
 )
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " OpenCode2API v3.0.0 Chat Completion Verification" -ForegroundColor Cyan
+Write-Host " OpenCode2API v3.1.0 Chat Completion Verification" -ForegroundColor Cyan
 Write-Host " Endpoint : $TargetUrl/v1/chat/completions" -ForegroundColor Gray
 Write-Host " Model    : $Model" -ForegroundColor Gray
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -13,7 +13,7 @@ Write-Host "============================================================" -Foreg
 $payload = @{
     model = $Model
     messages = @(
-        @{ role = "user"; content = "Respond with: Hello from OpenCode2API v3.0.0!" }
+        @{ role = "user"; content = "Respond with: Hello from OpenCode2API v3.1.0!" }
     )
     max_tokens = 60
 } | ConvertTo-Json -Depth 5

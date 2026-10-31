@@ -4,7 +4,30 @@ All notable changes to this project are documented in this file.
 
 ---
 
-## [Unreleased] - 2026-10-26 — Zero-Config Automatic Proxy Egress, Round-Robin Quota Failover, and Bounded Admission
+## [3.1.0] - 2026-10-31 — Dedicated Rotating Proxy Support, Ultra-Strict 3s High-Concurrency Scraper, and Instant Rate Limit Switching
+
+### 🔄 Dedicated Rotating Proxy Support
+- **Single Backconnect Gateway Endpoint**: Added native dashboard support for backconnect rotating proxies (Webshare, Smartproxy, Oxylabs, BrightData, IPRoyal). Users simply toggle **Rotating Proxy Mode** ON in Dashboard Settings and provide a single endpoint URL (`http://user:pass@host:port` or `socks5://...`), bypassing the need to maintain multi-line lists of static proxies.
+- **Dynamic Session Injection**: Supports `auto`, `session_suffix`, and `disabled` modes. Dynamically replaces `{session}` or `{rand}` tokens in credentials or automatically appends isolated session suffixes (`-session-<hex>`) per request to guarantee IP rotation.
+- **TCP Keep-Alive Termination for Fresh Exit IPs**: Standard HTTP keep-alive sockets reused TCP connections, pinning requests to the same exit IP and triggering repeated rate limits. v3.1.0 forces `keepAlive: false` in Node.js and injects `Connection: close` (`x-opencode2api-force-rotate: 1`) through the Bun bridge so every request opens a fresh socket and receives a clean exit IP.
+- **Elimination of 60s Quota Lockouts**: Rotating proxy routes are marked with `isRotating: true` and are immune to 60-second quota lockouts on upstream 429 errors. Stale free-quota gate memory never blocks rotating proxies, ensuring non-stop throughput.
+
+### ⚡ Ultra-Strict 3s Scraper & High-Concurrency 5x Verifier
+- **Ultra-Hard 3s Screening Window**: Lowered screening and verification timeouts to a strict 3000ms (`SCREEN_TIMEOUT_MS = 3000`, `VERIFY_TIMEOUT_MS = 3000`, `MAX_VERIFIED_LATENCY_MS = 3000`), rejecting slow, sluggish, or hanging public proxies.
+- **Strict 5x Sequential Verification**: Every discovered candidate must successfully complete five consecutive end-to-end TLS verification probes against the upstream inference endpoint with average latency under 3000ms before admission into rotation.
+- **High-Concurrency Screening Engine**: Doubled screening concurrency to 200 workers (`SCREEN_CONCURRENCY = 200`) and verification concurrency to 60 workers (`VERIFY_CONCURRENCY = 60`), allowing thousands of scraped candidates to be processed in seconds.
+- **High-Yield Sources**: Replaced inactive sources with working public lists (`clarketm`, `proxifly-all`, `monosans-all`, `vakhov-https`, `ercindedeoglu-https`, `murongpig-http`).
+- **On-Demand Scraping & Testing**: Added "Scrape Proxies Now" and "Test Connection" buttons directly into the React control plane for live verification.
+
+### 🚀 Instant Rate-Limit & Quota Switching
+- **Zero-Latency Proxy Hopping**: On upstream 429 rate limit or quota response, the gateway rotates canonical session and project identifiers and immediately retries the next routable proxy without artificial sleeps or exponential delays.
+- **Bounded Proxy Attempt Timeouts**: Added `proxy_attempt_timeout_ms` (default 8s) and embedded `AbortSignal.timeout` in Bun bridge's fetch, preventing slow or hanging proxies from stalling the entire inference pipeline or triggering client-side timeouts.
+- **Immediate Failure Classification**: Timeouts on proxy sockets are immediately identified as proxy transport failures (`proxyFailure: true`), instantly routing traffic to the next healthy proxy candidate.
+- **Extended Quota Failover Budget**: Raised `proxy_quota_failovers` to 20 across the pool to maximize completion probability during peak load.
+
+---
+
+## [3.0.0] - 2026-10-26 — Zero-Config Automatic Proxy Egress, Round-Robin Quota Failover, and Bounded Admission
 
 > This release supersedes the quota-rotation and WARP-tunnel design described in the entries below. WARP support has been removed entirely. Egress is automatically discovered and verified HTTP/HTTPS/SOCKS5, with optional manual overrides.
 

@@ -6,7 +6,7 @@ param(
 )
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " OpenCode2API v3.0.0 Real-Time SSE Streaming Verification" -ForegroundColor Cyan
+Write-Host " OpenCode2API v3.1.0 Real-Time SSE Streaming Verification" -ForegroundColor Cyan
 Write-Host " Endpoint : $TargetUrl/v1/chat/completions" -ForegroundColor Gray
 Write-Host " Model    : $Model" -ForegroundColor Gray
 Write-Host " Prompt   : $Prompt" -ForegroundColor Gray

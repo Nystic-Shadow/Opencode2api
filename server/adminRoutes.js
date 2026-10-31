@@ -123,6 +123,17 @@ function restoreMaskedProxies(maskedList, existing) {
   });
 }
 
+function restoreSingleMaskedProxy(masked, existing) {
+  if (typeof masked !== 'string' || !masked.includes('***')) return masked;
+  if (!existing || typeof existing !== 'string') return masked;
+  const identityMasked = proxyIdentity(masked);
+  const identityExisting = proxyIdentity(existing);
+  if (identityMasked && identityMasked === identityExisting) {
+    return existing;
+  }
+  return masked;
+}
+
 // Bounded JSON body parser with 1MB ceiling preventing Denial of Service (H1)
 const MAX_ADMIN_BODY = 1 * 1024 * 1024;
 
@@ -317,7 +328,10 @@ async function handleAdminRoute(req, res, pathname) {
       admin_password: '••••••••',
       upstream_zen_key: maskedZenKey,
       has_zen_key: !!conf.upstream_zen_key,
-      proxies: Array.isArray(conf.proxies) ? conf.proxies.map(maskProxy) : []
+      proxies: Array.isArray(conf.proxies) ? conf.proxies.map(maskProxy) : [],
+      rotating_proxy_enabled: !!conf.rotating_proxy_enabled,
+      rotating_proxy_url: maskProxy(conf.rotating_proxy_url || ''),
+      rotating_proxy_session_mode: conf.rotating_proxy_session_mode || 'auto'
     });
   }
 
@@ -361,6 +375,28 @@ async function handleAdminRoute(req, res, pathname) {
       } else if (zk === '') {
         updates.upstream_zen_key = '';
       }
+    }
+    if (body.rotating_proxy_enabled !== undefined) {
+      updates.rotating_proxy_enabled = body.rotating_proxy_enabled === true || body.rotating_proxy_enabled === 'true';
+    }
+    if (body.rotating_proxy_session_mode !== undefined) {
+      updates.rotating_proxy_session_mode = String(body.rotating_proxy_session_mode).trim() || 'auto';
+    }
+    if (body.rotating_proxy_url !== undefined) {
+      let incomingUrl = String(body.rotating_proxy_url || '').trim();
+      const existingUrl = config.get('rotating_proxy_url') || '';
+      if (incomingUrl.includes('***')) {
+        incomingUrl = restoreSingleMaskedProxy(incomingUrl, existingUrl);
+      }
+      if (incomingUrl) {
+        const parsed = egress.parseProxyUrl(incomingUrl);
+        if (!parsed) {
+          return sendJson(res, 400, {
+            error: `Invalid rotating proxy URL: ${maskProxy(incomingUrl)}. Use http://, https://, or socks5:// with optional credentials.`
+          });
+        }
+      }
+      updates.rotating_proxy_url = incomingUrl;
     }
     if (Object.keys(body).some(key => key.startsWith('warp_'))) {
       // WARP was removed. Accepting these fields silently would leave an
@@ -465,6 +501,40 @@ async function handleAdminRoute(req, res, pathname) {
     });
   }
 
+  // Trigger proxy discovery scraper immediately on demand
+  if (pathname === '/api/proxies/scrape-now' && req.method === 'POST') {
+    if (!proxyDiscovery.isEnabled()) {
+      return sendJson(res, 400, { error: 'Automatic proxy discovery is disabled. Enable it in Settings first.' });
+    }
+    proxyDiscovery.refreshNow().catch(err => console.warn('[Admin] Manual proxy discovery scrape failed:', err.message));
+    notifications.add('Proxy Scraping Started', 'Discovering and screening public HTTP/HTTPS proxy candidates...', 'info');
+    return sendJson(res, 200, {
+      success: true,
+      message: 'Proxy scraping started',
+      ...egress.getProxyStatus(),
+      autoDiscovery: proxyDiscovery.getStatus(),
+      upstreamQuota: upstreamQuota.getStatus()
+    });
+  }
+
+  // Test rotating proxy connectivity
+  if (pathname === '/api/proxies/test-rotating' && req.method === 'POST') {
+    const body = await parseBody(req);
+    let urlToTest = String(body.url || '').trim();
+    const existingUrl = config.get('rotating_proxy_url') || '';
+    if (urlToTest.includes('***')) {
+      urlToTest = restoreSingleMaskedProxy(urlToTest, existingUrl);
+    }
+    if (!urlToTest) {
+      urlToTest = existingUrl;
+    }
+    if (!urlToTest) {
+      return sendJson(res, 400, { error: 'No rotating proxy URL provided to test' });
+    }
+    const testResult = await egress.testRotatingProxy(urlToTest);
+    return sendJson(res, 200, testResult);
+  }
+
   // Settings: Check CLI Update
   if (pathname === '/api/settings/check-update' && req.method === 'POST') {
     const resUpdate = await updater.checkForUpdate();
@@ -502,6 +572,7 @@ module.exports = {
   _test: {
     maskProxy,
     proxyIdentity,
-    restoreMaskedProxies
+    restoreMaskedProxies,
+    restoreSingleMaskedProxy
   }
 };

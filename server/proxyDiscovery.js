@@ -5,14 +5,14 @@ const config = require('./config');
 
 const DISCOVERY_INTERVAL_MS = 10 * 60 * 1000;
 const EMPTY_RETRY_MS = [3 * 60 * 1000, 6 * 60 * 1000, 10 * 60 * 1000];
-const SCREEN_TIMEOUT_MS = 2500;
+const SCREEN_TIMEOUT_MS = 3000;
 const VERIFY_TIMEOUT_MS = 3000;
 const VERIFY_CHECKS = 5;
-const MAX_VERIFIED_LATENCY_MS = 2000;
+const MAX_VERIFIED_LATENCY_MS = 3000;
 const AUTO_TARGET = 100;
 const MAX_SCREEN_CANDIDATES = 6000;
-const SCREEN_CONCURRENCY = 100;
-const VERIFY_CONCURRENCY = 30;
+const SCREEN_CONCURRENCY = parseInt(process.env.PROXY_SCREEN_CONCURRENCY, 10) || 200;
+const VERIFY_CONCURRENCY = parseInt(process.env.PROXY_VERIFY_CONCURRENCY, 10) || 60;
 const SCREEN_FAIL_COOLDOWN_MS = 15 * 60 * 1000;
 const VERIFY_FAIL_COOLDOWN_MS = 30 * 60 * 1000;
 const REMOVED_COOLDOWN_MS = 30 * 60 * 1000;
@@ -20,9 +20,8 @@ const FETCH_TIMEOUT_MS = 12000;
 const MAX_SOURCE_BYTES = 5 * 1024 * 1024;
 const MAX_SOURCE_LINES = 2000;
 
-// High-speed, US-targeted proxy discovery sources. OpenCode models, early access,
-// and regional capacity perform with highest reliability from United States routes,
-// eliminating "RegionError: This model is not available in your country" (403).
+// High-speed, multi-region proxy discovery sources. OpenCode models, early access,
+// and regional capacity perform reliably with elite HTTP/HTTPS tunneling proxies.
 // Focus on HTTP/HTTPS tunneling proxies for 100% compatibility with Bun TLS bridge.
 const DEFAULT_SOURCES = [
   {
@@ -32,22 +31,28 @@ const DEFAULT_SOURCES = [
     url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/US/data.txt'
   },
   {
+    name: 'proxifly-all',
+    protocol: 'http',
+    maxLines: 1500,
+    url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt'
+  },
+  {
     name: 'proxyscrape-us-http',
     protocol: 'http',
     maxLines: 800,
     url: 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&country=us&proxy_format=ipport&format=text'
   },
   {
+    name: 'proxyscrape-v2-elite',
+    protocol: 'http',
+    maxLines: 800,
+    url: 'https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=elite,anonymous'
+  },
+  {
     name: 'geonode-us-http',
     protocol: 'http',
     maxLines: 500,
     url: 'https://proxylist.geonode.com/api/proxy-list?country=US&protocols=http%2Chttps&limit=500&page=1&sort_by=lastChecked&sort_type=desc'
-  },
-  {
-    name: 'geonode-us-http-p2',
-    protocol: 'http',
-    maxLines: 500,
-    url: 'https://proxylist.geonode.com/api/proxy-list?country=US&protocols=http%2Chttps&limit=500&page=2&sort_by=lastChecked&sort_type=desc'
   },
   {
     name: 'spys-me-us-http',
@@ -65,26 +70,44 @@ const DEFAULT_SOURCES = [
   {
     name: 'thespeedx-http',
     protocol: 'http',
-    maxLines: 600,
+    maxLines: 800,
     url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'
   },
   {
     name: 'monosans-http',
     protocol: 'http',
-    maxLines: 400,
+    maxLines: 500,
     url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'
+  },
+  {
+    name: 'monosans-all',
+    protocol: 'http',
+    maxLines: 500,
+    url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt'
+  },
+  {
+    name: 'clarketm-http',
+    protocol: 'http',
+    maxLines: 400,
+    url: 'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt'
   },
   {
     name: 'vakhov-http',
     protocol: 'http',
-    maxLines: 350,
+    maxLines: 400,
     url: 'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt'
   },
   {
-    name: 'aliilapro-http',
+    name: 'vakhov-https',
     protocol: 'http',
     maxLines: 400,
-    url: 'https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt'
+    url: 'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt'
+  },
+  {
+    name: 'ercindedeoglu-https',
+    protocol: 'http',
+    maxLines: 500,
+    url: 'https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt'
   },
   {
     name: 'zevtyardt-http',
@@ -103,6 +126,12 @@ const DEFAULT_SOURCES = [
     protocol: 'http',
     maxLines: 400,
     url: 'https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt'
+  },
+  {
+    name: 'murongpig-http',
+    protocol: 'http',
+    maxLines: 600,
+    url: 'https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt'
   }
 ];
 

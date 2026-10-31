@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FiSettings, FiRefreshCw, FiCheck, FiSliders, FiCpu } from '../components/Icons';
+import { FiSettings, FiRefreshCw, FiCheck, FiSliders, FiCpu, FiZap } from '../components/Icons';
 import CustomToggle from '../components/CustomToggle';
 import CustomSelect from '../components/CustomSelect';
 
@@ -27,6 +27,12 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [autoProxyDiscovery, setAutoProxyDiscovery] = useState(settings.auto_proxy_discovery !== false);
   const [upstreamZenKey, setUpstreamZenKey] = useState(settings.upstream_zen_key || '');
   const [proxies, setProxies] = useState(Array.isArray(settings.proxies) ? settings.proxies.join('\n') : (settings.proxies || ''));
+  const [rotatingProxyEnabled, setRotatingProxyEnabled] = useState(settings.rotating_proxy_enabled || false);
+  const [rotatingProxyUrl, setRotatingProxyUrl] = useState(settings.rotating_proxy_url || '');
+  const [rotatingProxySessionMode, setRotatingProxySessionMode] = useState(settings.rotating_proxy_session_mode || 'auto');
+  const [isTestingRotating, setIsTestingRotating] = useState(false);
+  const [rotatingTestResult, setRotatingTestResult] = useState(null);
+  const [isScrapingNow, setIsScrapingNow] = useState(false);
   const [globalRpm, setGlobalRpm] = useState(settings.global_rpm_limit || 0);
   const [globalTpm, setGlobalTpm] = useState(settings.global_tpm_limit || 0);
   const [isSaving, setIsSaving] = useState(false);
@@ -36,6 +42,12 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [isRescanningProxies, setIsRescanningProxies] = useState(false);
   const [isPruningProxies, setIsPruningProxies] = useState(false);
   const [proxyFeedback, setProxyFeedback] = useState(null);
+
+  useEffect(() => {
+    if (settings.rotating_proxy_enabled !== undefined) setRotatingProxyEnabled(!!settings.rotating_proxy_enabled);
+    if (settings.rotating_proxy_url !== undefined) setRotatingProxyUrl(settings.rotating_proxy_url || '');
+    if (settings.rotating_proxy_session_mode !== undefined) setRotatingProxySessionMode(settings.rotating_proxy_session_mode || 'auto');
+  }, [settings]);
 
   useEffect(() => {
     const fetchProxies = async () => {
@@ -54,6 +66,60 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
     const proxyTimer = setInterval(fetchProxies, 5000);
     return () => clearInterval(proxyTimer);
   }, []);
+
+  const handleTestRotatingProxy = async () => {
+    if (!rotatingProxyUrl) {
+      setRotatingTestResult({ ok: false, message: 'Please enter a proxy URL to test.' });
+      return;
+    }
+    setIsTestingRotating(true);
+    setRotatingTestResult(null);
+    try {
+      const token = localStorage.getItem('o2p_token');
+      const res = await fetch('/api/proxies/test-rotating', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ url: rotatingProxyUrl })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setRotatingTestResult({ ok: true, message: `Connected successfully! Latency: ${data.latency}ms` });
+      } else {
+        setRotatingTestResult({ ok: false, message: `Connection failed: ${data.error || 'Timed out'}` });
+      }
+    } catch (e) {
+      setRotatingTestResult({ ok: false, message: `Test error: ${e.message}` });
+    } finally {
+      setIsTestingRotating(false);
+    }
+  };
+
+  const handleScrapeNow = async () => {
+    setIsScrapingNow(true);
+    setProxyFeedback('Triggered instant proxy scraper across 15+ high-speed public sources...');
+    try {
+      const token = localStorage.getItem('o2p_token');
+      const res = await fetch('/api/proxies/scrape-now', {
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setProxyStatus(data);
+        setProxyFeedback('Proxy scraper active! Screening public candidates and verifying TLS handshakes...');
+      } else {
+        setProxyFeedback(`Scrape note: ${data.error || 'Failed'}`);
+      }
+      setTimeout(() => setProxyFeedback(null), 6000);
+    } catch (e) {
+      setProxyFeedback(`Scrape error: ${e.message}`);
+    } finally {
+      setIsScrapingNow(false);
+    }
+  };
 
   const handleRescanProxies = async () => {
     setIsRescanningProxies(true);
@@ -115,6 +181,9 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
         proxy_check_interval_minutes: Math.min(1440, Math.max(1, parseInt(proxyCheckInterval, 10) || 30)),
         proxy_auto_prune_dead: proxyAutoPrune,
         auto_proxy_discovery: autoProxyDiscovery,
+        rotating_proxy_enabled: rotatingProxyEnabled,
+        rotating_proxy_url: rotatingProxyUrl.trim(),
+        rotating_proxy_session_mode: rotatingProxySessionMode,
         upstream_zen_key: upstreamZenKey.trim(),
         proxies: proxies.split('\n').map(p => p.trim()).filter(Boolean),
         global_rpm_limit: parseInt(globalRpm, 10),
@@ -199,7 +268,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
       <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', border: '1px solid var(--border)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem', flexWrap: 'wrap' }}>
               <h3 style={{ fontSize: '1rem', fontWeight: '700', margin: 0 }}>
                 Egress Proxy Pool
               </h3>
@@ -210,30 +279,41 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                     ? `${proxyStatus.verifiedCount} healthy`
                     : ((proxyStatus?.autoDiscovery?.enabled ?? autoProxyDiscovery) ? 'Discovering routes' : 'No routes'))}
               </span>
+              {proxyStatus?.rotatingProxy?.enabled && (
+                <span className="badge" style={{ backgroundColor: 'rgba(99, 102, 241, 0.15)', color: '#818cf8', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+                  Rotating Proxy Active
+                </span>
+              )}
             </div>
             <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', margin: 0 }}>
               <strong>Zero-config by default.</strong> The gateway discovers public HTTP/HTTPS/SOCKS5 candidates, probes each one
-              directly against the configured upstream with TLS verification, and only adds endpoints that pass
-              five consecutive 5-second checks. It keeps up to {proxyStatus?.autoDiscovery?.target || 20} automatic
-              routes, refreshed every {proxyStatus?.autoDiscovery?.intervalMinutes || 10} minutes, and rechecks the
-              full pool every {proxyStatus?.checkIntervalMinutes || 30} minutes. Failed routes leave rotation until a
-              later sweep passes; two failed sweeps remove them when auto-prune is on. Requests use healthy routes
-              round-robin and fail over immediately when a tunnel dies. An upstream 429 cools that route and tries the
-              next routable one (bounded by <code>PROXY_QUOTA_FAILOVERS</code>); a global <code>FreeUsageLimitError</code>
-              fails fast with its real reset time. Manual proxies below are optional and take precedence. Proxies
-              mitigate per-IP limits; they cannot remove account-wide quota.
+              directly against the configured upstream with TLS verification, and keeps verified routes fresh. In <strong>Rotating Proxy Mode</strong>, a single backconnect proxy automatically rotates exit IPs on every request, eliminating IP rate limits without locking the gateway.
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={handleRescanProxies}
-            disabled={isRescanningProxies || proxyStatus?.isScanning}
-            className="btn btn-secondary"
-            style={{ fontSize: '0.78rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
-          >
-            <span>{isRescanningProxies || proxyStatus?.isScanning ? 'Checking 5x...' : 'Recheck Pool 5x'}</span>
-          </button>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={handleScrapeNow}
+              disabled={isScrapingNow || proxyStatus?.autoDiscovery?.running}
+              className="btn btn-secondary"
+              style={{ fontSize: '0.78rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+              title="Scrape and screen fresh public proxy candidates immediately"
+            >
+              <FiZap size={13} className={isScrapingNow ? 'spin' : ''} />
+              <span>{isScrapingNow || proxyStatus?.autoDiscovery?.running ? 'Scraping...' : 'Scrape Proxies Now'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleRescanProxies}
+              disabled={isRescanningProxies || proxyStatus?.isScanning}
+              className="btn btn-secondary"
+              style={{ fontSize: '0.78rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+            >
+              <FiRefreshCw size={13} className={isRescanningProxies ? 'spin' : ''} />
+              <span>{isRescanningProxies || proxyStatus?.isScanning ? 'Checking 5x...' : 'Recheck Pool 5x'}</span>
+            </button>
+          </div>
         </div>
 
         {proxyStatus?.upstreamQuota?.blocked && (
@@ -580,26 +660,127 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
           </span>
         </div>
 
-        {/* Upstream Proxies (Optional) */}
-        <div>
-          <label style={{ fontSize: '0.8rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
-            Manual Proxies (Optional)
-          </label>
-          <textarea
-            className="input-field"
-            style={{ width: '100%', height: '70px', fontFamily: 'monospace', resize: 'vertical' }}
-            placeholder="http://user:pass@host:port (one per line)"
-            value={proxies}
-            onChange={e => setProxies(e.target.value)}
-          />
-          <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
-            Explicit HTTP, HTTPS, or SOCKS5 routes (maximum 100). Automatic discovery is on by default; manual entries take precedence over a discovered route with the same endpoint and are never removed by discovery. Every route must pass five consecutive 5-second probes.
-          </span>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border)' }}>
+        {/* Upstream Proxies & Rotating Gateway */}
+        <div style={{
+          padding: '1rem',
+          backgroundColor: rotatingProxyEnabled ? 'rgba(99, 102, 241, 0.05)' : 'var(--background)',
+          borderRadius: 'var(--radius)',
+          border: rotatingProxyEnabled ? '1px solid rgba(99, 102, 241, 0.35)' : '1px solid var(--border)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.85rem'
+        }}>
+          {/* Rotating Proxy Mode Toggle */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
             <div>
-              <div style={{ fontSize: '0.75rem', fontWeight: '600' }}>Automatic Proxy Discovery</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.2rem' }}>
+                <span style={{ fontSize: '0.9rem', fontWeight: '700', color: rotatingProxyEnabled ? '#818cf8' : 'var(--foreground)' }}>
+                  Rotating Proxy Mode (Single Gateway)
+                </span>
+                {rotatingProxyEnabled && (
+                  <span className="badge" style={{ backgroundColor: '#818cf8', color: '#fff', fontSize: '0.65rem', padding: '0.1rem 0.4rem' }}>
+                    Active
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', lineHeight: 1.45 }}>
+                Enable to route all egress through a single rotating/residential proxy service (e.g. Webshare, Smartproxy, Bright Data, Oxylabs, IPRoyal). Instead of adding multiple proxies per line, add a <strong>single rotating proxy URL</strong>. Requests automatically exit through fresh IPs, eliminating IP rate limits without proxy lockouts.
+              </div>
+            </div>
+            <CustomToggle
+              checked={rotatingProxyEnabled}
+              onChange={setRotatingProxyEnabled}
+            />
+          </div>
+
+          {rotatingProxyEnabled ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.25rem', paddingTop: '0.75rem', borderTop: '1px solid rgba(99, 102, 241, 0.2)' }}>
+              <div>
+                <label style={{ fontSize: '0.78rem', fontWeight: '600', display: 'block', marginBottom: '0.3rem' }}>
+                  Rotating Proxy URL (Single Endpoint)
+                </label>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <input
+                    type="text"
+                    className="input-field"
+                    style={{ flex: 1, fontFamily: 'monospace', fontSize: '0.82rem' }}
+                    placeholder="http://username:password@gate.smartproxy.com:7000"
+                    value={rotatingProxyUrl}
+                    onChange={e => {
+                      setRotatingProxyUrl(e.target.value);
+                      setRotatingTestResult(null);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleTestRotatingProxy}
+                    disabled={isTestingRotating || !rotatingProxyUrl}
+                    className="btn btn-secondary"
+                    style={{ whiteSpace: 'nowrap', fontSize: '0.78rem', padding: '0.4rem 0.8rem' }}
+                  >
+                    {isTestingRotating ? 'Testing...' : 'Test Connection'}
+                  </button>
+                </div>
+                <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)', marginTop: '0.25rem', display: 'block' }}>
+                  Supported formats: <code>http://user:pass@host:port</code>, <code>https://...</code>, or <code>socks5://...</code>. Password is automatically masked and encrypted.
+                </span>
+              </div>
+
+              {rotatingTestResult && (
+                <div style={{
+                  padding: '0.6rem 0.8rem',
+                  borderRadius: 'var(--radius)',
+                  fontSize: '0.78rem',
+                  backgroundColor: rotatingTestResult.ok ? 'rgba(47, 188, 91, 0.1)' : 'rgba(224, 85, 85, 0.1)',
+                  borderLeft: `3px solid ${rotatingTestResult.ok ? '#2fbc5b' : '#e05555'}`,
+                  color: rotatingTestResult.ok ? '#2fbc5b' : '#e05555'
+                }}>
+                  {rotatingTestResult.message}
+                </div>
+              )}
+
+              <div>
+                <label style={{ fontSize: '0.75rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
+                  IP & Session Switching Strategy
+                </label>
+                <CustomSelect
+                  value={rotatingProxySessionMode}
+                  onChange={setRotatingProxySessionMode}
+                  options={[
+                    { value: 'auto', label: 'Auto (Connection Close per request - Recommended for all providers)' },
+                    { value: 'session_suffix', label: 'Append Session Suffix (-session-<rand> for Smartproxy, Bright Data, Oxylabs)' },
+                    { value: 'custom', label: 'Custom ({session} or {rand} placeholder in proxy username)' }
+                  ]}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)', marginTop: '0.2rem', display: 'block' }}>
+                  Ensures each outbound connection exits through a new IP address so OpenCode upstream rate limits are never triggered.
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <label style={{ fontSize: '0.78rem', fontWeight: '600', display: 'block', marginBottom: '0.25rem' }}>
+                Manual Proxies (Pool Mode - One per line)
+              </label>
+              <textarea
+                className="input-field"
+                style={{ width: '100%', height: '70px', fontFamily: 'monospace', resize: 'vertical' }}
+                placeholder="http://user:pass@host:port (one per line)"
+                value={proxies}
+                onChange={e => setProxies(e.target.value)}
+              />
+              <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)' }}>
+                Explicit HTTP, HTTPS, or SOCKS5 routes (maximum 100). Manual entries take precedence over discovered routes.
+              </span>
+            </div>
+          )}
+
+          {/* Automatic Proxy Discovery controls */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', marginTop: '0.5rem', paddingTop: '0.65rem', borderTop: '1px solid var(--border)' }}>
+            <div>
+              <div style={{ fontSize: '0.75rem', fontWeight: '600' }}>Automatic Proxy Discovery & Scraper</div>
               <div style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)', lineHeight: 1.4 }}>
-                Discover, verify, rotate, and prune public egress routes without any manual proxy setup. Recommended.
+                Continuously discover, scrape, test, and rotate verified public egress routes from 15+ verified public sources.
               </div>
             </div>
             <CustomToggle
@@ -607,7 +788,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
               onChange={setAutoProxyDiscovery}
             />
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.75rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.5rem' }}>
             <div>
               <label style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', display: 'block', marginBottom: '0.25rem' }}>
                 Pool Recheck Interval (Minutes)
@@ -623,14 +804,14 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                 required
               />
               <span style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)' }}>
-                Default 30. Every routed proxy is checked in the background at this interval, even with no traffic.
+                Default 30. Every routed proxy is checked in the background at this interval.
               </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
               <div>
                 <div style={{ fontSize: '0.75rem', fontWeight: '600' }}>Auto-Remove Dead Proxies</div>
                 <div style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)', lineHeight: 1.4 }}>
-                  After two consecutive failed 5x sweeps. Discovery replenishes automatic routes; the last manual entry is kept.
+                  After two consecutive failed sweeps. Rotating proxy is never auto-removed.
                 </div>
               </div>
               <CustomToggle

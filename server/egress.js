@@ -203,8 +203,11 @@ class EgressManager {
     this.routeCursor = 0;
     this.lastReload = Date.now();
     this.checkIntervalMs = this._checkIntervalMs();
+    this.rotatingProxy = null;
+    this._loadRotatingProxy();
 
     config.onChange(() => {
+      this._loadRotatingProxy();
       this.reload();
       const interval = this._checkIntervalMs();
       if (interval !== this.checkIntervalMs) {
@@ -307,6 +310,102 @@ class EgressManager {
     this._applyMergedProxies('proxy_reload');
     if (this.proxyChecksEnabled) {
       this._runAndSchedule();
+    }
+  }
+
+  _loadRotatingProxy() {
+    const isEnabled = config.get('rotating_proxy_enabled') === true;
+    const rawUrl = String(config.get('rotating_proxy_url') || '').trim();
+    if (!isEnabled || !rawUrl) {
+      this.rotatingProxy = null;
+      return;
+    }
+    const parsed = parseProxyUrl(rawUrl);
+    if (!parsed) {
+      this.rotatingProxy = null;
+      return;
+    }
+    this.rotatingProxy = {
+      ...parsed,
+      type: 'proxy',
+      proxyType: parsed.type,
+      id: 'rotating_proxy',
+      isRotating: true,
+      rawUrl
+    };
+  }
+
+  isRotatingProxyHealthy() {
+    if (!this.rotatingProxy) return false;
+    return this.isAvailable(this.rotatingProxy);
+  }
+
+  getRotatingProxyLatency() {
+    if (!this.rotatingProxy) return 0;
+    return this.proxyChecks.get('rotating_proxy')?.latency || 0;
+  }
+
+  getRotatingProxyStatus() {
+    const isEnabled = config.get('rotating_proxy_enabled') === true;
+    const rawUrl = String(config.get('rotating_proxy_url') || '').trim();
+    const hasUrl = !!rawUrl;
+    const check = this.proxyChecks.get('rotating_proxy');
+    const health = this.health.get('rotating_proxy');
+    let maskedUrl = '';
+    if (rawUrl) {
+      try {
+        const u = new URL(rawUrl.includes('://') ? rawUrl : `http://${rawUrl}`);
+        if (u.username || u.password) {
+          u.username = '***';
+          u.password = '***';
+        }
+        maskedUrl = u.toString().replace(/\/$/, '');
+      } catch (e) {
+        maskedUrl = rawUrl;
+      }
+    }
+    return {
+      enabled: isEnabled,
+      configured: hasUrl,
+      url: maskedUrl,
+      endpoint: this.rotatingProxy ? this.rotatingProxy.url : '',
+      available: this.rotatingProxy ? this.isAvailable(this.rotatingProxy) : false,
+      routable: this.rotatingProxy ? this.isAvailable(this.rotatingProxy) : false,
+      sessionMode: config.get('rotating_proxy_session_mode') || 'auto',
+      healthy: check ? check.healthy : (this.rotatingProxy ? this.isAvailable(this.rotatingProxy) : null),
+      latency: check?.latency || 0,
+      lastCheck: check?.lastCheck || 0,
+      lastError: health?.lastError || (check && !check.healthy ? check.error : '') || '',
+      lastSuccess: health?.lastSuccess || 0,
+      lastFailure: health?.lastFailure || 0
+    };
+  }
+
+  async testRotatingProxy(rawUrl) {
+    const parsed = parseProxyUrl(rawUrl);
+    if (!parsed) {
+      return { success: false, error: 'Invalid proxy URL format. Example: http://user:pass@gate.provider.com:7000' };
+    }
+    const route = {
+      ...parsed,
+      type: 'proxy',
+      proxyType: parsed.type,
+      id: 'rotating_proxy_test',
+      isRotating: true,
+      rawUrl
+    };
+    const target = this._probeTarget();
+    const started = Date.now();
+    try {
+      const ok = await this._probeRoute(route, 8000, true);
+      const latency = Date.now() - started;
+      if (!ok) {
+        const err = this.probeErrors.get('rotating_proxy_test') || 'Proxy CONNECT handshake timed out or was rejected';
+        return { success: false, latency, error: err };
+      }
+      return { success: true, latency, message: `Connected to ${target.host} via rotating proxy in ${latency}ms` };
+    } catch (err) {
+      return { success: false, error: err.message || String(err) };
     }
   }
 
@@ -550,7 +649,9 @@ class EgressManager {
   }
 
   removeProxies(ids) {
-    const target = ids instanceof Set ? ids : new Set(ids || []);
+    const target = ids instanceof Set ? new Set(ids) : new Set(ids || []);
+    target.delete('rotating_proxy');
+    target.delete('rotating_proxy_test');
     const configured = config.get('proxies');
     let raw = [];
     if (Array.isArray(configured)) {
@@ -661,11 +762,11 @@ class EgressManager {
    * the per-route error map. Screening hundreds of public candidates must not
    * pollute diagnostics for routes that actually made it into rotation.
    */
-  probeCandidate(route, timeoutMs = 5000) {
+  probeCandidate(route, timeoutMs = 3000) {
     return this._probeRoute(route, timeoutMs, false);
   }
 
-  _probeRoute(route, timeoutMs = 5000, recordErrors = true) {
+  _probeRoute(route, timeoutMs = 3000, recordErrors = true) {
     return new Promise((resolve) => {
       let settled = false;
       let socket = null;
@@ -762,6 +863,7 @@ class EgressManager {
       autoPruneDead: config.get('proxy_auto_prune_dead') !== false,
       configuredViaEnv: !!process.env.PROXIES,
       fastestProxy: fastest,
+      rotatingProxy: this.getRotatingProxyStatus(),
       topProxies: routable.slice(0, 10).map(entry => ({
         endpoint: entry.endpoint,
         source: entry.source,
@@ -800,6 +902,10 @@ class EgressManager {
   isAvailable(route) {
     if (!route) return false;
     const health = this._health(route);
+    if (route.isRotating) {
+      // Rotating proxy is available unless its circuit breaker is temporarily open
+      return health.openUntil <= Date.now();
+    }
     if (health.checkFailed) return false;
     return health.openUntil <= Date.now();
   }
@@ -814,6 +920,11 @@ class EgressManager {
    */
   getQuotaRetryAfter(route) {
     if (!route) return 0;
+    if (route.isRotating) {
+      // Rotating proxy assigns a different IP on every request. An upstream 429 on
+      // one IP does NOT lock out the entire rotating gateway.
+      return 0;
+    }
     const health = this._health(route);
     const remaining = health.retryAfterUntil - Date.now();
     return remaining > 0 ? remaining : 0;
@@ -846,6 +957,14 @@ class EgressManager {
   }
 
   getCandidates({ includeQuota = true } = {}) {
+    if (config.get('rotating_proxy_enabled') === true && this.rotatingProxy) {
+      const routes = [this.rotatingProxy];
+      if (this._allowDirect() && !this.isAvailable(this.rotatingProxy)) {
+        routes.push({ type: 'direct', id: 'direct' });
+      }
+      return routes;
+    }
+
     const mode = String(config.get('egress_mode') || 'proxy_only').toLowerCase();
     const direct = { type: 'direct', id: 'direct' };
     const proxyRoutes = this.proxies.map(proxy => ({
@@ -878,6 +997,11 @@ class EgressManager {
    * only used when no proxy route is available at all.
    */
   getRoutableRoutes({ includeUnverified = false } = {}) {
+    if (config.get('rotating_proxy_enabled') === true && this.rotatingProxy) {
+      if (this.isAvailable(this.rotatingProxy)) return [this.rotatingProxy];
+      return this._allowDirect() ? [{ type: 'direct', id: 'direct' }] : [this.rotatingProxy];
+    }
+
     const candidates = this.getCandidates({ includeQuota: false });
     const proxies = candidates.filter(route => route.type !== 'direct');
     const pool = proxies.length > 0 ? proxies : candidates;
@@ -891,6 +1015,10 @@ class EgressManager {
    * request (and every quota hit) while the rest of the pool sits idle.
    */
   selectRoute(routes = null) {
+    if (config.get('rotating_proxy_enabled') === true && this.rotatingProxy) {
+      return this.rotatingProxy;
+    }
+
     const pool = Array.isArray(routes) ? routes : this.getRoutableRoutes();
     if (pool.length === 0) return null;
     const sorted = [...pool].sort((a, b) => {
@@ -907,6 +1035,10 @@ class EgressManager {
   }
 
   getNextRoutableRoute(attempted = null) {
+    if (config.get('rotating_proxy_enabled') === true && this.rotatingProxy) {
+      return this.rotatingProxy;
+    }
+
     const excluded = attempted instanceof Set ? attempted : new Set(attempted || []);
     const verified = this.getRoutableRoutes().filter(route => !excluded.has(route.id));
     if (verified.length > 0) {
@@ -915,7 +1047,10 @@ class EgressManager {
         const latB = this.proxyChecks.get(b.id)?.latency ?? b.latency ?? 0;
         return latA - latB;
       });
-      return verified[0];
+      // Distribute failovers across top-tier fast proxies instead of hammering only verified[0]
+      const topTier = verified.slice(0, Math.min(4, verified.length));
+      const idx = Math.floor(Math.random() * topTier.length);
+      return topTier[idx];
     }
     // Verified proxies may all have been attempted (for example after a quota
     // cooldown). Fall back to unchecked-but-available proxies rather than
@@ -928,7 +1063,9 @@ class EgressManager {
         const latB = this.proxyChecks.get(b.id)?.latency ?? b.latency ?? 0;
         return latA - latB;
       });
-      return unverified[0];
+      const topTier = unverified.slice(0, Math.min(4, unverified.length));
+      const idx = Math.floor(Math.random() * topTier.length);
+      return topTier[idx];
     }
     const candidates = this.getCandidates({ includeQuota: false });
     return candidates.find(route => route.type === 'direct' && !excluded.has(route.id)) || null;
@@ -945,8 +1082,30 @@ class EgressManager {
   getAgent(route, protocol = 'https:') {
     if (!route) return protocol === 'http:' ? this.directHttpAgent : this.directAgent;
     if (route.type === 'direct') return protocol === 'http:' ? this.directHttpAgent : this.directAgent;
-    if (route.type === 'proxy') return this._getProxyAgent(route);
+    if (route.type === 'proxy') {
+      if (route.isRotating) return this._getRotatingProxyAgent(route);
+      return this._getProxyAgent(route);
+    }
     return protocol === 'http:' ? this.directHttpAgent : this.directAgent;
+  }
+
+  _getRotatingProxyAgent(route) {
+    const key = `rotating_${route.id}_${route.rawUrl || route.url}`;
+    if (this.proxyAgents.has(key)) return this.proxyAgents.get(key);
+
+    const manager = this;
+    const agent = new https.Agent({
+      keepAlive: false, // Disables socket reuse so proxy provider assigns a new exit IP per connection
+      maxSockets: 64,
+      timeout: 30000
+    });
+
+    agent.createConnection = function (options, callback) {
+      manager._connectViaProxy(route, options, callback);
+    };
+
+    this.proxyAgents.set(key, agent);
+    return agent;
   }
 
   _getProxyAgent(route) {
@@ -1149,6 +1308,24 @@ class EgressManager {
     const health = this._health(route);
     const now = Date.now();
     health.lastFailure = now;
+
+    if (route.isRotating) {
+      if (kind === 'quota') {
+        // Upstream IP rate limit on a rotating proxy: THAT EXIT IP was rate-limited,
+        // but the proxy gateway itself is alive. Do NOT set retryAfterUntil!
+        health.lastError = 'exit ip quota (rotating)';
+        return;
+      }
+      if (kind === 'proxy_down') {
+        health.proxyFailures = (health.proxyFailures || 0) + 1;
+        const backoff = Math.min(10000, 2000 * Math.pow(2, Math.min(health.proxyFailures - 1, 3)));
+        health.openUntil = now + backoff;
+        health.lastError = 'rotating proxy gateway connection failed';
+        return;
+      }
+      health.lastError = String(kind || 'error');
+      return;
+    }
 
     if (kind === 'quota') {
       health.retryAfterUntil = Math.max(health.retryAfterUntil, now + Math.max(1000, retryAfterMs || 0));

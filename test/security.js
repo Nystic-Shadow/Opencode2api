@@ -83,7 +83,7 @@ const adminRoutes = require('../server/adminRoutes');
   const conf = config.getAll();
   assert.ok(conf.upstream_zen_key.length > 0);
 
-  const { maskProxy, restoreMaskedProxies } = adminRoutes._test;
+  const { maskProxy, restoreMaskedProxies, restoreSingleMaskedProxy } = adminRoutes._test;
   const existing = [
     'http://session-a:secret@gateway.example:7000',
     'http://session-b:secret@gateway.example:7000'
@@ -96,6 +96,13 @@ const adminRoutes = require('../server/adminRoutes');
     restoreMaskedProxies(['http://***:***@new.example:8080'], existing),
     ['http://***:***@new.example:8080']
   );
+
+  // Rotating single proxy mask & restore
+  const singleRotating = 'http://customer-xyz:topsecret@pr.oxylabs.io:7777';
+  const maskedSingle = maskProxy(singleRotating);
+  assert.ok(maskedSingle.includes('***') && !maskedSingle.includes('topsecret'));
+  assert.strictEqual(restoreSingleMaskedProxy(maskedSingle, singleRotating), singleRotating);
+  assert.strictEqual(restoreSingleMaskedProxy('http://newuser:newpass@pr.oxylabs.io:7777', singleRotating), 'http://newuser:newpass@pr.oxylabs.io:7777');
 
   // Clean up
   config.config.upstream_zen_key = '';

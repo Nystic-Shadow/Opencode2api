@@ -2,13 +2,13 @@
 
 ![OpenCode2API Banner](docs/banner.svg)
 
-# ⚡ OpenCode2API v3.0.0
+# ⚡ OpenCode2API v3.1.0
 
 ### High-Performance OpenAI & Anthropic Compatible Gateway for OpenCode Models
 
 > **Zero-config intelligent egress: discovers, verifies, latency-ranks, rotates, and prunes public HTTP/HTTPS routes with Bun TLS fingerprint synchronization, resilient proxy failover, and real-time SSE streaming.**
 
-[![Version](https://img.shields.io/badge/Version-v3.0.0-00E5FF.svg?style=for-the-badge&logo=semver&logoColor=white)](package.json)
+[![Version](https://img.shields.io/badge/Version-v3.1.0-00E5FF.svg?style=for-the-badge&logo=semver&logoColor=white)](package.json)
 [![Node.js](https://img.shields.io/badge/Node.js-20+-339933.svg?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Docker Compose](https://img.shields.io/badge/Docker_Compose-Ready-2496ED.svg?style=for-the-badge&logo=docker&logoColor=white)](docker-compose.yml)
 [![Egress](https://img.shields.io/badge/Egress-Latency--Ranked_US_Pool-FF6D00.svg?style=for-the-badge)](https://github.com/Nystic-Shadow/Opencode2api)
@@ -32,7 +32,7 @@
 - [Architecture & Upstream Quota Reality](#architecture--upstream-quota-reality)
   - [Residential ISP vs. Cloud Datacenter IPs](#residential-isp-vs-cloud-datacenter-ips)
   - [3 Ways to 100% Reliability](#3-ways-to-100-reliability)
-- [Key Features in v3.0.0](#key-features-in-v300)
+- [Key Features in v3.1.0](#key-features-in-v310)
 - [Discovered Models Roster](#discovered-models-roster)
 - [Quickstart: Local Installation (Recommended)](#quickstart-local-installation-recommended)
 - [Quickstart: Docker & Docker Compose](#quickstart-docker--docker-compose)
@@ -95,20 +95,25 @@ When public proxies from scraped lists are used on cloud servers (Dokploy, VPS, 
 
 Depending on your environment, you can achieve **100% zero-drop pass rates**:
 
-1. **Local Daemon (Zero Cost, 100% Free)**:
+1. **Dedicated Rotating Proxy (Single Endpoint)**:
+   Add a single rotating proxy endpoint (Webshare, Smartproxy, Oxylabs, BrightData, IPRoyal) under **Settings -> Rotating Proxy Gateway**. Each request exits through a different residential/mobile IP automatically, eliminating IP rate limits and avoiding 60s quota lockouts without maintaining proxy lists.
+2. **Local Daemon (Zero Cost, 100% Free)**:
    Running OpenCode2API on your local machine uses your personal broadband/residential IP. It bypasses Cloudflare datacenter blocks with 100% success rate across all models.
-2. **Upstream Zen Key (Recommended for Cloud VPS / Dokploy)**:
+3. **Upstream Zen Key (Recommended for Cloud VPS / Dokploy)**:
    Add your genuine OpenCode Zen Key / API key in Dashboard Settings or via `OPENCODE_ZEN_KEY` environment variable. Authenticated requests use `Bearer <key>`, completely bypassing anonymous IP quotas on any server.
-3. **Private / Residential Proxies**:
-   If hosting on a VPS without a Zen key, add dedicated residential proxy URLs (such as Webshare, BrightData, or IPRoyal) under **Proxy Egress -> Manual Proxies**.
+4. **Scraped / Manual US Proxy Pool**:
+   If hosting on a VPS without a Zen key or rotating proxy, enable automatic discovery or paste manual proxy URLs under **Proxy Egress -> Manual Proxies**.
 
 ---
 
-## Key Features in v3.0.0
+## Key Features in v3.1.0
 
-- 🧵 **Loopback Bun TLS Bridge**: OpenCode's upstream gate rejects Node.js TLS fingerprints. v3.0.0 launches an embedded Bun worker under `BUN_BE_BUN=1` using OpenCode CLI v2.1.4, matching upstream client fingerprints byte-for-byte.
+- 🔄 **Dedicated Rotating Proxy Support**: Add a single rotating proxy endpoint in the dashboard instead of managing multi-line lists. Auto-injects dynamic session identifiers and closes TCP keep-alive sockets per request, forcing fresh exit IPs and eliminating 429 quota lockouts.
+- ⚡ **Ultra-Strict 3s High-Throughput Scraper & 5x Verifier**: Hard 3000ms screening timeout, 5 consecutive verification checks, and parallelized multi-threaded screening (200 workers) and verification (60 workers) across high-yield public sources.
+- 🚀 **Instant Rate-Limit & Quota Switching**: Zero-latency proxy hopping on upstream 429 or quota limits without artificial delays or hangs. Individual proxy timeouts bounded to prevent client hanging.
+- 🧵 **Loopback Bun TLS Bridge**: OpenCode's upstream gate rejects Node.js TLS fingerprints. v3.1.0 launches an embedded Bun worker under `BUN_BE_BUN=1` using OpenCode CLI v2.1.4, matching upstream client fingerprints byte-for-byte.
 - ⚡ **Latency-Ranked Routing**: Active proxies are sorted dynamically by measured latency ascending; completions round-robin exclusively across the top 12 fastest routes.
-- 🛡️ **Pool-First Sequential Failover**: When a proxy hits an upstream rate limit, it cools down and immediately fails over to the next fastest proxy in the pool (up to 10 failovers) before attempting fallback.
+- 🛡️ **Pool-First Sequential Failover**: When a proxy hits an upstream rate limit, it cools down and immediately fails over to the next fastest proxy in the pool (up to 20 failovers) before attempting fallback.
 - 🌐 **13 US-Targeted Proxy Sources**: Continuously screens candidates targeting United States endpoints to eliminate `RegionError: This model is not available in your country` (403).
 - 🔄 **Bun Proxy Protocol Safety**: Enforces pure HTTP/HTTPS CONNECT tunneling across all scraped candidates, eliminating `UnsupportedProxyProtocol` crashes.
 - 📊 **No Synthetic Telemetry**: Real 60-second sliding-window RPM, TPM, latency, and token allocation calculations with detailed request audit logs.
@@ -314,6 +319,9 @@ Key environment variables in `.env`:
 | `DASHBOARD_USER` | `admin` | Admin dashboard username |
 | `DASHBOARD_PASS` | *Auto-generated* | Admin dashboard password (min 12 chars) |
 | `OPENCODE_ZEN_KEY` | `""` | Optional OpenCode Zen Key for paid/authenticated quota |
+| `ROTATING_PROXY_ENABLED` | `false` | Enable dedicated single rotating proxy mode |
+| `ROTATING_PROXY_URL` | `""` | Backconnect rotating proxy URL (`http://user:pass@host:port`) |
+| `ROTATING_PROXY_SESSION_MODE` | `auto` | Session rotation strategy (`auto`, `session_suffix`, `disabled`) |
 | `EGRESS_MODE` | `auto` | Egress mode (`auto`, `proxy_only`, `direct`) |
 | `ALLOW_DIRECT_FALLBACK` | `true` | Fallback to host egress if all proxies are exhausted |
 | `AUTO_PROXY_TARGET` | `100` | Target verified proxy pool size |

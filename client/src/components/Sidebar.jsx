@@ -49,7 +49,7 @@ export default function Sidebar({ activeTab, setActiveTab, cliVersion }) {
           </div>
           <div style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
             <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--accent)' }}></span>
-            CLI v{cliVersion || '2.1.4'} <span className="badge badge-success" style={{ padding: '0.1rem 0.35rem', fontSize: '0.62rem', marginLeft: '0.2rem' }}>v3.0.0</span>
+            CLI v{cliVersion || '2.1.4'} <span className="badge badge-success" style={{ padding: '0.1rem 0.35rem', fontSize: '0.62rem', marginLeft: '0.2rem' }}>v3.1.0</span>
           </div>
         </div>
       </div>

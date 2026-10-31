@@ -86,8 +86,20 @@ function buildProxyUrl(route) {
   const scheme = ['http', 'https', 'socks5', 'socks5h'].includes(route.proxyType)
     ? route.proxyType
     : 'http';
-  const auth = route.username
-    ? `${encodeURIComponent(route.username)}:${encodeURIComponent(route.password || '')}@`
+  let username = route.username || '';
+  const password = route.password || '';
+
+  if (route.isRotating || config.get('rotating_proxy_enabled')) {
+    const randId = crypto.randomBytes(4).toString('hex');
+    if (username.includes('{session}') || username.includes('{rand}')) {
+      username = username.replaceAll('{session}', randId).replaceAll('{rand}', randId);
+    } else if (config.get('rotating_proxy_session_mode') === 'session_suffix') {
+      username = username ? `${username}-session-${randId}` : `session-${randId}`;
+    }
+  }
+
+  const auth = username
+    ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`
     : '';
   const rawHost = String(route.host || '');
   const host = rawHost.includes(':') && !rawHost.startsWith('[') ? `[${rawHost}]` : rawHost;

@@ -110,12 +110,21 @@ const server = Bun.serve({
     }
 
     const proxy = decodeProxy(req.headers.get(PROXY_HEADER));
+    const forceRotate = req.headers.get('x-opencode2api-force-rotate') === '1';
+    const timeoutHeader = Number(req.headers.get('x-opencode2api-timeout-ms'));
+    const timeoutMs = (Number.isFinite(timeoutHeader) && timeoutHeader > 0) ? timeoutHeader : 15000;
+    const signal = (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+      ? AbortSignal.timeout(timeoutMs)
+      : undefined;
 
     try {
       const headers = plainHeaders(req.headers);
       // Ask for an uncompressed stream so the Node side can parse SSE without
       // depending on Bun's automatic decompression behaviour.
       headers.set('accept-encoding', 'identity');
+      if (forceRotate) {
+        headers.set('connection', 'close');
+      }
       if (!headers.has('authorization')) headers.set('authorization', 'Bearer public');
 
       const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
@@ -126,6 +135,7 @@ const server = Bun.serve({
         headers,
         body,
         redirect: 'manual',
+        ...(signal ? { signal } : {}),
         ...(proxy ? { proxy } : {})
       });
 

@@ -100,7 +100,7 @@ const DEFAULT_CONFIG = {
   global_tpm_limit: 0, // 0 = unlimited
   smart_fallback: process.env.SMART_FALLBACK !== 'false',
   max_retries: parseInt(process.env.MAX_RETRIES, 10) || 2, // hard-capped at 3 below
-  proxy_quota_failovers: parseInt(process.env.PROXY_QUOTA_FAILOVERS, 10) || 10,
+  proxy_quota_failovers: parseInt(process.env.PROXY_QUOTA_FAILOVERS, 10) || 20,
   proxy_check_interval_minutes: parseInt(process.env.PROXY_CHECK_INTERVAL_MINUTES, 10) || 30,
   proxy_auto_prune_dead: process.env.PROXY_AUTO_PRUNE_DEAD !== 'false',
   auto_proxy_discovery: process.env.AUTO_PROXY_DISCOVERY !== 'false',
@@ -115,6 +115,9 @@ const DEFAULT_CONFIG = {
   queue_wait_ms: parseInt(process.env.QUEUE_WAIT_MS, 10) || 15000,
   upstream_zen_key: process.env.OPENCODE_ZEN_KEY || '',
   proxies: process.env.PROXIES ? process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean) : [],
+  rotating_proxy_enabled: process.env.ROTATING_PROXY_ENABLED === 'true' || false,
+  rotating_proxy_url: process.env.ROTATING_PROXY_URL || '',
+  rotating_proxy_session_mode: process.env.ROTATING_PROXY_SESSION_MODE || 'auto',
   egress_mode: process.env.EGRESS_MODE || 'auto',
   allow_direct_fallback: process.env.ALLOW_DIRECT_FALLBACK !== 'false',
   upstream_models_url: 'https://opencode.ai/zen/v1/models',
@@ -224,6 +227,21 @@ class ConfigManager {
       if (process.env.PROXIES) {
         this.config.proxies = process.env.PROXIES.split(',').map(s => s.trim()).filter(Boolean);
       }
+      if (process.env.ROTATING_PROXY_ENABLED !== undefined) {
+        this.config.rotating_proxy_enabled = !/^(false|0|no|off)$/i.test(String(process.env.ROTATING_PROXY_ENABLED).trim());
+      } else {
+        this.config.rotating_proxy_enabled = !!this.config.rotating_proxy_enabled;
+      }
+      if (process.env.ROTATING_PROXY_URL !== undefined) {
+        this.config.rotating_proxy_url = process.env.ROTATING_PROXY_URL.trim();
+      } else {
+        this.config.rotating_proxy_url = String(this.config.rotating_proxy_url || '').trim();
+      }
+      if (process.env.ROTATING_PROXY_SESSION_MODE !== undefined) {
+        this.config.rotating_proxy_session_mode = process.env.ROTATING_PROXY_SESSION_MODE.trim();
+      } else {
+        this.config.rotating_proxy_session_mode = String(this.config.rotating_proxy_session_mode || 'auto').trim();
+      }
       if (process.env.ALLOW_DIRECT_FALLBACK !== undefined) {
         this.config.allow_direct_fallback = !/^(false|0|no|off)$/i.test(String(process.env.ALLOW_DIRECT_FALLBACK).trim());
       }
@@ -255,7 +273,7 @@ class ConfigManager {
       this.config.max_retries = Math.min(Math.max(0, parseInt(this.config.max_retries, 10) || 0), 3);
       this.config.proxy_quota_failovers = Math.min(
         20,
-        envOrConfigInt('PROXY_QUOTA_FAILOVERS', this.config.proxy_quota_failovers, 10, 0)
+        envOrConfigInt('PROXY_QUOTA_FAILOVERS', this.config.proxy_quota_failovers, 20, 0)
       );
       this.config.proxy_check_interval_minutes = Math.min(
         1440,

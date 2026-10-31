@@ -1191,10 +1191,11 @@ async function main() {
       assert.strictEqual(egress.isAvailable(selected), true, 'rotating proxy must remain available after transport failure');
 
       // Crucial: Smart session rotation
-      const s1 = egress.applyRotatingSession('rotate-user', 'auto');
+      assert.strictEqual(egress.applyRotatingSession('rotate-user', 'auto'), 'rotate-user', 'auto mode preserves credentials for port-based proxies');
+      const s1 = egress.applyRotatingSession('rotate-user', 'session_suffix');
       assert.ok(/^rotate-user-session-[0-9a-f]{8}$/.test(s1), 'must append session suffix');
       const s2 = egress.applyRotatingSession(s1, 'auto');
-      assert.ok(/^rotate-user-session-[0-9a-f]{8}$/.test(s2) && s2 !== s1, 'must rotate session ID on subsequent calls');
+      assert.ok(/^rotate-user-session-[0-9a-f]{8}$/.test(s2) && s2 !== s1, 'must rotate existing session ID on subsequent calls');
       assert.strictEqual(egress.applyRotatingSession('rotate-user', 'disabled'), 'rotate-user', 'disabled mode leaves username intact');
 
       // Crucial: Rotating proxy must never be pruned

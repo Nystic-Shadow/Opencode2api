@@ -32,7 +32,8 @@ function tlsServername(name) {
 }
 
 function applyRotatingSession(username, sessionMode = 'auto') {
-  if (sessionMode === 'disabled' || sessionMode === 'raw') return username || '';
+  if (!username) return '';
+  if (sessionMode === 'disabled' || sessionMode === 'raw') return username;
   const randId = crypto.randomBytes(4).toString('hex');
   let user = String(username || '');
   if (user.includes('{session}') || user.includes('{rand}')) {
@@ -42,7 +43,10 @@ function applyRotatingSession(username, sessionMode = 'auto') {
   if (/([-:_]session[-:_])[a-zA-Z0-9]+/i.test(user)) {
     return user.replace(/([-_:]session[-:_])[a-zA-Z0-9]+/i, `$1${randId}`);
   }
-  return user ? `${user}-session-${randId}` : `session-${randId}`;
+  if (sessionMode === 'session_suffix') {
+    return `${user}-session-${randId}`;
+  }
+  return user;
 }
 
 function parseProxyUrl(raw) {

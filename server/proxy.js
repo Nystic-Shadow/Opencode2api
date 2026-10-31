@@ -509,9 +509,8 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     let upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const routeKey = activeRoute.id;
 
-    const session = persistentSessions.getOrCreate(keyObj?.id || 'anonymous', routeKey);
-    const sessionId = (attempt === 1) ? session.sessionId : identity.generateCanonicalSessionId();
-    const projectId = (attempt === 1) ? session.projectId : identity.generateProjectId();
+    const sessionId = identity.generateCanonicalSessionId();
+    const projectId = identity.generateProjectId();
 
     // Admission control: bound concurrent upstream requests per gateway and per API key.
     const releaseSlot = await requestQueue.acquire(keyObj?.id || 'anonymous', Math.min(queueWaitMs, remainingMs));
@@ -1056,23 +1055,9 @@ async function handleChatCompletions(clientPayload, req, res, keyObj) {
     if (failureKind === 'quota') {
       const isRotating = (activeRoute && activeRoute.isRotating) || config.get('rotating_proxy_enabled') === true;
       if (isRotating) {
-        persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
-        rotatingQuotaHits[currentModel] = (rotatingQuotaHits[currentModel] || 0) + 1;
-
-        if (config.get('smart_fallback') !== false && isRequestedFree && rotatingQuotaHits[currentModel] >= 3 && Date.now() < deadline) {
-          const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
-          if (fallback) {
-            console.warn(`[Proxy] Model ${currentModel} returned 3 consecutive quota limits on rotating proxy; smart fallback to ${fallback}...`);
-            currentModel = fallback;
-            upstreamModel = discovery.resolveUpstreamModel(currentModel);
-            triedModels.add(fallback);
-            continue;
-          }
-        }
-
         if (quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
           quotaFailovers++;
-          console.warn(`[Proxy] Upstream 429 rate limit on rotating proxy exit IP for ${currentModel}; immediately rotating exit IP & session, retrying (${quotaFailovers}/${quotaFailoverLimit})...`);
+          console.warn(`[Proxy] Upstream 429 rate limit on rotating proxy exit IP for ${currentModel}; immediately rotating exit IP & retrying (${quotaFailovers}/${quotaFailoverLimit})...`);
           continue;
         }
       }
@@ -1470,9 +1455,8 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     let upstreamModel = discovery.resolveUpstreamModel(currentModel);
     const routeKey = activeRoute.id;
 
-    const session = persistentSessions.getOrCreate(keyObj?.id || 'anonymous', routeKey);
-    const sessionId = (attempt === 1) ? session.sessionId : identity.generateCanonicalSessionId();
-    const projectId = (attempt === 1) ? session.projectId : identity.generateProjectId();
+    const sessionId = identity.generateCanonicalSessionId();
+    const projectId = identity.generateProjectId();
 
     const releaseSlot = await requestQueue.acquire(keyObj?.id || 'anonymous', Math.min(queueWaitMs, remainingMs));
     if (!releaseSlot) {
@@ -2113,23 +2097,9 @@ async function handleAnthropicMessages(clientPayload, req, res, keyObj) {
     if (failureKind === 'quota') {
       const isRotating = (activeRoute && activeRoute.isRotating) || config.get('rotating_proxy_enabled') === true;
       if (isRotating) {
-        persistentSessions.rotate(keyObj?.id || 'anonymous', routeKey);
-        rotatingQuotaHits[currentModel] = (rotatingQuotaHits[currentModel] || 0) + 1;
-
-        if (config.get('smart_fallback') !== false && isRequestedFree && rotatingQuotaHits[currentModel] >= 3 && Date.now() < deadline) {
-          const fallback = discovery.getNextFallbackModel(currentModel, triedModels);
-          if (fallback) {
-            console.warn(`[Proxy] Model ${currentModel} returned 3 consecutive quota limits on rotating proxy; smart fallback to ${fallback}...`);
-            currentModel = fallback;
-            upstreamModel = discovery.resolveUpstreamModel(currentModel);
-            triedModels.add(fallback);
-            continue;
-          }
-        }
-
         if (quotaFailovers < quotaFailoverLimit && Date.now() < deadline) {
           quotaFailovers++;
-          console.warn(`[Proxy] Upstream 429 rate limit on rotating proxy exit IP for ${currentModel}; immediately rotating exit IP & session, retrying (${quotaFailovers}/${quotaFailoverLimit})...`);
+          console.warn(`[Proxy] Upstream 429 rate limit on rotating proxy exit IP for ${currentModel}; immediately rotating exit IP & retrying (${quotaFailovers}/${quotaFailoverLimit})...`);
           continue;
         }
       }

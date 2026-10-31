@@ -753,13 +753,14 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                   value={rotatingProxySessionMode}
                   onChange={setRotatingProxySessionMode}
                   options={[
-                    { value: 'auto', label: 'Auto (Smart Session Injection - Appends & rotates session per request - Recommended)' },
-                    { value: 'custom', label: 'Custom ({session} or {rand} placeholder in proxy username)' },
-                    { value: 'disabled', label: 'Disabled (Raw credentials - for static or IP-locked proxies)' }
+                    { value: 'auto', label: 'Auto (Exact credentials - Best for Webshare, port-based & IP-whitelisted proxies)' },
+                    { value: 'session_suffix', label: 'Append Session Suffix (-session-<rand> - Best for Smartproxy, Bright Data, Oxylabs)' },
+                    { value: 'custom', label: 'Custom (Replaces {session} or {rand} token in username)' },
+                    { value: 'disabled', label: 'Disabled (Raw credentials)' }
                   ]}
                 />
                 <span style={{ fontSize: '0.68rem', color: 'var(--muted-foreground)', marginTop: '0.2rem', display: 'block' }}>
-                  Ensures each outbound connection exits through a new IP address so OpenCode upstream rate limits are never triggered.
+                  Use "Auto" for standard backconnect ports (Webshare) or "Session Suffix" for residential providers (Smartproxy, Bright Data) that rotate via username suffix.
                 </span>
               </div>
             </div>

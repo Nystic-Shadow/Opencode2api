@@ -103,9 +103,6 @@ function buildUpstreamHeaders(sessionId, projectId, payloadLength) {
     'x-opencode-client': 'cli',
     'x-opencode-version': clientVersion,
     'x-opencode-session': sessionId,
-    'x-opencode-session-id': sessionId,
-    'x-session-affinity': sessionId,
-    'X-Session-Id': sessionId,
     'x-opencode-project': projectId || 'global',
     'Content-Length': payloadLength
   };

@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [3.2.1] - 2026-10-31 — Model Fidelity Guarantee, Clean Upstream Session Minting, and Port-Based Rotating Proxy Auth Parity
+
+### 🎯 Model Fidelity Guarantee (No Unwanted Model Fallback)
+- **Strict Model Preservation**: Removed model-switching fallbacks from the proxy retry and quota failover loops across both OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`) handlers. When a user requests `big-pickle`, the gateway strictly stays on `big-pickle` across all proxy failovers and retries without ever silently altering the requested model.
+
+### 🧹 Upstream Session Affinity Bleed Elimination
+- **Removed Cloudflare Session-Pinning Headers**: Stripped non-standard headers (`x-session-affinity`, `X-Session-Id`, `x-opencode-session-id`) that caused Cloudflare Edge to pin incoming requests to previously exhausted rate-limit buckets.
+- **Fresh Canonical Session Minting**: Each inference request now mints a fresh canonical `sessionId` and `projectId` per attempt, preventing rate-limit state from bleeding across unrelated chats or subsequent requests.
+
+### 🔄 Port-Based Rotating Proxy Auth Parity
+- **Preserved Raw Credentials in `auto` Mode**: Port-based rotating proxies (Webshare, Proxy-Cheap, StormProxies) rotate exit IPs on every new connection and reject mutated usernames. In `auto` mode, credentials are now preserved as-is to eliminate `407 Proxy Authentication Required` and socket timeouts, while `session_suffix` mode remains available for residential providers (Smartproxy, Bright Data) that rotate via username suffix.
+
+---
+
 ## [3.2.0] - 2026-10-31 — Universal Rotating Proxy Session Injection, Instant Smart Fallback, and Resilient Gateway Availability
 
 ### 🔄 Universal Rotating Proxy Smart Session Injection

@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [3.2.4] - 2026-11-01 — Bun FetchSession Proxy Tunnel Routing Fix, Subprocess Log Streaming & 1-Click Rotating Proxy Activation
+
+### 🐛 Critical Proxy Tunnel Routing Fix in Bun Bridge
+- **Passed Proxy Directly to `Bun.FetchSession` Constructor**: Fixed the critical root cause of 0% success rate where `new Bun.FetchSession()` was instantiated with empty arguments. In Bun, constructing a `FetchSession` without `{ proxy }` initializes a direct connection pool that completely ignores `options.proxy` on subsequent `session.fetch()` calls. This caused 100% of outbound requests to bypass all proxies and exit directly via Dokploy's VPS host IP (which was 429 quota-locked). Now, `new Bun.FetchSession({ proxy: { url: proxy, respectNoProxy: false } })` binds the proxy directly into the isolated session pool.
+- **Enforced Strict Protocol Validation**: Prevented silent direct host leaks when an unsupported proxy protocol (such as SOCKS5, which Bun's native `fetch` does not support for official upstream) is requested. If a proxy header is supplied by Node but unsupported by Bun, the bridge fails fast with `proxy_transport_error` rather than leaking unproxied traffic.
+- **Enhanced Bun Subprocess Observability**: Forwarded child stdout and stderr in `server/bunBridge.js` with `[BunProxy]` and `[BunProxy:err]` prefixes so all outbound hops, proxies used, and upstream HTTP response codes are directly streamed into the gateway console and Dokploy container logs.
+
+### ⚡ 1-Click Rotating Proxy Activation & Top Save Bar in Dashboard
+- **Instant "Save & Activate" Button**: Added a dedicated "Save & Activate" button directly inside the Rotating Proxy card in the Settings dashboard, backed by a fast `/api/proxies/save-rotating` endpoint. Operators no longer need to scroll down 900 lines to the bottom of the page to save their rotating proxy URL.
+- **1-Click Activation on Successful Test**: When "Test Connection" succeeds in the dashboard, the success banner now provides a one-click "Activate Now" button.
+- **Top Sticky Action Bar**: Added a prominent "Save Settings" button at the very top of the Settings page so adjustments can be committed instantly from any section.
+- **Clear Protocol Guidance**: Updated descriptions and error messages to inform operators that OpenCode Zen official upstream requires HTTP/HTTPS tunneling (`http://user:pass@host:port` or `host:port:user:pass`).
+
+---
+
 ## [3.2.3] - 2026-10-31 — Model Fallback Lockdown, Direct Egress Quota Lockout Protection, Universal Proxy Parser & Shared IP Pool Optimization
 
 ### 🎯 Model Fallback Lockdown ("Fallback Not On Model")

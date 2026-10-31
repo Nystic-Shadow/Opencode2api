@@ -453,15 +453,31 @@ class BunBridge {
     if (child.stdout) {
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk) => {
-        if (String(chunk).includes('BUN_BRIDGE_READY')) {
+        const text = String(chunk || '');
+        if (text.includes('BUN_BRIDGE_READY')) {
           // The health probe decides readiness; this is just a useful trace.
           console.log(`[BunBridge] Bridge process reported ready on 127.0.0.1:${port}.`);
+        }
+        for (const line of text.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (trimmed && !trimmed.includes('BUN_BRIDGE_READY')) {
+            console.log(`[BunProxy] ${trimmed}`);
+          }
         }
       });
     }
     if (child.stderr) {
       child.stderr.setEncoding('utf8');
-      child.stderr.on('data', (chunk) => this._recordStderr(chunk));
+      child.stderr.on('data', (chunk) => {
+        this._recordStderr(chunk);
+        const text = String(chunk || '');
+        for (const line of text.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (trimmed) {
+            console.error(`[BunProxy:err] ${trimmed}`);
+          }
+        }
+      });
     }
 
     const exited = new Promise((resolve) => {

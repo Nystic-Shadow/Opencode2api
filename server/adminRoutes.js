@@ -392,7 +392,12 @@ async function handleAdminRoute(req, res, pathname) {
         const parsed = egress.parseProxyUrl(incomingUrl);
         if (!parsed) {
           return sendJson(res, 400, {
-            error: `Invalid rotating proxy URL: ${maskProxy(incomingUrl)}. Use http://, https://, or socks5:// with optional credentials.`
+            error: `Invalid rotating proxy URL: ${maskProxy(incomingUrl)}. Use http://, https://, or host:port:user:pass with optional credentials.`
+          });
+        }
+        if (parsed.type === 'socks5' && bunBridge.isRequired()) {
+          return sendJson(res, 400, {
+            error: 'Bun TLS bridge for OpenCode Zen requires HTTP or HTTPS proxy tunneling (SOCKS5 is unsupported by Bun runtime). Please use http:// (e.g. http://user:pass@host:port or host:port:user:pass).'
           });
         }
       }
@@ -533,6 +538,51 @@ async function handleAdminRoute(req, res, pathname) {
     }
     const testResult = await egress.testRotatingProxy(urlToTest);
     return sendJson(res, 200, testResult);
+  }
+
+  // Fast Save & Apply Rotating Proxy directly from card
+  if (pathname === '/api/proxies/save-rotating' && req.method === 'POST') {
+    const body = await parseBody(req);
+    let incomingUrl = String(body.url || '').trim();
+    const existingUrl = config.get('rotating_proxy_url') || '';
+    if (incomingUrl.includes('***')) {
+      incomingUrl = restoreSingleMaskedProxy(incomingUrl, existingUrl);
+    }
+    if (!incomingUrl) {
+      incomingUrl = existingUrl;
+    }
+    if (!incomingUrl) {
+      return sendJson(res, 400, { error: 'Please enter a rotating proxy URL before saving.' });
+    }
+    const parsed = egress.parseProxyUrl(incomingUrl);
+    if (!parsed) {
+      return sendJson(res, 400, {
+        error: `Invalid rotating proxy URL: ${maskProxy(incomingUrl)}. Use http://user:pass@host:port or host:port:user:pass.`
+      });
+    }
+    if (parsed.type === 'socks5' && bunBridge.isRequired()) {
+      return sendJson(res, 400, {
+        error: 'Bun TLS bridge requires HTTP/HTTPS proxies. SOCKS5 is not supported by Bun runtime for official OpenCode upstream.'
+      });
+    }
+
+    const enabled = body.enabled !== undefined ? Boolean(body.enabled) : true;
+    const sessionMode = String(body.session_mode || 'auto').trim();
+
+    config.update({
+      rotating_proxy_enabled: enabled,
+      rotating_proxy_url: incomingUrl,
+      rotating_proxy_session_mode: sessionMode
+    });
+
+    notifications.add('Rotating Proxy Active', `Single rotating gateway saved and activated (${maskProxy(incomingUrl)}).`, 'info');
+    return sendJson(res, 200, {
+      success: true,
+      enabled,
+      url: maskProxy(incomingUrl),
+      session_mode: sessionMode,
+      ...egress.getProxyStatus()
+    });
   }
 
   // Settings: Check CLI Update

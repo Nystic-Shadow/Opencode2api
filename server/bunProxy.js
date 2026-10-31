@@ -109,11 +109,23 @@ const server = Bun.serve({
       return jsonResponse(401, { error: { type: 'unauthorized', message: 'Invalid bridge token' } });
     }
 
-    const proxy = decodeProxy(req.headers.get(PROXY_HEADER));
+    const rawProxyHeader = req.headers.get(PROXY_HEADER);
+    const proxy = decodeProxy(rawProxyHeader);
     const forceRotate = req.headers.get('x-opencode2api-force-rotate') === '1';
     const timeoutHeader = Number(req.headers.get('x-opencode2api-timeout-ms'));
     // Generous default stream deadline (90s); Node enforces connect timeout via attemptTimeout
     const timeoutMs = (Number.isFinite(timeoutHeader) && timeoutHeader > 0) ? timeoutHeader : 90000;
+
+    // If Node dispatched via a proxy route but the protocol is not supported by Bun (e.g. SOCKS5),
+    // we must reject with proxy_transport_error instead of silently leaking out the VPS host IP!
+    if (rawProxyHeader && !proxy) {
+      return jsonResponse(502, {
+        error: {
+          type: 'proxy_transport_error',
+          message: 'Proxy protocol not supported by Bun TLS bridge. Use HTTP or HTTPS proxies.'
+        }
+      }, { [ERROR_HEADER]: 'proxy' });
+    }
 
     let signal;
     if (typeof AbortSignal !== 'undefined') {
@@ -127,9 +139,31 @@ const server = Bun.serve({
 
     // Isolated FetchSession for proxy & rotating requests guarantees zero TCP connection pooling
     // across route failovers, ensuring rotating proxies always connect fresh and exit via new IPs.
-    const useSession = Boolean(proxy || forceRotate) && typeof Bun.FetchSession === 'function';
-    const session = useSession ? new Bun.FetchSession() : null;
-    const fetchFn = session ? session.fetch.bind(session) : fetch;
+    // In Bun, proxy configuration MUST be passed into the Bun.FetchSession constructor so the
+    // isolated connection pool establishes tunnels through the proxy rather than using direct host egress.
+    let session = null;
+    let fetchFn = fetch;
+
+    if (typeof Bun.FetchSession === 'function') {
+      try {
+        if (proxy) {
+          try {
+            session = new Bun.FetchSession({
+              proxy: { url: proxy, respectNoProxy: false }
+            });
+          } catch (e1) {
+            session = new Bun.FetchSession({ proxy });
+          }
+        } else {
+          session = new Bun.FetchSession();
+        }
+        fetchFn = session.fetch.bind(session);
+      } catch (err) {
+        console.error(`[bun-bridge] Bun.FetchSession initialization fallback: ${err?.message || err}`);
+        session = null;
+        fetchFn = fetch;
+      }
+    }
 
     try {
       const headers = plainHeaders(req.headers);
@@ -145,6 +179,9 @@ const server = Bun.serve({
       const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
       const body = hasBody ? Buffer.from(await req.arrayBuffer()) : undefined;
 
+      const maskedProxy = proxy ? proxy.replace(/:[^:@]+@/, ':***@') : 'direct';
+      console.log(`[bun-bridge] Outbound ${req.method} ${url.pathname} via ${maskedProxy} (session: ${session ? 'isolated' : 'global'})`);
+
       const upstream = await fetchFn(`${UPSTREAM_ORIGIN}${url.pathname}${url.search}`, {
         method: req.method,
         headers,
@@ -153,6 +190,8 @@ const server = Bun.serve({
         ...(signal ? { signal } : {}),
         ...(proxy ? { proxy } : {})
       });
+
+      console.log(`[bun-bridge] Upstream response: ${upstream.status} ${upstream.statusText} via ${maskedProxy}`);
 
       const responseHeaders = plainHeaders(upstream.headers);
       responseHeaders.set(BRIDGE_HEADER, '1');

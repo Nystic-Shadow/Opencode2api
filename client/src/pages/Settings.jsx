@@ -32,6 +32,7 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
   const [rotatingProxyUrl, setRotatingProxyUrl] = useState(settings.rotating_proxy_url || '');
   const [rotatingProxySessionMode, setRotatingProxySessionMode] = useState(settings.rotating_proxy_session_mode || 'auto');
   const [isTestingRotating, setIsTestingRotating] = useState(false);
+  const [isSavingRotating, setIsSavingRotating] = useState(false);
   const [rotatingTestResult, setRotatingTestResult] = useState(null);
   const [isScrapingNow, setIsScrapingNow] = useState(false);
   const [globalRpm, setGlobalRpm] = useState(settings.global_rpm_limit || 0);
@@ -102,6 +103,50 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
       setRotatingTestResult({ ok: false, message: `Test error: ${e.message}` });
     } finally {
       setIsTestingRotating(false);
+    }
+  };
+
+  const handleSaveRotatingProxyDirect = async () => {
+    if (!rotatingProxyUrl.trim()) {
+      alert('Please enter a rotating proxy URL before saving.');
+      return;
+    }
+    setIsSavingRotating(true);
+    try {
+      const token = localStorage.getItem('o2p_token');
+      const res = await fetch('/api/proxies/save-rotating', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({
+          url: rotatingProxyUrl.trim(),
+          enabled: true,
+          session_mode: rotatingProxySessionMode
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save rotating proxy');
+      setRotatingProxyEnabled(true);
+      setRotatingTestResult({
+        ok: true,
+        message: 'Rotating Proxy saved & actively routing all gateway egress!'
+      });
+      setProxyStatus(prev => ({
+        ...prev,
+        rotatingProxy: {
+          enabled: true,
+          url: data.url || rotatingProxyUrl,
+          available: true,
+          healthy: true,
+          sessionMode: rotatingProxySessionMode
+        }
+      }));
+    } catch (e) {
+      alert('Save Rotating Proxy failed: ' + e.message);
+    } finally {
+      setIsSavingRotating(false);
     }
   };
 
@@ -224,6 +269,31 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', maxWidth: '720px' }}>
+      {/* Top Action Bar */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', paddingBottom: '0.5rem', borderBottom: '1px solid var(--border)' }}>
+        <div>
+          <h2 style={{ fontSize: '1.25rem', fontWeight: '700', margin: 0 }}>Gateway Settings</h2>
+          <p style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)', margin: '0.2rem 0 0' }}>
+            Configure proxy routing, upstream CLI fingerprint, and concurrency limits.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={handleSubmit}
+          disabled={isSaving}
+          className="btn btn-primary"
+          style={{ padding: '0.5rem 1.25rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+        >
+          {saveSuccess ? (
+            <>
+              <FiCheck size={15} /> Saved!
+            </>
+          ) : (
+            isSaving ? 'Saving...' : 'Save Settings'
+          )}
+        </button>
+      </div>
+
       {/* CLI Fingerprint & Auto-Update Card */}
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
@@ -722,11 +792,11 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                 <label style={{ fontSize: '0.78rem', fontWeight: '600', display: 'block', marginBottom: '0.3rem' }}>
                   Rotating Proxy URL (Single Endpoint)
                 </label>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                   <input
                     type="text"
                     className="input-field"
-                    style={{ flex: 1, fontFamily: 'monospace', fontSize: '0.82rem' }}
+                    style={{ flex: 1, minWidth: '220px', fontFamily: 'monospace', fontSize: '0.82rem' }}
                     placeholder="http://username:password@gate.smartproxy.com:7000 or host:port:username:password"
                     value={rotatingProxyUrl}
                     onChange={e => {
@@ -743,9 +813,18 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                   >
                     {isTestingRotating ? 'Testing...' : 'Test Connection'}
                   </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveRotatingProxyDirect}
+                    disabled={isSavingRotating || !rotatingProxyUrl}
+                    className="btn btn-primary"
+                    style={{ whiteSpace: 'nowrap', fontSize: '0.78rem', padding: '0.4rem 0.85rem', backgroundColor: '#6366f1', borderColor: '#4f46e5', color: '#fff' }}
+                  >
+                    {isSavingRotating ? 'Activating...' : 'Save & Activate'}
+                  </button>
                 </div>
                 <span style={{ fontSize: '0.7rem', color: 'var(--muted-foreground)', marginTop: '0.25rem', display: 'block' }}>
-                  Supported formats: <code>http://user:pass@host:port</code>, <code>host:port:user:pass</code>, <code>socks5://...</code>, or <code>https://...</code>. Credentials are automatically masked and encrypted.
+                  Supported formats: <code>http://user:pass@host:port</code> or <code>host:port:user:pass</code>. (Note: OpenCode Zen official upstream requires HTTP/HTTPS tunneling). Credentials are automatically masked and encrypted.
                 </span>
               </div>
 
@@ -756,9 +835,25 @@ export default function Settings({ settings = {}, onSaveSettings, onCheckUpdate,
                   fontSize: '0.78rem',
                   backgroundColor: rotatingTestResult.ok ? 'rgba(47, 188, 91, 0.1)' : 'rgba(224, 85, 85, 0.1)',
                   borderLeft: `3px solid ${rotatingTestResult.ok ? '#2fbc5b' : '#e05555'}`,
-                  color: rotatingTestResult.ok ? '#2fbc5b' : '#e05555'
+                  color: rotatingTestResult.ok ? '#2fbc5b' : '#e05555',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  flexWrap: 'wrap'
                 }}>
-                  {rotatingTestResult.message}
+                  <span>{rotatingTestResult.message}</span>
+                  {rotatingTestResult.ok && !rotatingProxyEnabled && (
+                    <button
+                      type="button"
+                      onClick={handleSaveRotatingProxyDirect}
+                      disabled={isSavingRotating}
+                      className="btn btn-primary"
+                      style={{ fontSize: '0.72rem', padding: '0.25rem 0.6rem', backgroundColor: '#2fbc5b', borderColor: '#2fbc5b', color: '#fff' }}
+                    >
+                      {isSavingRotating ? 'Activating...' : 'Activate Now'}
+                    </button>
+                  )}
                 </div>
               )}
 
